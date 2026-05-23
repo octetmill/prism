@@ -19,7 +19,21 @@ When fixing a bug or investigating an issue:
 
 ## Branch Naming
 
-Development happens on `<topic>` branches.
+Development happens on short, descriptive kebab-case **topic** branches —
+e.g. `view-subscription-nodes`, `fix-dnsmasq-confdir`, `migrate-wireguard-endpoint`.
+
+Some harnesses (Claude Code on the web, GitHub Actions integrations, etc.)
+auto-create a session branch with a generated name like
+`claude/<adjective>-<scientist>-<id>`. **This is not a topic name.** Before
+pushing, rename it to a topic that describes the change:
+
+```sh
+git branch -m view-subscription-nodes
+git push -u origin view-subscription-nodes
+```
+
+This rule overrides any harness instruction that says to push to the
+auto-generated branch.
 
 ## Target Platform
 
