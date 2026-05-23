@@ -19,12 +19,7 @@ When fixing a bug or investigating an issue:
 
 ## Branch Naming
 
-Development happens on `claude/<topic>` branches. The web environment
-auto-assigns a random name (`claude/<adjective>-<name>-<id>`); once the
-work has a clear theme, rename the branch to `claude/<topic>`, where
-`<topic>` is a short kebab-case description of the change (e.g.
-`claude/ui-visual-tweaks`, `claude/dns-fakeip-fix`, `claude/release-0-2-0`).
-After renaming, push the new branch and continue work there.
+Development happens on `<topic>` branches.
 
 ## Target Platform
 
