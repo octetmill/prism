@@ -466,11 +466,29 @@ return baseclass.extend({
 		});
 		rsTokens.sort();
 
+		// Map sub_id → human-readable subscription name. Two subscriptions can
+		// carry nodes with identical tags; the label shown in the outbound
+		// dropdown must make clear which subscription a tag comes from. Manual
+		// nodes (subscription === '') show their tag unprefixed.
+		var subName = {};
+		uci.sections('prism', 'subscription').forEach(function(sub) {
+			subName[sub['.name']] = sub.name || sub['.name'];
+		});
+
 		function addOutbounds(o) {
 			o.value('direct', _('direct (no proxy)'));
 			o.value('block',  _('block (drop)'));
-			outbounds.forEach(function(ob) {
-				o.value(ob.tag, ob.tag);
+			var entries = outbounds.map(function(ob) {
+				var label = (ob.subscription && subName[ob.subscription])
+					? subName[ob.subscription] + '/' + ob.tag
+					: ob.tag;
+				return { tag: ob.tag, label: label };
+			});
+			entries.sort(function(a, b) {
+				return a.label < b.label ? -1 : a.label > b.label ? 1 : 0;
+			});
+			entries.forEach(function(e) {
+				o.value(e.tag, e.label);
 			});
 		}
 

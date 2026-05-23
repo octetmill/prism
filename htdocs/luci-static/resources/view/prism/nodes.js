@@ -46,20 +46,43 @@ return baseclass.extend({
 		var outbounds = (data && data[1] && Array.isArray(data[1].outbounds))
 			? data[1].outbounds : [];
 
+		// Map sub_id → human-readable subscription name for label disambiguation.
+		// Two subscriptions can carry nodes with identical tags; sing-box itself
+		// dedupes by tag (first-seen wins, with manual overriding), but the
+		// label shown to the user must make clear which subscription a tag
+		// comes from.
+		var subName = {};
+		uci.sections('prism', 'subscription').forEach(function(sub) {
+			subName[sub['.name']] = sub.name || sub['.name'];
+		});
+		function labelFor(tag, sub_id) {
+			if (sub_id && subName[sub_id])
+				return subName[sub_id] + '/' + tag;
+			return tag;
+		}
+
 		// URLTest member candidates: live outbounds plus any tag already
 		// stored on an existing urltest node, so a saved member whose node
 		// was removed still shows rather than being silently dropped.
-		var memberTags = {};
+		var memberByTag = {};
 		outbounds.forEach(function(ob) {
-			if (ob && ob.tag) memberTags[ob.tag] = true;
+			if (ob && ob.tag)
+				memberByTag[ob.tag] = labelFor(ob.tag, ob.subscription);
 		});
 		uci.sections('prism', 'node').forEach(function(n) {
 			var obs = n.urltest_outbounds;
 			if (!Array.isArray(obs))
 				obs = obs ? String(obs).split(/[,\s]+/) : [];
-			obs.forEach(function(t) { if (t) memberTags[t] = true; });
+			obs.forEach(function(t) {
+				if (t && !memberByTag[t]) memberByTag[t] = t;
+			});
 		});
-		var memberList = Object.keys(memberTags).sort();
+		var memberList = Object.keys(memberByTag).map(function(tag) {
+			return { tag: tag, label: memberByTag[tag] };
+		});
+		memberList.sort(function(a, b) {
+			return a.label < b.label ? -1 : a.label > b.label ? 1 : 0;
+		});
 
 		var m = new form.Map('prism');
 		var s = m.section(form.GridSection, 'node', _('Nodes'),
@@ -278,7 +301,7 @@ return baseclass.extend({
 		// 'select' renders a ui.Dropdown multi-select: checkboxes plus a
 		// built-in filter field inside the opened dropdown panel.
 		o.widget = 'select';
-		memberList.forEach(function(t) { o.value(t, t); });
+		memberList.forEach(function(m) { o.value(m.tag, m.label); });
 		o.modalonly = true;
 		o.depends({ type: 'urltest', urltest_mode: 'manual' });
 
