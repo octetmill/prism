@@ -553,7 +553,7 @@ return baseclass.extend({
 		// Grid column only (modalonly === false): a read-only summary of the
 		// rule's conditions. Kept out of the modal — the ConditionList editor
 		// there already renders its own live preview.
-		var oMatch = s.option(form.DummyValue, '_match', _('Destination'));
+		var oMatch = s.option(form.DummyValue, '_match', _('Conditions'));
 		oMatch.modalonly = false;
 		oMatch.cfgvalue = function(section_id) {
 			return ruleSummary(section_id);
