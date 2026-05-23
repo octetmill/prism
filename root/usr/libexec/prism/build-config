@@ -1,0 +1,1326 @@
+#!/usr/bin/env lua
+-- SPDX-License-Identifier: GPL-3.0-only
+-- Copyright (C) 2026 OctetMill
+
+-- build-config: assembles the sing-box JSON config from Prism's UCI state
+-- and per-subscription node files in /etc/prism/nodes/, then writes it to
+-- the path passed as $1 (falling back to prism.global.config_path, then
+-- /var/etc/prism/sing-box.json).
+--
+-- This is the single piece that translates Prism's source-of-truth (UCI +
+-- /etc/prism/nodes/*.json) into something sing-box can consume. Procd's
+-- start_service calls this script before exec'ing sing-box, and the rpcd
+-- get_config method calls it to build a preview.
+--
+-- A user-merge slot at /etc/prism/extra.json (top-level JSON object) is
+-- shallow-merged into the generated config so power users can override or
+-- inject keys without having to re-implement the whole pipeline.
+
+local jsonc_ok, jsonc = pcall(require, "luci.jsonc")
+if not jsonc_ok then
+	io.stderr:write("prism build-config: luci.jsonc not available\n")
+	os.exit(1)
+end
+
+local uci_ok, uci_mod = pcall(require, "uci")
+if not uci_ok then
+	io.stderr:write("prism build-config: uci binding not available\n")
+	os.exit(1)
+end
+
+local lib_ok, lib = pcall(dofile, "/usr/libexec/prism/prismlib.lua")
+if not lib_ok then
+	io.stderr:write("prism build-config: prismlib.lua not available\n")
+	os.exit(1)
+end
+
+local NODES_DIR      = "/etc/prism/nodes"
+local EXTRA_PATH     = "/etc/prism/extra.json"
+local DNSMASQ_DROPIN = "/var/etc/prism/dnsmasq-managed.conf"
+-- Loopback DNS listener port for managed DNS: build_inbounds opens the
+-- dns-in inbound here and build_dnsmasq_dropin points dnsmasq at it.
+local DNS_IN_PORT    = 5335
+
+local read_file = lib.read_file
+
+local uci_list_or_string = lib.uci_list
+
+-- ─── rule-sets ───────────────────────────────────────────────────────────
+--
+-- Routing rules reference sing-box `remote` rule-sets: sing-box downloads and
+-- refreshes each .srs itself, so build-config only constructs the download
+-- URL. A `ruleset` token is either "provider/name" (provider ∈ sagernet,
+-- loyalsoldier, metacubex) or a bare custom label resolved against the
+-- `customrs` registry. Country codes expand to <country_provider>/geoip-<cc>
+-- and, when the catalog confirms one exists, /geosite-<cc>.
+
+-- Construct the .srs download URL for a provider rule-set name. delivery
+-- picks GitHub raw or the jsDelivr CDN (for GitHub-blocked regions).
+local function provider_url(provider, delivery, name)
+	local jsd = (delivery == "jsdelivr")
+	if provider == "loyalsoldier" then
+		return jsd
+			and "https://cdn.jsdelivr.net/gh/Loyalsoldier/geoip@release/srs/" .. name .. ".srs"
+			or  "https://raw.githubusercontent.com/Loyalsoldier/geoip/release/srs/" .. name .. ".srs"
+	end
+	if provider == "metacubex" then
+		local cc = name:match("^geoip%-(.+)$")
+		if cc then
+			return jsd
+				and "https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geoip/" .. cc .. ".srs"
+				or  "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/" .. cc .. ".srs"
+		end
+		local gs = name:match("^geosite%-(.+)$") or name
+		return jsd
+			and "https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/" .. gs .. ".srs"
+			or  "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/" .. gs .. ".srs"
+	end
+	-- sagernet — geoip and geosite live in separate repos
+	if name:match("^geoip%-") then
+		return jsd
+			and "https://cdn.jsdelivr.net/gh/SagerNet/sing-geoip@rule-set/" .. name .. ".srs"
+			or  "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/" .. name .. ".srs"
+	end
+	return jsd
+		and "https://cdn.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/" .. name .. ".srs"
+		or  "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/" .. name .. ".srs"
+end
+
+-- Resolve one routing `condition` UCI section. A ruleset/country condition's
+-- tokens become rule-set tags paired with a download URL; every other kind
+-- just carries its value list. Returns:
+--   kind, op       — condition type, and the operator linking it to the
+--                    previous condition ("and" | "or"; ignored on the first)
+--   values         — the condition's value list
+--   tags           — rule-set tags (ruleset/country only)
+--   geosite_tags   — subset of tags that carry domains (for DNS derivation)
+--   rs_meta        — { tag → { url, format } } for emitting remote rule_sets
+local function resolve_condition(cond, ctx)
+	local r = {
+		kind         = cond.kind or "",
+		op           = (cond.op == "and") and "and" or "or",
+		invert       = (cond.invert == "1"),
+		values       = uci_list_or_string(cond, "value"),
+		tags         = {},
+		geosite_tags = {},
+		rs_meta      = {}
+	}
+
+	if r.kind ~= "ruleset" and r.kind ~= "country" then
+		return r
+	end
+
+	-- A tag may be named twice (a ruleset token and a country both yielding
+	-- geosite-cn); emit it only once.
+	local seen = {}
+	local function add_tag(tag, url, fmt, is_geosite)
+		-- The tag is the rule-set's sing-box identifier; reject one that
+		-- could collide or escape into another path.
+		if not lib.safe_ruleset_tag(tag) then
+			io.stderr:write("prism build-config: rule-set tag '" .. tostring(tag) ..
+				"' is unsafe; skipping\n")
+			return
+		end
+		if not seen[tag] then
+			seen[tag] = true
+			r.tags[#r.tags + 1] = tag
+			r.rs_meta[tag] = { url = url, format = fmt or "binary" }
+			if is_geosite then r.geosite_tags[#r.geosite_tags + 1] = tag end
+		end
+	end
+
+	if r.kind == "ruleset" then
+		for _, tok in ipairs(r.values) do
+			if tok ~= "" then
+				local provider, name = lib.split_provider_token(tok)
+				if provider then
+					add_tag(provider .. "-" .. name,
+						provider_url(provider, ctx.delivery, name),
+						"binary", name:find("geosite") ~= nil)
+				else
+					local cr = ctx.custom[tok]
+					if cr then
+						add_tag("custom-" .. tok, cr.url, cr.format, false)
+					else
+						io.stderr:write("prism build-config: custom rule-set '" ..
+							tok .. "' has no registry URL; skipping\n")
+					end
+				end
+			end
+		end
+	else  -- country
+		local cp = ctx.country_provider
+		for _, cc in ipairs(r.values) do
+			if cc ~= "" then
+				add_tag(cp .. "-geoip-" .. cc,
+					provider_url(cp, ctx.delivery, "geoip-" .. cc), "binary", false)
+				-- geosite-<cc> exists only for some countries; emit it only
+				-- when the catalog confirms it, so a country without one does
+				-- not yield a remote rule-set whose URL just 404s.
+				if ctx.catalog_has(cp, "geosite-" .. cc) then
+					add_tag(cp .. "-geosite-" .. cc,
+						provider_url(cp, ctx.delivery, "geosite-" .. cc),
+						"binary", true)
+				end
+			end
+		end
+	end
+
+	return r
+end
+
+-- Custom rule-sets keyed by label, read once from the `customrs` registry:
+-- { label → { url, format } }. Provider rule-sets are always binary.
+local function load_custom_rulesets(c)
+	local m = {}
+	c:foreach("prism", "customrs", function(s)
+		if s.label and s.label ~= "" and s.url and s.url ~= "" then
+			m[s.label] = {
+				url    = s.url,
+				format = (s.format == "source") and "source" or "binary"
+			}
+		end
+	end)
+	return m
+end
+
+-- Load the rule-set name catalog (refreshed by fetch-catalog for the UI) into
+-- a { provider → { name → true } } lookup. Used only to gate the country
+-- geosite bonus; an absent or stale catalog just means that bonus is skipped.
+local function load_catalog()
+	local raw = read_file("/etc/prism/rulesets-cache.json")
+	if not raw then return {} end
+	local ok, obj = pcall(jsonc.parse, raw)
+	if not ok or type(obj) ~= "table" or type(obj.names) ~= "table" then
+		return {}
+	end
+	local idx = {}
+	for provider, list in pairs(obj.names) do
+		if type(list) == "table" then
+			local set = {}
+			for _, n in ipairs(list) do set[n] = true end
+			idx[provider] = set
+		end
+	end
+	return idx
+end
+
+-- Collect the enabled routing rules once, sorted by `order`, each paired with
+-- its ordered, resolved list of `condition` sections. build_route and
+-- build_dns both consume this list, so the rule/condition foreach passes, the
+-- sorts and the per-condition resolution run a single time per build.
+local function prepare_rules(c)
+	local catalog = load_catalog()
+	local ctx = {
+		country_provider = c:get("prism", "global", "country_provider") or "sagernet",
+		delivery         = c:get("prism", "global", "ruleset_delivery") or "github",
+		custom           = load_custom_rulesets(c),
+		catalog_has      = function(provider, name)
+			local set = catalog[provider]
+			return set ~= nil and set[name] == true
+		end
+	}
+
+	local rows = {}
+	c:foreach("prism", "rule", function(s)
+		if s.enabled ~= "0" then rows[#rows + 1] = s end
+	end)
+	table.sort(rows, function(a, b)
+		return (tonumber(a.order) or 0) < (tonumber(b.order) or 0)
+	end)
+
+	-- Conditions are child sections that reference their parent rule by name.
+	local conds_by_rule = {}
+	c:foreach("prism", "condition", function(s)
+		local rname = s.rule
+		if rname and rname ~= "" then
+			local list = conds_by_rule[rname]
+			if not list then
+				list = {}
+				conds_by_rule[rname] = list
+			end
+			list[#list + 1] = s
+		end
+	end)
+
+	local prepared = {}
+	for _, s in ipairs(rows) do
+		local raw = conds_by_rule[s[".name"]] or {}
+		table.sort(raw, function(a, b)
+			return (tonumber(a.order) or 0) < (tonumber(b.order) or 0)
+		end)
+		local conditions = {}
+		for _, cs in ipairs(raw) do
+			conditions[#conditions + 1] = resolve_condition(cs, ctx)
+		end
+		prepared[#prepared + 1] = { section = s, conditions = conditions }
+	end
+	return prepared
+end
+
+-- ─── inbounds ────────────────────────────────────────────────────────────
+
+local function build_inbounds(c)
+	local inbounds = {}
+	local mode  = c:get("prism", "inbounds", "mode") or "tproxy"
+	local inet6 = (c:get("prism", "inbounds", "inet6") == "1")
+
+	if mode == "tproxy" or mode == "tproxy_mixed" then
+		inbounds[#inbounds + 1] = {
+			type        = "tproxy",
+			tag         = "tproxy-in",
+			listen      = inet6 and "::" or "0.0.0.0",
+			listen_port = tonumber((c:get("prism", "inbounds", "tproxy_port"))) or 7895
+		}
+	end
+
+	if mode == "tun" then
+		-- sing-box 1.11 merged inet4_address/inet6_address into one `address`
+		-- list (the legacy fields are removed in 1.13); `address` works from
+		-- 1.10 on, so this is both backward- and forward-compatible.
+		local address = { c:get("prism", "inbounds", "tun_address") or "172.19.0.1/30" }
+		if inet6 then address[#address + 1] = "fdfe:dcba:9876::1/126" end
+		local auto_route = c:get("prism", "inbounds", "tun_auto_route") ~= "0"
+		inbounds[#inbounds + 1] = {
+			type          = "tun",
+			tag           = "tun-in",
+			address       = address,
+			mtu           = tonumber((c:get("prism", "inbounds", "tun_mtu"))) or 9000,
+			auto_route    = auto_route,
+			-- auto_redirect drives forwarding and self-exclusion through fw4
+			-- nftables instead of the ip-rule capture auto_route alone uses.
+			-- Without it on an OpenWrt router, auto_route's
+			-- `from 0.0.0.0 iif lo` rule swallows sing-box's own outbound dial
+			-- to the proxy server back into the tun — a self-loop that times
+			-- out every connection. Requires auto_route, so it is gated on it.
+			auto_redirect = auto_route,
+			strict_route  = false,
+			stack         = c:get("prism", "inbounds", "tun_stack") or "system"
+		}
+	end
+
+	if mode == "tproxy_mixed" then
+		inbounds[#inbounds + 1] = {
+			type        = "mixed",
+			tag         = "mixed-in",
+			listen      = c:get("prism", "inbounds", "mixed_listen") or "127.0.0.1",
+			listen_port = tonumber((c:get("prism", "inbounds", "mixed_port"))) or 2080
+		}
+	end
+
+	-- dns-in: loopback DNS listener for managed DNS. The dnsmasq drop-in
+	-- (build_dnsmasq_dropin) points dnsmasq at 127.0.0.1:DNS_IN_PORT; the
+	-- inbound-scoped hijack-dns route rule hands queries arriving here to
+	-- sing-box's resolver. Managed DNS is on unless explicitly disabled, so
+	-- configs predating the option keep it.
+	if c:get("prism", "dns", "managed_dns") ~= "0" then
+		inbounds[#inbounds + 1] = {
+			type        = "direct",
+			tag         = "dns-in",
+			listen      = "127.0.0.1",
+			listen_port = DNS_IN_PORT
+		}
+	end
+
+	return inbounds
+end
+
+-- ─── helpers ─────────────────────────────────────────────────────────────
+
+-- Detect the first DNS server advertised on the WAN interface via ubus.
+-- Returns nil when WAN is down, has no DHCP-assigned resolvers, or ubus
+-- isn't available — callers treat that as "no local server this build".
+local function detect_wan_dns()
+	local p = io.popen("ubus call network.interface.wan status 2>/dev/null")
+	if not p then return nil end
+	local raw = p:read("*a"); p:close()
+	if not raw or raw == "" then return nil end
+	local ok, st = pcall(jsonc.parse, raw)
+	if not ok or type(st) ~= "table" then return nil end
+	local servers = st["dns-server"]
+	if type(servers) ~= "table" or #servers == 0 then return nil end
+	return servers[1]
+end
+
+-- Read the OpenWrt-configured local domain from /etc/config/dhcp's
+-- dnsmasq section. Returns nil when unset.
+local function detect_local_domain(c)
+	local domain
+	c:foreach("dhcp", "dnsmasq", function(s)
+		if not domain and type(s.domain) == "string" and s.domain ~= "" then
+			domain = s.domain
+		end
+	end)
+	return domain
+end
+
+-- Parse a DNS server URL into the typed form sing-box 1.12 expects.
+-- Accepted: bare IP/hostname (→ udp), udp://, tcp://, tls://, https://,
+-- quic://, h3:// — with optional :port, IPv6 brackets, and /path for HTTPS/H3.
+local function parse_dns_url(url)
+	if not url or url == "" then return nil end
+	url = url:match("^%s*(.-)%s*$")
+	if url == "" then return nil end
+
+	local scheme, rest = url:match("^([a-z0-9]+)://(.+)$")
+	if not scheme then
+		return { type = "udp", server = url }
+	end
+
+	local hostpart, path = rest:match("^([^/]+)(/.*)$")
+	if not hostpart then hostpart = rest end
+
+	local host, port
+	host, port = hostpart:match("^%[([^%]]+)%]:(%d+)$")
+	if not host then host = hostpart:match("^%[([^%]]+)%]$") end
+	if not host then host, port = hostpart:match("^(.-):(%d+)$") end
+	if not host then host = hostpart end
+
+	local s = { type = scheme, server = host }
+	if port then s.server_port = tonumber(port) end
+	if path and (scheme == "https" or scheme == "h3") then s.path = path end
+	return s
+end
+
+-- ─── outbounds (UCI manual nodes + /etc/prism/nodes/*.json subs) ─────────
+
+-- Build the sing-box tls block from individual UCI tls_* fields.
+-- always_on=true for protocols that are unconditionally TLS (trojan, hysteria2, tuic, anytls).
+local function build_tls_from_uci(s, always_on)
+	local enabled = always_on or (s.tls_enabled == "1")
+	if not enabled then return nil end
+	local tls = { enabled = true }
+	if s.tls_sni and s.tls_sni ~= "" then tls.server_name = s.tls_sni end
+	if s.tls_insecure == "1" then tls.insecure = true end
+	if s.tls_fingerprint and s.tls_fingerprint ~= "" then
+		tls.utls = { enabled = true, fingerprint = s.tls_fingerprint }
+	end
+	return tls
+end
+
+-- Build the sing-box transport block from individual UCI transport_* fields.
+local function build_transport_from_uci(s)
+	local t = s.transport_type or ""
+	if t == "" then return nil end
+	if t == "ws" then
+		local tr = { type = "ws" }
+		if s.transport_ws_path and s.transport_ws_path ~= "" then tr.path = s.transport_ws_path end
+		if s.transport_ws_host and s.transport_ws_host ~= "" then
+			tr.headers = { Host = s.transport_ws_host }
+		end
+		return tr
+	end
+	if t == "grpc" then
+		local tr = { type = "grpc" }
+		if s.transport_grpc_service and s.transport_grpc_service ~= "" then
+			tr.service_name = s.transport_grpc_service
+		end
+		return tr
+	end
+	if t == "http" then
+		local tr = { type = "http" }
+		if s.transport_http_path and s.transport_http_path ~= "" then tr.path = s.transport_http_path end
+		if s.transport_http_host and s.transport_http_host ~= "" then
+			tr.host = { s.transport_http_host }
+		end
+		return tr
+	end
+	return nil
+end
+
+-- Reconstruct a complete sing-box outbound object from an individual-field UCI node section.
+local function build_node_from_uci(s)
+	local typ = s.type or ""
+	local tag = s.tag or ""
+	if tag == "" or typ == "" then return nil end
+
+	local ob = { type = typ, tag = tag }
+
+	-- WireGuard puts server/port inside its peers; the direct outbound has no
+	-- server field at all — neither takes a top-level server/server_port.
+	if typ ~= "wireguard" and typ ~= "direct" and s.server and s.server ~= "" then
+		ob.server      = s.server
+		ob.server_port = tonumber(s.server_port) or 0
+	end
+
+	if typ == "vless" then
+		ob.uuid = s.uuid or ""
+		if s.flow and s.flow ~= "" then ob.flow = s.flow end
+		local tls = build_tls_from_uci(s, false)
+		if tls then ob.tls = tls end
+		local tr = build_transport_from_uci(s)
+		if tr then ob.transport = tr end
+
+	elseif typ == "vmess" then
+		ob.uuid     = s.uuid or ""
+		ob.security = s.security or "auto"
+		ob.alter_id = tonumber(s.alter_id) or 0
+		local tls = build_tls_from_uci(s, false)
+		if tls then ob.tls = tls end
+		local tr = build_transport_from_uci(s)
+		if tr then ob.transport = tr end
+
+	elseif typ == "trojan" then
+		ob.password = s.password or ""
+		local tls = build_tls_from_uci(s, true)
+		if tls then ob.tls = tls end
+		local tr = build_transport_from_uci(s)
+		if tr then ob.transport = tr end
+
+	elseif typ == "shadowsocks" then
+		ob.method   = s.method or "aes-256-gcm"
+		ob.password = s.password or ""
+
+	elseif typ == "hysteria2" then
+		ob.password = s.password or ""
+		local tls = build_tls_from_uci(s, true)
+		if tls then ob.tls = tls end
+		if s.obfs_type and s.obfs_type ~= "" then
+			ob.obfs = { type = s.obfs_type }
+			if s.obfs_password and s.obfs_password ~= "" then
+				ob.obfs.password = s.obfs_password
+			end
+		end
+
+	elseif typ == "tuic" then
+		ob.uuid     = s.uuid or ""
+		ob.password = s.password or ""
+		if s.congestion_control and s.congestion_control ~= "" then
+			ob.congestion_control = s.congestion_control
+		end
+		if s.udp_relay_mode and s.udp_relay_mode ~= "" then
+			ob.udp_relay_mode = s.udp_relay_mode
+		end
+		local tls = build_tls_from_uci(s, true)
+		if tls then ob.tls = tls end
+
+	elseif typ == "anytls" then
+		ob.password = s.password or ""
+		local tls = build_tls_from_uci(s, true)
+		if tls then ob.tls = tls end
+		local tr = build_transport_from_uci(s)
+		if tr then ob.transport = tr end
+
+	elseif typ == "socks" then
+		ob.version = "5"
+		if s.username and s.username ~= "" then ob.username = s.username end
+		if s.password and s.password ~= "" then ob.password = s.password end
+
+	elseif typ == "direct" then
+		if s.override_address and s.override_address ~= "" then
+			ob.override_address = s.override_address
+		end
+		if s.override_port and s.override_port ~= "" then
+			ob.override_port = tonumber(s.override_port)
+		end
+
+	elseif typ == "wireguard" then
+		-- Emitted as a sing-box `endpoint`, not an outbound — the legacy
+		-- wireguard outbound is removed in 1.13. The _is_endpoint marker
+		-- tells build_outbounds to place this node in the top-level
+		-- `endpoints` array; it is stripped before the config is written.
+		ob._is_endpoint = true
+		if s.wg_local_address and s.wg_local_address ~= "" then
+			ob.address = { s.wg_local_address }
+		end
+		if s.wg_private_key and s.wg_private_key ~= "" then
+			ob.private_key = s.wg_private_key
+		end
+		if s.wg_mtu and s.wg_mtu ~= "" then
+			ob.mtu = tonumber(s.wg_mtu)
+		end
+		local peer = {}
+		if s.server and s.server ~= "" then
+			peer.address = s.server
+			peer.port    = tonumber(s.server_port) or 0
+		end
+		if s.wg_peer_public_key and s.wg_peer_public_key ~= "" then
+			peer.public_key = s.wg_peer_public_key
+		end
+		if s.wg_preshared_key and s.wg_preshared_key ~= "" then
+			peer.pre_shared_key = s.wg_preshared_key
+		end
+		-- Prism uses WireGuard as a full-tunnel proxy, so the single peer
+		-- carries all traffic.
+		peer.allowed_ips = { "0.0.0.0/0", "::/0" }
+		ob.peers = { peer }
+
+	elseif typ == "urltest" then
+		local mode = s.urltest_mode or "manual"
+		if mode == "regex" then
+			-- Store the pattern for regex expansion in build_outbounds step 3
+			ob._outbound_regex = s.urltest_regex or ""
+			ob.outbounds = {}
+		else
+			local raw = s.urltest_outbounds
+			if type(raw) == "table" then
+				ob.outbounds = raw
+			elseif type(raw) == "string" and raw ~= "" then
+				ob.outbounds = { raw }
+			else
+				ob.outbounds = {}
+			end
+		end
+		if s.urltest_url and s.urltest_url ~= "" then ob.url = s.urltest_url end
+		if s.urltest_interval and s.urltest_interval ~= "" then ob.interval = s.urltest_interval end
+		if s.urltest_tolerance and s.urltest_tolerance ~= "" then
+			ob.tolerance = tonumber(s.urltest_tolerance)
+		end
+	end
+
+	return ob
+end
+
+local function build_outbounds(c)
+	-- ── Step 1: load every node, preserving order, deduping by tag ────────
+	-- Manual nodes (UCI type="node") come first, ordered by their order field.
+	-- Subscription JSON files follow (sorted by filename for stability).
+	-- First-seen-wins deduplication means manual nodes always take precedence.
+	local all_ordered = {}
+	local all_map     = {}
+	local seen        = {}
+
+	-- direct / block are builtin outbounds added in step 4. A node — manual
+	-- or from a (possibly hostile) subscription — carrying one of those tags
+	-- would collide and make sing-box reject the whole config, so drop it.
+	local RESERVED_TAGS = { direct = true, block = true }
+
+	-- Manual nodes from UCI (reconstruct outbound from individual fields)
+	c:foreach("prism", "node", function(s)
+		local ob = build_node_from_uci(s)
+		if ob and RESERVED_TAGS[ob.tag] then
+			io.stderr:write("prism build-config: node tag '" .. ob.tag ..
+				"' is reserved; skipping\n")
+		elseif ob and not seen[ob.tag] then
+			seen[ob.tag]    = true
+			all_map[ob.tag] = ob
+			all_ordered[#all_ordered + 1] = ob
+		end
+	end)
+
+	-- Subscription nodes from JSON files
+	-- First, prune any *.json whose basename doesn't correspond to a current
+	-- subscription section — these are orphans left behind when a subscription
+	-- was deleted (form.Map doesn't notify us, so we sweep here).
+	local valid_subs = {}
+	c:foreach("prism", "subscription", function(s)
+		valid_subs[s[".name"]] = true
+	end)
+	local lf = io.popen("find " .. NODES_DIR .. " -maxdepth 1 -name '*.json' 2>/dev/null")
+	if lf then
+		for path in lf:lines() do
+			local base = path:match("/([^/]+)%.json$")
+			if base and not valid_subs[base] then
+				os.remove(path)
+			end
+		end
+		lf:close()
+	end
+
+	local f = io.popen("find " .. NODES_DIR .. " -maxdepth 1 -name '*.json' 2>/dev/null | sort")
+	if f then
+		for path in f:lines() do
+			local content = read_file(path)
+			if content and content ~= "" then
+				local ok, nodes = pcall(jsonc.parse, content)
+				if ok and type(nodes) == "table" then
+					for _, n in ipairs(nodes) do
+						if type(n) == "table" and n.payload then
+							local ok2, p = pcall(jsonc.parse, n.payload)
+							if ok2 and type(p) == "table" and p.tag then
+								if RESERVED_TAGS[p.tag] then
+									io.stderr:write("prism build-config: subscription node "
+										.. "tag '" .. p.tag .. "' is reserved; skipping\n")
+								elseif not seen[p.tag] then
+									seen[p.tag]    = true
+									all_map[p.tag] = p
+									all_ordered[#all_ordered + 1] = p
+								end
+							end
+						end
+					end
+				end
+			end
+		end
+		f:close()
+	end
+
+	-- ── Step 2: collect outbound tags referenced by the active route config ──
+	-- The final outbound catches anything no rule matched; each enabled rule
+	-- nominates one outbound.  A user who wants "global proxy" just sets the
+	-- final to a node; one who wants "bypass" sets the final to direct and
+	-- (optionally) disables individual rules.
+	local referenced = {}
+	local fin = c:get("prism", "routing", "final_outbound") or "direct"
+	if fin ~= "" then referenced[fin] = true end
+
+	c:foreach("prism", "rule", function(s)
+		if s.enabled ~= "0" and s.outbound and s.outbound ~= "" then
+			referenced[s.outbound] = true
+		end
+	end)
+
+	-- ── Step 3: expand urltest outbounds transitively ──────────────────────
+	-- For each referenced urltest, expand _outbound_regex (Prism-internal
+	-- marker, must be stripped) then pull its member tags into the referenced
+	-- set.  The worklist handles nested urltest groups correctly.
+	-- Lua patterns have no | alternation; we split on | manually.
+	local function match_any(tag, pattern)
+		for part in pattern:gmatch("[^|]+") do
+			part = part:match("^%s*(.-)%s*$")
+			-- Plain substring search: user values like "EU-France" contain
+			-- literal hyphens, which Lua treats as a pattern quantifier.
+			if part ~= "" and tag:find(part, 1, true) then return true end
+		end
+		return false
+	end
+
+	local worklist = {}
+	for tag in pairs(referenced) do worklist[#worklist + 1] = tag end
+	local i = 1
+	while i <= #worklist do
+		local tag = worklist[i]; i = i + 1
+		local ob = all_map[tag]
+		if ob and ob.type == "urltest" then
+			if ob._outbound_regex then
+				local pattern = ob._outbound_regex
+				ob._outbound_regex = nil  -- strip before handing to sing-box
+				if type(ob.outbounds) ~= "table" or #ob.outbounds == 0 then
+					ob.outbounds = {}
+					for _, other in ipairs(all_ordered) do
+						if other.type ~= "urltest" and match_any(other.tag, pattern) then
+							ob.outbounds[#ob.outbounds + 1] = other.tag
+						end
+					end
+				end
+			end
+			-- Prune members that don't resolve to a real outbound. A dangling
+			-- tag (e.g. a member node that was since deleted) would otherwise
+			-- make sing-box reject the whole config with "outbound not found".
+			if type(ob.outbounds) == "table" then
+				local kept = {}
+				for _, member in ipairs(ob.outbounds) do
+					if all_map[member] or member == "direct" then
+						kept[#kept + 1] = member
+						if not referenced[member] then
+							referenced[member] = true
+							worklist[#worklist + 1] = member
+						end
+					else
+						io.stderr:write("prism build-config: urltest '" .. ob.tag ..
+							"' drops missing member '" .. tostring(member) .. "'\n")
+					end
+				end
+				ob.outbounds = kept
+			end
+		end
+	end
+
+	-- ── Step 4: assemble final list — builtins first, then referenced nodes ──
+	-- Preserve original file order so urltest member ordering is predictable.
+	--
+	-- The direct outbound carries an explicit `domain_resolver: "local"`
+	-- field. Without it sing-box 1.12 rejects `detour: "direct"` on any DNS
+	-- server with "detour to an empty direct outbound makes no sense" — the
+	-- check is `reflect.DeepEqual(opts.DialerOptions, DialerOptions{UDPFragmentDefault:true})`
+	-- in protocol/direct/outbound.go, so any populated DialerOptions field
+	-- satisfies it. The value must be `local`, not `local-net`: sing-box dials
+	-- remote rule-set URLs through `direct` (download_detour), and resolving
+	-- that host via `local-net` (dnsmasq) loops — under managed DNS dnsmasq
+	-- forwards back into sing-box's dns-in, which is not listening yet while
+	-- sing-box is still initializing rule-sets at startup, so the lookup
+	-- deadlocks and the service FATALs. `local` is the WAN resolver at a
+	-- literal IP (detour: direct), so it resolves with no loop and matches
+	-- route.default_domain_resolver.
+	-- block is no longer a builtin outbound — a rule that drops traffic now
+	-- compiles to a reject rule action (see build_route). sing-box removed
+	-- the legacy `block` special outbound in 1.13.
+	local outbounds = {
+		{ type = "direct", tag = "direct", domain_resolver = "local" }
+	}
+	local endpoints = {}
+	for _, ob in ipairs(all_ordered) do
+		if referenced[ob.tag] then
+			if ob._is_endpoint then
+				-- Prism-built WireGuard node → top-level endpoints array.
+				ob._is_endpoint = nil
+				endpoints[#endpoints + 1] = ob
+			elseif ob.type == "wireguard" then
+				-- A WireGuard node from a subscription is still in the legacy
+				-- outbound schema. Leave it in outbounds (it works on 1.12)
+				-- but warn — it will not load on sing-box 1.13.
+				io.stderr:write("prism build-config: subscription WireGuard node '"
+					.. tostring(ob.tag) .. "' uses the legacy outbound schema; "
+					.. "it will not work on sing-box 1.13\n")
+				outbounds[#outbounds + 1] = ob
+			else
+				if ob.type == "urltest"
+				   and (type(ob.outbounds) ~= "table" or #ob.outbounds == 0) then
+					io.stderr:write("prism build-config: urltest '" .. ob.tag ..
+						"' has no usable members; sing-box will reject the config\n")
+				end
+				outbounds[#outbounds + 1] = ob
+			end
+		end
+	end
+
+	return outbounds, endpoints
+end
+
+-- ─── DNS ─────────────────────────────────────────────────────────────────
+
+-- RFC-reserved special-use names and RFC1918/link-local/ULA reverse zones
+-- that should never leak to public DNS. Routed unconditionally to local-net
+-- so they hit the system resolver (dnsmasq) instead of the upstream server.
+local LOCAL_DOMAINS = {
+	"home.arpa", "local", "localhost", "invalid", "test", "lan", "internal",
+	"10.in-addr.arpa", "168.192.in-addr.arpa", "254.169.in-addr.arpa",
+	"16.172.in-addr.arpa", "17.172.in-addr.arpa", "18.172.in-addr.arpa",
+	"19.172.in-addr.arpa", "20.172.in-addr.arpa", "21.172.in-addr.arpa",
+	"22.172.in-addr.arpa", "23.172.in-addr.arpa", "24.172.in-addr.arpa",
+	"25.172.in-addr.arpa", "26.172.in-addr.arpa", "27.172.in-addr.arpa",
+	"28.172.in-addr.arpa", "29.172.in-addr.arpa", "30.172.in-addr.arpa",
+	"31.172.in-addr.arpa", "d.f.ip6.arpa", "8.e.f.ip6.arpa"
+}
+
+-- Render the dnsmasq managed-DNS drop-in. Derived from LOCAL_DOMAINS so that
+-- list is the single source of truth — the drop-in used to be a hand-kept
+-- static file (root/usr/share/prism/dnsmasq-managed.conf) that had to be
+-- edited in lock-step with LOCAL_DOMAINS. /etc/init.d/prism copies the
+-- generated file into dnsmasq's conf-dir while sing-box is running.
+local function build_dnsmasq_dropin()
+	local out = {
+		"# Prism managed DNS — generated by build-config, copied into dnsmasq's",
+		"# conf-dir by /etc/init.d/prism while sing-box is running and removed",
+		"# when it stops. Generated on every (re)start; do not edit by hand.",
+		"#",
+		"# no-resolv: sing-box is the only upstream — dnsmasq must not consult",
+		"# the WAN/ISP resolvers, whose answers are DNS-poisoned on a censored",
+		"# network. A poisoned answer is worse than none, so there is no ISP",
+		"# fallback; a clean stop removes this drop-in.",
+		"no-resolv",
+		"server=127.0.0.1#" .. DNS_IN_PORT,
+		"",
+		"# Make dnsmasq authoritative for RFC-reserved and private-use zones so",
+		"# it answers them locally instead of forwarding to sing-box, which would",
+		"# route them back to local-net (= dnsmasq) in an endless loop."
+	}
+	for _, d in ipairs(LOCAL_DOMAINS) do
+		out[#out + 1] = "local=/" .. d .. "/"
+	end
+	return table.concat(out, "\n") .. "\n"
+end
+
+-- Derive the DNS rules from the routing rules. A rule contributes a DNS rule
+-- only when it has a domain component — literal domains or a geosite-* rule-
+-- set; IP/port-only rules leave their queries to dns.final. The DNS server
+-- mirrors the outbound: a directly-routed domain resolves via `local`, a
+-- proxied domain via `fakeip` when fake-IP is enabled globally, else
+-- `remote`. `block` rules contribute nothing.
+-- A rule's AND/OR structure is deliberately not reflected in DNS: a query's
+-- protocol/port/IP cannot be known at resolution time, so every domain-
+-- bearing condition (literal domains and geosite rule-sets) is mirrored onto
+-- the server the rule's outbound implies, regardless of how the conditions
+-- are joined. This is an over-approximation that only affects which resolver
+-- answers a name, never how its traffic is routed.
+local DOMAIN_KINDS = {
+	domain = true, domain_suffix = true,
+	domain_keyword = true, domain_regex = true
+}
+
+local function build_routing_dns_rules(prepared, fakeip_on)
+	local rules = {}
+	for _, pr in ipairs(prepared) do
+		local s = pr.section
+		if s.outbound ~= "block" then
+			local server
+			if s.outbound == "direct" then
+				server = "local"
+			elseif fakeip_on then
+				server = "fakeip"
+			else
+				server = "remote"
+			end
+
+			local literal = {
+				domain = {}, domain_suffix = {},
+				domain_keyword = {}, domain_regex = {}
+			}
+			local has_literal = false
+			local geosite = {}
+			for _, r in ipairs(pr.conditions) do
+				if DOMAIN_KINDS[r.kind] then
+					for _, v in ipairs(r.values) do
+						if v ~= "" then
+							local bucket = literal[r.kind]
+							bucket[#bucket + 1] = v
+							has_literal = true
+						end
+					end
+				end
+				for _, t in ipairs(r.geosite_tags) do
+					geosite[#geosite + 1] = t
+				end
+			end
+
+			-- Literal domains and a geosite rule-set are distinct sing-box
+			-- matchers — placed on one rule they are AND-combined and would
+			-- match nothing. Emit them as separate rules; separate DNS rules
+			-- are OR'd, which is the intended semantics.
+			if has_literal then
+				local r = { action = "route", server = server }
+				for k, v in pairs(literal) do
+					if #v > 0 then r[k] = v end
+				end
+				rules[#rules + 1] = r
+			end
+			if #geosite > 0 then
+				rules[#rules + 1] = {
+					action   = "route",
+					server   = server,
+					rule_set = geosite
+				}
+			end
+		end
+	end
+	return rules
+end
+
+local function build_dns(c, prepared)
+	local strategy         = c:get("prism", "dns", "strategy") or ""
+	local default_outbound = c:get("prism", "routing", "final_outbound") or ""
+	local wan_dns          = detect_wan_dns()
+
+	-- "block" compiles to a reject rule, not an outbound, so for DNS it
+	-- behaves like "no default proxy": the remote server isn't detoured
+	-- through it and unmatched queries resolve via the local resolver.
+	local default_is_proxy = (default_outbound ~= "" and default_outbound ~= "direct"
+	                          and default_outbound ~= "block")
+
+	-- ── local: resolver for directly-routed traffic, and the bootstrap
+	-- resolver for outbound endpoint hostnames (proxy node servers, the
+	-- `remote` server's own SNI host). Always emitted, always detour:direct.
+	-- It must not chain through local-net: with managed DNS active dnsmasq
+	-- forwards back into sing-box, so resolving direct traffic or a node
+	-- hostname via dnsmasq would loop. local_server picks the upstream —
+	-- "wan" or blank auto-detects the WAN-assigned resolver, anything else
+	-- is a literal address. tls://1.1.1.1 (literal IP, no recursion) is the
+	-- fallback when WAN is down at boot; the iface hotplug regenerates the
+	-- config once WAN comes up.
+	local local_server_value = c:get("prism", "dns", "local_server") or ""
+	local local_addr
+	if local_server_value == "" or local_server_value == "wan" then
+		local_addr = (wan_dns and wan_dns ~= "") and wan_dns or "tls://1.1.1.1"
+	else
+		local_addr = local_server_value
+	end
+	local local_entry  = parse_dns_url(local_addr)
+	local_entry.tag    = "local"
+	local_entry.detour = "direct"
+
+	-- ── local-net: the on-router resolver (dnsmasq), for local domains only ──
+	local servers = {
+		local_entry,
+		{ type = "udp", tag = "local-net", server = "127.0.0.1", server_port = 53, detour = "direct" }
+	}
+
+	-- ── remote: resolver for proxied traffic; blank user value falls back to
+	-- Cloudflare DoT. Detoured through the default outbound so the lookup
+	-- exits where the proxied traffic does.
+	local remote_addr = c:get("prism", "dns", "remote_server") or ""
+	if remote_addr == "" then remote_addr = "tls://1.1.1.1" end
+	local remote_entry = parse_dns_url(remote_addr)
+	remote_entry.tag = "remote"
+	if default_is_proxy then
+		remote_entry.detour = default_outbound
+	end
+	servers[#servers + 1] = remote_entry
+
+	-- ── fakeip: when enabled, every proxied-domain query resolves here ──
+	local fakeip_on = (c:get("prism", "dns", "fakeip_enabled") == "1")
+	if fakeip_on then
+		servers[#servers + 1] = {
+			type        = "fakeip",
+			tag         = "fakeip",
+			inet4_range = c:get("prism", "dns", "fakeip_range_v4") or "198.18.0.0/15",
+			inet6_range = c:get("prism", "dns", "fakeip_range_v6") or "fc00::/18"
+		}
+	end
+
+	-- ── rules ──
+	-- Local/reserved domains first (always → local-net), then the routing
+	-- rules mirrored onto DNS servers. Anything unmatched falls to `final`.
+	local rules = {}
+
+	-- HTTPS/SVCB (DNS type 65/64) record queries cannot be answered by the
+	-- fakeip server ("only IP queries are supported by fakeip") — sing-box
+	-- errors and retries with backoff. Intercept them first and return an
+	-- empty NOERROR so clients fall back to plain A/AAAA, which fakeip maps.
+	if fakeip_on then
+		rules[#rules + 1] = {
+			query_type = { 64, 65 },
+			action     = "predefined",
+			rcode      = "NOERROR"
+		}
+	end
+
+	local local_suffixes = {}
+	for _, d in ipairs(LOCAL_DOMAINS) do local_suffixes[#local_suffixes + 1] = d end
+	local dnsmasq_domain = detect_local_domain(c)
+	if dnsmasq_domain and dnsmasq_domain ~= "" then
+		-- Prepend so the OpenWrt-configured local domain takes precedence in
+		-- error messages and is visible first in the generated config.
+		table.insert(local_suffixes, 1, dnsmasq_domain)
+	end
+	rules[#rules + 1] = {
+		domain_suffix = local_suffixes,
+		action        = "route",
+		server        = "local-net"
+	}
+
+	local routing_rules = build_routing_dns_rules(prepared, fakeip_on)
+	for _, r in ipairs(routing_rules) do rules[#rules + 1] = r end
+
+	-- `final`: unmatched queries resolve where the default outbound sends
+	-- their traffic — `remote` when it is a proxy, `local` otherwise
+	-- (direct, unset, or block).
+	local final_server = default_is_proxy and "remote" or "local"
+
+	local dns = {
+		servers = servers,
+		rules   = rules,
+		final   = final_server
+	}
+	if strategy ~= "" then dns.strategy = strategy end
+	if fakeip_on then dns.independent_cache = true end
+
+	return dns
+end
+
+-- ─── route ───────────────────────────────────────────────────────────────
+
+-- Port values may be plain numbers or "lo-hi" ranges; split them into the
+-- numeric `port` array and the "lo:hi" `port_range` array sing-box expects.
+local function split_ports(values)
+	local ports, ranges = {}, {}
+	for _, p in ipairs(values) do
+		p = tostring(p):match("^%s*(.-)%s*$")
+		if p:find("-") then
+			ranges[#ranges + 1] = (p:gsub("-", ":"))
+		else
+			local n = tonumber(p)
+			if n then ports[#ports + 1] = n end
+		end
+	end
+	return ports, ranges
+end
+
+-- Compile one resolved condition into a sing-box match node. Each condition
+-- becomes its own node, so domain and ip_cidr matchers are never placed on a
+-- single rule (the sing-box default-rule AND-trap) — no inline rule-set is
+-- needed. A condition flagged `invert` carries sing-box's `invert: true`,
+-- negating just that node's match. Returns nil when the condition resolves
+-- to nothing: an empty value list, or a ruleset/country whose every token
+-- failed to resolve. The `emit_ruleset` callback registers the route-level
+-- remote rule_set objects.
+local function compile_condition(r, emit_ruleset)
+	local k = r.kind
+	local node
+	if k == "domain" or k == "domain_suffix"
+	   or k == "domain_keyword" or k == "domain_regex" then
+		if #r.values > 0 then node = { [k] = r.values } end
+	elseif k == "ip_cidr" then
+		if #r.values > 0 then node = { ip_cidr = r.values } end
+	elseif k == "protocol" then
+		if #r.values > 0 then node = { protocol = r.values } end
+	elseif k == "port" then
+		local ports, ranges = split_ports(r.values)
+		if #ports > 0 or #ranges > 0 then
+			node = {}
+			if #ports  > 0 then node.port       = ports  end
+			if #ranges > 0 then node.port_range = ranges end
+		end
+	elseif k == "ruleset" or k == "country" then
+		if #r.tags > 0 then
+			for _, tag in ipairs(r.tags) do
+				emit_ruleset(tag, r.rs_meta[tag])
+			end
+			node = { rule_set = r.tags }
+		end
+	end
+	if node and r.invert then
+		node.invert = true
+	end
+	return node
+end
+
+-- Fold a list of match nodes into a single sing-box rule: one node is
+-- returned as-is, several are wrapped in a `logical` rule of the given mode.
+local function join_nodes(nodes, mode)
+	if #nodes == 1 then return nodes[1] end
+	return { type = "logical", mode = mode, rules = nodes }
+end
+
+local function build_route(c, prepared)
+	local route = {
+		rules = {},
+		auto_detect_interface = true,
+		-- sing-box 1.12 requires explicit domain resolution for outbound
+		-- endpoint hostnames (e.g. the `remote` DNS server's own SNI host).
+		-- The `local` server resolves them via a direct upstream — never
+		-- through local-net, which under managed DNS forwards back into
+		-- sing-box and would deadlock node-hostname resolution at startup.
+		default_domain_resolver = { server = "local" }
+	}
+
+	-- Mark sing-box's own outbound sockets so the OUTPUT-chain nftables rules
+	-- (when router-traffic capture is enabled) skip them and don't loop the
+	-- proxy back through itself. Harmless when no firewall rule references
+	-- mark 255. tun mode doesn't need it but setting it unconditionally is
+	-- simpler than threading inbound mode through here.
+	local imode = c:get("prism", "inbounds", "mode") or "tproxy"
+	if imode == "tproxy" or imode == "tproxy_mixed" then
+		route.default_mark = 255
+	end
+
+	-- Sniff action rule must be first so protocol/domain metadata is populated
+	-- before any subsequent rules inspect it (sing-box 1.11+ action syntax).
+	route.rules[#route.rules + 1] = { action = "sniff" }
+
+	-- DNS hijack: traffic destined for any DNS server is intercepted and
+	-- answered by sing-box's resolver. The dns-out outbound was removed in
+	-- sing-box 1.12 in favour of the explicit hijack-dns action.
+	route.rules[#route.rules + 1] = { protocol = "dns", action = "hijack-dns" }
+
+	-- Managed DNS: queries arriving on the dns-in inbound (forwarded by
+	-- dnsmasq) are answered by sing-box's resolver. Matched by inbound tag,
+	-- so it works regardless of protocol sniffing.
+	if c:get("prism", "dns", "managed_dns") ~= "0" then
+		route.rules[#route.rules + 1] = { inbound = "dns-in", action = "hijack-dns" }
+	end
+
+	-- Remote rule-set objects, deduplicated by tag across rules. sing-box
+	-- downloads and refreshes each one itself; download_detour decides
+	-- whether that fetch goes out the WAN ("direct") or, when blank, through
+	-- the default outbound (the proxy). `update_interval` is omitted: sing-box
+	-- defaults it to "1d", which is exactly what Prism wants.
+	--
+	-- NOTE: `download_detour` is deprecated in sing-box 1.14 and removed in
+	-- 1.16; its replacement is the `http_client` rule-set field (1.14+).
+	-- Prism's sing-box floor is 1.12, so `download_detour` is still the only
+	-- form valid across the whole supported range. When that floor is raised
+	-- to 1.14, migrate this to `http_client`.
+	local detour    = c:get("prism", "global", "ruleset_download_detour") or "direct"
+	local seen_tags = {}
+	local rule_sets = {}
+	local function emit_remote_ruleset(tag, meta)
+		if seen_tags[tag] then return end
+		seen_tags[tag] = true
+		local rs = {
+			type   = "remote",
+			tag    = tag,
+			format = (meta and meta.format) or "binary",
+			url    = meta and meta.url
+		}
+		if detour == "direct" then
+			rs.download_detour = "direct"
+		end
+		rule_sets[#rule_sets + 1] = rs
+	end
+
+	for _, pr in ipairs(prepared) do
+		local s = pr.section
+
+		-- Compile each condition to a match node; a condition that resolves
+		-- to nothing (e.g. a custom rule-set with no registry URL) is dropped
+		-- along with its operator slot, so a surviving condition simply links
+		-- to its nearest surviving predecessor.
+		local frags = {}
+		for _, r in ipairs(pr.conditions) do
+			local node = compile_condition(r, emit_remote_ruleset)
+			if node then
+				frags[#frags + 1] = { node = node, op = r.op }
+			end
+		end
+
+		-- An empty rule (no conditions, or every condition unresolved) is
+		-- skipped, not emitted: with no matchers it would match every
+		-- destination and shadow every rule below it, while route.final
+		-- already handles otherwise-unmatched traffic. So `#frags == 0`
+		-- always means skip.
+		if #frags == 0 then
+			local label = (s.name and s.name ~= "") and s.name or s[".name"]
+			local why = (#pr.conditions == 0)
+				and "has no conditions"
+				or  "has no resolvable destination"
+			io.stderr:write("prism build-config: rule '" .. label ..
+				"' " .. why .. "; skipping\n")
+		else
+			-- Build the match tree: split the fragments into AND-runs at
+			-- every condition whose operator is "or", then OR the runs
+			-- together. AND binds tighter than OR (standard precedence), so
+			-- the result is an OR-of-ANDs.
+			local runs = {}
+			local cur  = { frags[1].node }
+			for i = 2, #frags do
+				if frags[i].op == "and" then
+					cur[#cur + 1] = frags[i].node
+				else
+					runs[#runs + 1] = cur
+					cur = { frags[i].node }
+				end
+			end
+			runs[#runs + 1] = cur
+
+			local run_nodes = {}
+			for _, run in ipairs(runs) do
+				run_nodes[#run_nodes + 1] = join_nodes(run, "and")
+			end
+			local rule = join_nodes(run_nodes, "or")
+
+			if s.outbound == "block" then
+				-- "block" compiles to a reject action, not an outbound.
+				rule.action = "reject"
+			else
+				rule.action   = "route"
+				rule.outbound = s.outbound or "direct"
+			end
+
+			route.rules[#route.rules + 1] = rule
+		end
+	end
+
+	if #rule_sets > 0 then
+		route.rule_set = rule_sets
+	end
+
+	local fin = c:get("prism", "routing", "final_outbound") or "direct"
+	if fin == "" then fin = "direct" end
+	if fin == "block" then
+		-- There is no "block" outbound to point `final` at — append a
+		-- catch-all reject rule (matches everything no earlier rule did)
+		-- and leave `final` on the always-present direct outbound, where it
+		-- is now unreachable.
+		route.rules[#route.rules + 1] = { action = "reject" }
+		route["final"] = "direct"
+	else
+		route["final"] = fin
+	end
+	return route
+end
+
+-- ─── top-level assembly + merge slot ─────────────────────────────────────
+
+-- Valid sing-box log levels. An invalid level aborts sing-box startup, so an
+-- unrecognised UCI value falls back to warn rather than being passed through.
+local LOG_LEVELS = {
+	trace = true, debug = true, info  = true, warn = true,
+	error = true, fatal = true, panic = true
+}
+
+local function build_log(c)
+	local level = c:get("prism", "global", "log_level")
+	if not level or not LOG_LEVELS[level] then level = "warn" end
+	return { level = level, timestamp = true }
+end
+
+local function build_config(c)
+	local prepared = prepare_rules(c)
+	local dns   = build_dns(c, prepared)
+	local route = build_route(c, prepared)
+	local outbounds, endpoints = build_outbounds(c)
+
+	local config = {
+		log       = build_log(c),
+		dns       = dns,
+		inbounds  = build_inbounds(c),
+		outbounds = outbounds,
+		route     = route
+	}
+	-- endpoints (WireGuard) is emitted only when non-empty, so a config with
+	-- no WireGuard nodes stays byte-identical to before.
+	if #endpoints > 0 then
+		config.endpoints = endpoints
+	end
+
+	-- Persist the remote rule-set cache to flash. On startup sing-box loads
+	-- rule-sets from this cache instead of downloading, so after one
+	-- successful fetch it starts offline — no network needed at init, no
+	-- cold-boot FATAL. The background update loop refreshes them later.
+	-- Emitted only when there is a rule-set to cache. The fakeip and
+	-- DNS-result stores both default off, so the file is written only when
+	-- a rule-set actually changes (~daily) — negligible flash wear, unlike
+	-- the per-query churn those stores would add.
+	if route.rule_set then
+		os.execute("mkdir -p /etc/prism 2>/dev/null")
+		config.experimental = {
+			cache_file = {
+				enabled = true,
+				path    = "/etc/prism/cache.db"
+			}
+		}
+	end
+	return config
+end
+
+local function apply_extra(config)
+	local raw = read_file(EXTRA_PATH)
+	if not raw or raw:match("^%s*$") then return config end
+	local ok, extra = pcall(jsonc.parse, raw)
+	if not ok or type(extra) ~= "table" then
+		io.stderr:write("prism build-config: " .. EXTRA_PATH .. " is not valid JSON, skipping\n")
+		return config
+	end
+	-- Shallow merge: top-level keys in extra win. Arrays are replaced, not
+	-- concatenated — users who want to add inbounds must restate all of them.
+	for k, v in pairs(extra) do config[k] = v end
+	return config
+end
+
+local function write_atomic(path, content)
+	local dir = path:match("^(.*)/[^/]+$")
+	if dir and dir ~= "" then
+		os.execute("mkdir -p '" .. dir:gsub("'", "'\\''") .. "'")
+	end
+	local tmp = path .. ".tmp"
+	local f = io.open(tmp, "w")
+	if not f then return false, "cannot open " .. tmp end
+	f:write(content)
+	f:close()
+	if not os.rename(tmp, path) then
+		os.remove(tmp)
+		return false, "rename failed for " .. path
+	end
+	return true
+end
+
+-- ─── main ────────────────────────────────────────────────────────────────
+
+local c = uci_mod.cursor()
+
+local out_path = arg[1]
+if not out_path or out_path == "" then
+	out_path = c:get("prism", "global", "config_path") or "/var/etc/prism/sing-box.json"
+end
+
+local config = apply_extra(build_config(c))
+c:close()
+
+local json = jsonc.stringify(config, true)  -- pretty-print
+local ok, err = write_atomic(out_path, json)
+if not ok then
+	io.stderr:write("prism build-config: " .. err .. "\n")
+	os.exit(1)
+end
+
+-- (Re)generate the dnsmasq managed-DNS drop-in. The content is deterministic
+-- (derived purely from LOCAL_DOMAINS), so writing it on every build is
+-- harmless; /etc/init.d/prism only copies it into place when managed DNS is
+-- enabled. A failure here is non-fatal — the sing-box config is the build's
+-- critical output.
+local dropin_ok, dropin_err = write_atomic(DNSMASQ_DROPIN, build_dnsmasq_dropin())
+if not dropin_ok then
+	io.stderr:write("prism build-config: " .. dropin_err .. "\n")
+end
+
+io.stdout:write("prism build-config: wrote " .. out_path .. "\n")

@@ -1,0 +1,99 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 OctetMill
+#
+# One-time migration of routing `rule` sections from the flat merged-
+# destination schema (domain/ip_cidr/ruleset/country/protocol/port list
+# options carried on the rule itself) to the condition model: each
+# destination facet becomes a child `condition` section, linked to its
+# siblings by an AND/OR operator. uci-defaults removes this script once it
+# exits 0.
+#
+# The flat rule matched `(OR of destinations) AND protocol AND port`. The
+# condition model expresses an OR-of-AND-runs (AND binds tighter than OR), so
+# a rule that mixes destinations with a protocol/port filter is distributed:
+# each destination becomes its own run, AND-ed with the filters, and the runs
+# are OR-ed — which is exactly the old semantics.
+
+[ -f /etc/config/prism ] || exit 0
+
+# domain_regex values may contain shell glob characters; never let the
+# unquoted $(uci get) word-splitting expand them against the filesystem.
+set -f
+
+. /lib/functions.sh
+
+changed=0
+order=0
+
+emit_condition() {
+	local sid="$1" kind="$2" op="$3" cs val
+
+	cs=$(uci add prism condition)
+	uci set "prism.$cs.rule=$sid"
+	uci set "prism.$cs.order=$order"
+	uci set "prism.$cs.kind=$kind"
+	# The first condition has no predecessor, so it carries no operator.
+	[ "$order" = "0" ] || uci set "prism.$cs.op=$op"
+	for val in $(uci -q get "prism.$sid.$kind" 2>/dev/null); do
+		uci add_list "prism.$cs.value=$val"
+	done
+	order=$((order + 1))
+}
+
+migrate_rule() {
+	local sid="$1"
+	local dk fk opt dest_kinds="" filter_kinds="" has_old=0
+
+	for opt in domain domain_suffix domain_keyword domain_regex \
+	           ip_cidr ruleset country protocol port; do
+		[ -n "$(uci -q get "prism.$sid.$opt" 2>/dev/null)" ] && has_old=1
+	done
+	[ "$has_old" = "1" ] || return 0
+	changed=1
+	order=0
+
+	for dk in domain domain_suffix domain_keyword domain_regex \
+	          ip_cidr ruleset country; do
+		[ -n "$(uci -q get "prism.$sid.$dk" 2>/dev/null)" ] && \
+			dest_kinds="$dest_kinds $dk"
+	done
+	for fk in protocol port; do
+		[ -n "$(uci -q get "prism.$sid.$fk" 2>/dev/null)" ] && \
+			filter_kinds="$filter_kinds $fk"
+	done
+
+	if [ -z "$filter_kinds" ]; then
+		# Destinations only — each is its own OR alternative.
+		for dk in $dest_kinds; do
+			emit_condition "$sid" "$dk" or
+		done
+	elif [ -z "$dest_kinds" ]; then
+		# Filters only — AND-ed together.
+		for fk in $filter_kinds; do
+			emit_condition "$sid" "$fk" and
+		done
+	else
+		# Both — distribute: each destination starts a run AND-ed with the
+		# filters, the runs OR-ed.
+		for dk in $dest_kinds; do
+			emit_condition "$sid" "$dk" or
+			for fk in $filter_kinds; do
+				emit_condition "$sid" "$fk" and
+			done
+		done
+	fi
+
+	for opt in domain domain_suffix domain_keyword domain_regex \
+	           ip_cidr ruleset country protocol port; do
+		uci -q delete "prism.$sid.$opt"
+	done
+}
+
+config_load prism
+config_foreach migrate_rule rule
+
+[ "$changed" = "1" ] || exit 0
+
+uci commit prism
+exit 0

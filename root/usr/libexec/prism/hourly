@@ -1,0 +1,15 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 OctetMill
+#
+# Hourly maintenance tick. Drives subscription auto-update; each subscription
+# decides for itself whether its interval has elapsed, so an hour with nothing
+# due costs only this script's own run.
+#
+# Rule-sets are not refreshed here — sing-box fetches and refreshes its
+# `remote` rule-sets itself. The recovery watchdog keeps its own */5 cron.
+
+# Subscriptions: sync-subscriptions walks each enabled subscription and
+# fetches only those whose auto_update interval (in hours) has elapsed.
+[ -x /usr/libexec/prism/sync-subscriptions ] && \
+	/usr/libexec/prism/sync-subscriptions

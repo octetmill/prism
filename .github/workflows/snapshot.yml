@@ -1,0 +1,110 @@
+name: Snapshot
+
+# Every push to a non-main branch builds a snapshot and replaces the asset
+# on the rolling "snapshot" GitHub pre-release. Stable install URL:
+#
+#   https://github.com/octetmill/prism/releases/download/snapshot/luci-app-prism-snapshot.apk
+#
+# The APK/IPK version inside the package is <PKG_VERSION>_pre<N>-r<R>, so
+# each commit produces a unique, monotonically-increasing version that
+# `apk upgrade` correctly recognises as newer.
+
+on:
+  push:
+    branches-ignore:
+      - main
+
+# Serialise snapshot builds: a newer push supersedes an in-flight one, so the
+# rolling snapshot release and the moving `snapshot` tag never race.
+concurrency:
+  group: snapshot
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # update the rolling snapshot release
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # needed for git rev-list / describe
+
+      - name: Install apk-tools
+        uses: ./.github/actions/install-apk-tools
+
+      - name: Build packages
+        run: .github/workflows/package.sh
+
+      - name: Stage snapshot assets with stable filenames
+        id: stage
+        run: |
+          mkdir -p snapshot
+          APK_SRC=$(ls dist/*.apk | head -n1)
+          IPK_SRC=$(ls dist/*.ipk | head -n1)
+          BUILT_VER=$(basename "$APK_SRC" .apk | sed 's/^luci-app-prism-//')
+          echo "built_version=${BUILT_VER}" >> "$GITHUB_OUTPUT"
+          cp "$APK_SRC"           snapshot/luci-app-prism-snapshot.apk
+          cp "${APK_SRC}.sha256"  snapshot/luci-app-prism-snapshot.apk.sha256
+          cp "$IPK_SRC"           snapshot/luci-app-prism-snapshot.ipk
+          cp "${IPK_SRC}.sha256"  snapshot/luci-app-prism-snapshot.ipk.sha256
+
+      - name: Publish to rolling snapshot pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUILT_VERSION: ${{ steps.stage.outputs.built_version }}
+        run: |
+          TAG="snapshot"
+          NOTES_FILE=$(mktemp)
+          {
+            echo "Rolling snapshot — replaced on every commit to a non-main branch."
+            echo ""
+            echo "**Built version:** \`${BUILT_VERSION}\`"
+            echo "**Commit:** \`${GITHUB_SHA}\`"
+            echo "**Branch:** \`${GITHUB_REF_NAME}\`"
+            echo ""
+            echo "**APK** (OpenWrt 25.12+):"
+            echo "_apk-tools 3.x does not accept remote URLs directly — download first._"
+            echo '```'
+            echo "wget -O /tmp/prism.apk https://github.com/${GITHUB_REPOSITORY}/releases/download/snapshot/luci-app-prism-snapshot.apk && apk add --allow-untrusted /tmp/prism.apk && service rpcd reload"
+            echo '```'
+            echo ""
+            echo "**IPK** (OpenWrt ≤24.10 / opkg):"
+            echo '```'
+            echo "wget -O /tmp/prism.ipk https://github.com/${GITHUB_REPOSITORY}/releases/download/snapshot/luci-app-prism-snapshot.ipk && opkg install /tmp/prism.ipk && service rpcd reload"
+            echo '```'
+          } > "$NOTES_FILE"
+
+          # The "snapshot" tag is non-semantic and moves to the current commit
+          # on every build. Force-update is intentional here.
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -f "$TAG"
+          git push origin "$TAG" --force
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" \
+              --title "Snapshot — ${BUILT_VERSION}" \
+              --notes-file "$NOTES_FILE" \
+              --prerelease \
+              --target "${GITHUB_SHA}"
+            gh release upload "$TAG" snapshot/* --clobber
+          else
+            gh release create "$TAG" snapshot/* \
+              --title "Snapshot — ${BUILT_VERSION}" \
+              --notes-file "$NOTES_FILE" \
+              --prerelease \
+              --target "${GITHUB_SHA}"
+          fi
+
+      - name: Upload artifact (per-commit archive)
+        uses: actions/upload-artifact@v4
+        with:
+          name: luci-app-prism-snapshot-${{ github.sha }}
+          path: |
+            dist/*.apk
+            dist/*.ipk
+            dist/*.sha256
+          retention-days: 30
+          if-no-files-found: error

@@ -1,0 +1,314 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 OctetMill
+
+'use strict';
+'require baseclass';
+'require form';
+'require uci';
+'require rpc';
+'require view.prism.lib.ordersave as ordersave';
+'require view.prism.lib.formpanel as formpanel';
+
+var callListOutbounds = rpc.declare({
+	object: 'luci.prism',
+	method: 'list_outbounds',
+	expect: { '': {} }
+});
+
+// Types with a server endpoint. `direct` is excluded — a direct outbound has
+// no server field (build-config drops it); it is just an optional override.
+var SERVER_TYPES    = ['vless','vmess','trojan','shadowsocks','hysteria2','tuic','anytls','wireguard','socks'];
+var TRANSPORT_TYPES = ['vless','vmess','trojan','anytls'];
+
+// Add one depends() clause per accepted value (LuCI ORs separate calls).
+// `extra` keys are ANDed into every clause.
+function depAny(o, field, values, extra) {
+	values.forEach(function(v) {
+		var d = {};
+		d[field] = v;
+		if (extra)
+			for (var k in extra) d[k] = extra[k];
+		o.depends(d);
+	});
+}
+
+return baseclass.extend({
+	load: function() {
+		// A failed list_outbounds must not kill the tab — degrade to an
+		// empty outbound list instead.
+		return Promise.all([
+			uci.load('prism'),
+			callListOutbounds().catch(function() { return {}; })
+		]);
+	},
+
+	render: function(data) {
+		var outbounds = (data && data[1] && Array.isArray(data[1].outbounds))
+			? data[1].outbounds : [];
+
+		// URLTest member candidates: live outbounds plus any tag already
+		// stored on an existing urltest node, so a saved member whose node
+		// was removed still shows rather than being silently dropped.
+		var memberTags = {};
+		outbounds.forEach(function(ob) {
+			if (ob && ob.tag) memberTags[ob.tag] = true;
+		});
+		uci.sections('prism', 'node').forEach(function(n) {
+			var obs = n.urltest_outbounds;
+			if (!Array.isArray(obs))
+				obs = obs ? String(obs).split(/[,\s]+/) : [];
+			obs.forEach(function(t) { if (t) memberTags[t] = true; });
+		});
+		var memberList = Object.keys(memberTags).sort();
+
+		var m = new form.Map('prism');
+		var s = m.section(form.GridSection, 'node', _('Nodes'),
+			_('Manually configured proxy nodes. Changes are staged until Save; ' +
+			  'Save & Apply also reloads the service.'));
+		s.addremove = true;
+		s.sortable  = true;
+		s.anonymous = true;
+		s.addbtntitle = _('Add node');
+		s.modaltitle = function() { return _('Node'); };
+
+		s.tab('general',   _('General'));
+		s.tab('transport', _('Transport'));
+		s.tab('tls',       _('TLS'));
+		s.tab('urltest',   _('URLTest'));
+
+		var o;
+
+		// ── General: identity + protocol credentials ────────────────────
+		// ListValue options below intentionally carry no `default`: the
+		// first value() entry is the implicit default, so the field is
+		// written once on create but not re-written on an unchanged save
+		// (which would register a phantom UCI change).
+		var oTag = s.taboption('general', form.Value, 'tag', _('Name'));
+		oTag.rmempty = false;
+		oTag.placeholder = _('e.g. MY-VPS-HK');
+
+		var oType = s.taboption('general', form.ListValue, 'type', _('Type'));
+		[['vless','VLESS'],['vmess','VMess'],['trojan','Trojan'],
+		 ['shadowsocks','Shadowsocks'],['hysteria2','Hysteria2'],['tuic','TUIC'],
+		 ['anytls','AnyTLS'],['wireguard','WireGuard'],['socks','SOCKS5'],
+		 ['direct','Direct'],['urltest','URLTest']].forEach(function(t) {
+			oType.value(t[0], t[1]);
+		});
+
+		o = s.taboption('general', form.Value, 'server', _('Server'));
+		o.modalonly = true;
+		o.placeholder = _('hostname or IP');
+		depAny(o, 'type', SERVER_TYPES);
+
+		o = s.taboption('general', form.Value, 'server_port', _('Port'));
+		o.modalonly = true;
+		o.datatype = 'port';
+		o.placeholder = '443';
+		depAny(o, 'type', SERVER_TYPES);
+
+		o = s.taboption('general', form.Value, 'uuid', _('UUID'));
+		o.modalonly = true;
+		depAny(o, 'type', ['vless','vmess','tuic']);
+
+		o = s.taboption('general', form.Value, 'password', _('Password'));
+		o.modalonly = true;
+		o.password = true;
+		depAny(o, 'type', ['trojan','shadowsocks','hysteria2','tuic','anytls','socks']);
+
+		o = s.taboption('general', form.ListValue, 'security', _('Security'));
+		['auto','aes-128-gcm','chacha20-poly1305','none','zero'].forEach(function(v) {
+			o.value(v, v);
+		});
+		o.modalonly = true;
+		o.depends('type', 'vmess');
+
+		o = s.taboption('general', form.Value, 'alter_id', _('Alter ID'));
+		o.modalonly = true;
+		o.datatype = 'uinteger';
+		o.placeholder = '0';
+		o.depends('type', 'vmess');
+
+		o = s.taboption('general', form.ListValue, 'flow', _('Flow'));
+		o.value('', _('None'));
+		o.value('xtls-rprx-vision', 'xtls-rprx-vision');
+		o.modalonly = true;
+		o.optional = true;
+		o.depends('type', 'vless');
+
+		o = s.taboption('general', form.ListValue, 'method', _('Method'));
+		['aes-256-gcm','aes-128-gcm','chacha20-ietf-poly1305','2022-blake3-aes-128-gcm',
+		 '2022-blake3-aes-256-gcm','2022-blake3-chacha20-poly1305'].forEach(function(v) {
+			o.value(v, v);
+		});
+		o.modalonly = true;
+		o.depends('type', 'shadowsocks');
+
+		o = s.taboption('general', form.Value, 'username', _('Username'));
+		o.modalonly = true;
+		o.depends('type', 'socks');
+
+		o = s.taboption('general', form.ListValue, 'obfs_type', _('Obfuscation'));
+		o.value('', _('None'));
+		o.value('salamander', 'salamander');
+		o.modalonly = true;
+		o.optional = true;
+		o.depends('type', 'hysteria2');
+
+		o = s.taboption('general', form.Value, 'obfs_password', _('Obfs password'));
+		o.modalonly = true;
+		o.password = true;
+		o.depends({ type: 'hysteria2', obfs_type: 'salamander' });
+
+		o = s.taboption('general', form.ListValue, 'congestion_control', _('Congestion'));
+		['cubic','new_reno','bbr'].forEach(function(v) { o.value(v, v); });
+		o.modalonly = true;
+		o.depends('type', 'tuic');
+
+		o = s.taboption('general', form.ListValue, 'udp_relay_mode', _('UDP relay'));
+		o.value('', _('Default'));
+		o.value('native', 'native');
+		o.value('quic', 'quic');
+		o.modalonly = true;
+		o.optional = true;
+		o.depends('type', 'tuic');
+
+		o = s.taboption('general', form.Value, 'override_address', _('Override address'));
+		o.modalonly = true;
+		o.depends('type', 'direct');
+
+		o = s.taboption('general', form.Value, 'override_port', _('Override port'));
+		o.modalonly = true;
+		o.datatype = 'port';
+		o.depends('type', 'direct');
+
+		// ── WireGuard ───────────────────────────────────────────────────
+		o = s.taboption('general', form.Value, 'wg_local_address', _('Local address'));
+		o.modalonly = true;
+		o.placeholder = '10.0.0.2/32';
+		o.depends('type', 'wireguard');
+
+		o = s.taboption('general', form.Value, 'wg_private_key', _('Private key'));
+		o.modalonly = true;
+		o.password = true;
+		o.depends('type', 'wireguard');
+
+		o = s.taboption('general', form.Value, 'wg_peer_public_key', _('Peer public key'));
+		o.modalonly = true;
+		o.depends('type', 'wireguard');
+
+		o = s.taboption('general', form.Value, 'wg_preshared_key', _('Pre-shared key'));
+		o.modalonly = true;
+		o.password = true;
+		o.depends('type', 'wireguard');
+
+		o = s.taboption('general', form.Value, 'wg_mtu', _('MTU'));
+		o.modalonly = true;
+		o.datatype = 'uinteger';
+		o.placeholder = '1408';
+		o.depends('type', 'wireguard');
+
+		// ── Transport ───────────────────────────────────────────────────
+		o = s.taboption('transport', form.ListValue, 'transport_type', _('Transport'));
+		o.value('', _('None'));
+		o.value('ws',   'WebSocket');
+		o.value('grpc', 'gRPC');
+		o.value('http', 'HTTP/2');
+		o.modalonly = true;
+		o.optional = true;
+		depAny(o, 'type', TRANSPORT_TYPES);
+
+		o = s.taboption('transport', form.Value, 'transport_ws_path', _('WS path'));
+		o.modalonly = true;
+		o.placeholder = '/';
+		depAny(o, 'type', TRANSPORT_TYPES, { transport_type: 'ws' });
+
+		o = s.taboption('transport', form.Value, 'transport_ws_host', _('WS host header'));
+		o.modalonly = true;
+		depAny(o, 'type', TRANSPORT_TYPES, { transport_type: 'ws' });
+
+		o = s.taboption('transport', form.Value, 'transport_grpc_service', _('gRPC service'));
+		o.modalonly = true;
+		depAny(o, 'type', TRANSPORT_TYPES, { transport_type: 'grpc' });
+
+		o = s.taboption('transport', form.Value, 'transport_http_path', _('HTTP path'));
+		o.modalonly = true;
+		o.placeholder = '/';
+		depAny(o, 'type', TRANSPORT_TYPES, { transport_type: 'http' });
+
+		o = s.taboption('transport', form.Value, 'transport_http_host', _('HTTP host'));
+		o.modalonly = true;
+		depAny(o, 'type', TRANSPORT_TYPES, { transport_type: 'http' });
+
+		// ── TLS ─────────────────────────────────────────────────────────
+		o = s.taboption('tls', form.Flag, 'tls_enabled', _('TLS'));
+		o.modalonly = true;
+		depAny(o, 'type', ['vless','vmess']);
+
+		var oSni = s.taboption('tls', form.Value, 'tls_sni', _('SNI'));
+		oSni.modalonly = true;
+		oSni.placeholder = _('e.g. example.com');
+
+		var oInsec = s.taboption('tls', form.Flag, 'tls_insecure', _('Allow insecure'));
+		oInsec.modalonly = true;
+
+		var oFp = s.taboption('tls', form.ListValue, 'tls_fingerprint', _('uTLS fingerprint'));
+		oFp.value('', _('Default'));
+		['chrome','firefox','safari','ios','edge','random'].forEach(function(v) {
+			oFp.value(v, v);
+		});
+		oFp.modalonly = true;
+		oFp.optional = true;
+
+		// TLS detail fields: always shown for forced-TLS protocols, opt-in
+		// (tls_enabled) for vless / vmess.
+		[oSni, oInsec, oFp].forEach(function(opt) {
+			depAny(opt, 'type', ['trojan','hysteria2','tuic','anytls']);
+			opt.depends({ type: 'vless', tls_enabled: '1' });
+			opt.depends({ type: 'vmess', tls_enabled: '1' });
+		});
+
+		// ── URLTest ─────────────────────────────────────────────────────
+		o = s.taboption('urltest', form.ListValue, 'urltest_mode', _('Selection mode'));
+		o.value('manual', _('Manual (select nodes)'));
+		o.value('regex',  _('Regex (match by tag)'));
+		o.modalonly = true;
+		o.depends('type', 'urltest');
+
+		o = s.taboption('urltest', form.MultiValue, 'urltest_outbounds', _('Outbounds'));
+		// 'select' renders a ui.Dropdown multi-select: checkboxes plus a
+		// built-in filter field inside the opened dropdown panel.
+		o.widget = 'select';
+		memberList.forEach(function(t) { o.value(t, t); });
+		o.modalonly = true;
+		o.depends({ type: 'urltest', urltest_mode: 'manual' });
+
+		o = s.taboption('urltest', form.Value, 'urltest_regex', _('Tag pattern'));
+		o.modalonly = true;
+		o.placeholder = '.*HK.*|.*JP.*';
+		o.depends({ type: 'urltest', urltest_mode: 'regex' });
+
+		o = s.taboption('urltest', form.Value, 'urltest_url', _('Test URL'));
+		o.modalonly = true;
+		o.placeholder = 'https://www.gstatic.com/generate_204';
+		o.depends('type', 'urltest');
+
+		o = s.taboption('urltest', form.Value, 'urltest_interval', _('Interval'));
+		o.modalonly = true;
+		o.placeholder = '3m';
+		o.depends('type', 'urltest');
+
+		o = s.taboption('urltest', form.Value, 'urltest_tolerance', _('Tolerance (ms)'));
+		o.modalonly = true;
+		o.datatype = 'uinteger';
+		o.placeholder = '50';
+		o.depends('type', 'urltest');
+
+		this.map = m;
+		ordersave.install(m, 'node');
+		return m.render();
+	},
+
+	handleSave:      function() { return formpanel.save(this); },
+	handleSaveApply: function() { return formpanel.saveApply(this); },
+	handleReset:     function() { return formpanel.resetGrid(this); }
+});

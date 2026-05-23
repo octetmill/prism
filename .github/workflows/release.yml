@@ -1,0 +1,119 @@
+name: Release
+
+# Releases are triggered by a v* tag, not by merges to main. The tag can be
+# pushed from git (`git push origin v0.1.0`) or created together with the
+# release in the GitHub UI — this workflow handles both: it creates the
+# release when only the tag exists, or uploads the built packages to a
+# release already created in the UI. Assets stay immutable: a re-run that
+# would overwrite an existing asset fails instead of clobbering it.
+#
+# Tag format:
+#   v0.1.0       — normal release; PKG_RELEASE defaults to 1
+#   v0.1.0-r2    — packaging-only re-release of the same source (rare)
+
+on:
+  push:
+    tags:
+      - 'v[0-9]*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create GitHub releases
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install apk-tools
+        uses: ./.github/actions/install-apk-tools
+
+      - name: Parse tag
+        id: ver
+        run: |
+          TAG="${GITHUB_REF_NAME}"           # v0.1.0 or v0.1.0-r2
+          STRIPPED="${TAG#v}"
+          case "$STRIPPED" in
+            *-r*)
+              VERSION="${STRIPPED%-r*}"
+              RELEASE="${STRIPPED##*-r}"
+              ;;
+            *)
+              VERSION="$STRIPPED"
+              RELEASE="1"
+              ;;
+          esac
+          echo "tag=${TAG}"           >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}"   >> "$GITHUB_OUTPUT"
+          echo "release=${RELEASE}"   >> "$GITHUB_OUTPUT"
+          echo "Building release ${TAG} (version=${VERSION} release=${RELEASE})"
+
+      - name: Build packages
+        env:
+          PRISM_VERSION: ${{ steps.ver.outputs.version }}
+          PRISM_RELEASE: ${{ steps.ver.outputs.release }}
+        run: .github/workflows/package.sh
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.ver.outputs.tag }}"
+          VERSION="${{ steps.ver.outputs.version }}"
+          RELEASE="${{ steps.ver.outputs.release }}"
+
+          # Platform-tagged copies for distribution. Feed index tools use the
+          # clean filenames inside the feed directory tree.
+          for f in dist/*.apk; do
+            [ -f "$f" ] || continue
+            base="${f%.apk}"
+            cp "$f"          "${base}-openwrt-25.12.apk"
+            cp "${f}.sha256" "${base}-openwrt-25.12.apk.sha256" 2>/dev/null || true
+          done
+          for f in dist/*.ipk; do
+            [ -f "$f" ] || continue
+            base="${f%.ipk}"
+            cp "$f"          "${base}-openwrt-24.10.ipk"
+            cp "${f}.sha256" "${base}-openwrt-24.10.ipk.sha256" 2>/dev/null || true
+          done
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # The release already exists — it was created from the GitHub UI,
+            # which makes the tag and the release together. Attach the built
+            # packages to it. `gh release upload` without --clobber still
+            # errors if an asset of the same name is already present, so a
+            # genuine re-run is rejected and published bytes stay immutable.
+            # The UI-authored title and notes are left untouched.
+            echo "Release $TAG exists — uploading assets to it"
+            gh release upload "$TAG" \
+              dist/*-openwrt-25.12.apk dist/*-openwrt-25.12.apk.sha256 \
+              dist/*-openwrt-24.10.ipk dist/*-openwrt-24.10.ipk.sha256
+            gh release edit "$TAG" --latest
+          else
+            # Only the tag exists (pushed from git) — create the release.
+            echo "Release $TAG does not exist — creating it"
+            NOTES_FILE=$(mktemp)
+            DL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+            {
+              echo "Release $TAG"
+              echo ""
+              echo "**APK** (OpenWrt 25.12+)"
+              echo "_apk-tools 3.x does not accept remote URLs directly — download first._"
+              echo '```'
+              echo "wget -O /tmp/prism.apk ${DL}/luci-app-prism-${VERSION}-r${RELEASE}-openwrt-25.12.apk && apk add --allow-untrusted /tmp/prism.apk && service rpcd reload"
+              echo '```'
+              echo ""
+              echo "**IPK** (OpenWrt ≤24.10 / opkg)"
+              echo '```'
+              echo "wget -O /tmp/prism.ipk ${DL}/luci-app-prism_${VERSION}-${RELEASE}_all-openwrt-24.10.ipk && opkg install /tmp/prism.ipk && service rpcd reload"
+              echo '```'
+            } > "$NOTES_FILE"
+            gh release create "$TAG" \
+              dist/*-openwrt-25.12.apk dist/*-openwrt-25.12.apk.sha256 \
+              dist/*-openwrt-24.10.ipk dist/*-openwrt-24.10.ipk.sha256 \
+              --title "luci-app-prism $TAG" \
+              --notes-file "$NOTES_FILE" \
+              --latest
+          fi

@@ -1,0 +1,42 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 OctetMill
+#
+# Called hourly by cron. Syncs each enabled subscription whose auto_update
+# interval (in hours) has elapsed since last_sync. Exits quickly when nothing
+# is due.
+
+. /lib/functions.sh
+
+_sync_one() {
+	local sid="$1"
+	local enabled auto_update last_sync
+
+	config_get_bool enabled     "$sid" enabled     0
+	config_get      auto_update "$sid" auto_update 0
+	config_get      last_sync   "$sid" last_sync   ""
+
+	[ "$enabled" = "1" ] || return
+	[ "$auto_update" -gt 0 ] 2>/dev/null || return
+
+	local now interval_secs
+	now=$(date +%s)
+	interval_secs=$((auto_update * 3600))
+
+	if [ -n "$last_sync" ]; then
+		local last_epoch
+		last_epoch=$(date -d "$last_sync" +%s 2>/dev/null) || return
+		[ $((now - last_epoch)) -ge "$interval_secs" ] || return
+	fi
+
+	logger -p daemon.info -t prism "sync: auto-update, syncing subscription '$sid'"
+	ubus call luci.prism sync_subscription "{\"id\":\"$sid\"}" >/dev/null 2>&1
+}
+
+config_load prism
+config_foreach _sync_one subscription
+
+# After all due subs have been synced, ask the rpcd handler to diff the
+# freshly-generated config against the running one and restart sing-box
+# only when an active outbound (direct or via urltest) actually changed.
+ubus call luci.prism reload_if_changed >/dev/null 2>&1

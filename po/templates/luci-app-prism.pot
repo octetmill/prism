@@ -1,0 +1,90 @@
+# Prism LuCI app translation template
+# Copyright (C) 2024 OctetMill
+# SPDX-License-Identifier: GPL-3.0-only
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: luci-app-prism\n"
+"Report-Msgid-Bugs-To: https://github.com/octetmill/prism/issues\n"
+"POT-Creation-Date: 2024-01-01 00:00+0000\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+msgid "Prism"
+msgstr ""
+
+msgid "Overview"
+msgstr ""
+
+msgid "Configuration"
+msgstr ""
+
+msgid "Log"
+msgstr ""
+
+msgid "sing-box proxy engine status"
+msgstr ""
+
+msgid "Status"
+msgstr ""
+
+msgid "Running"
+msgstr ""
+
+msgid "Stopped"
+msgstr ""
+
+msgid "Enabled"
+msgstr ""
+
+msgid "Yes"
+msgstr ""
+
+msgid "No"
+msgstr ""
+
+msgid "Version"
+msgstr ""
+
+msgid "Unknown"
+msgstr ""
+
+msgid "Reload"
+msgstr ""
+
+msgid "Enable"
+msgstr ""
+
+msgid "Service reloaded."
+msgstr ""
+
+msgid "sing-box settings"
+msgstr ""
+
+msgid "General"
+msgstr ""
+
+msgid "Config path"
+msgstr ""
+
+msgid "sing-box JSON config"
+msgstr ""
+
+msgid "Raw JSON configuration passed directly to sing-box."
+msgstr ""
+
+msgid "Save JSON"
+msgstr ""
+
+msgid "Invalid JSON: "
+msgstr ""
+
+msgid "Configuration saved."
+msgstr ""
+
+msgid "Refresh"
+msgstr ""
+
+msgid "Auto-scroll"
+msgstr ""
