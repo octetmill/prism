@@ -114,7 +114,7 @@ return baseclass.extend({
 		s.addremove = true;
 		s.sortable  = true;
 		s.anonymous = true;
-		s.addbtntitle = _('Add subscription');
+		s.addbtntitle = _('Add');
 		s.modaltitle = function() { return _('Subscription'); };
 
 		var oEnabled = s.option(form.Flag, 'enabled', _('Enabled'));
@@ -268,7 +268,7 @@ return baseclass.extend({
 		s.addremove = true;
 		s.sortable  = true;
 		s.anonymous = true;
-		s.addbtntitle = _('Add node');
+		s.addbtntitle = _('Add');
 		s.modaltitle = function() { return _('Node'); };
 
 		s.tab('general',   _('General'));
