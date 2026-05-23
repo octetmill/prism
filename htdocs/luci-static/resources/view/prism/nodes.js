@@ -362,9 +362,23 @@ return baseclass.extend({
 		oDefault.rmempty = false;
 		oDefault.depends('type', 'selector');
 
+		// Read the current member list of this section, preferring the live
+		// widget value but falling back to the UCI value when the widget
+		// has not been mounted yet (e.g. at first renderWidget pass).
+		function pickedMembers(map, section_id) {
+			var opts = map.lookupOption('urltest_outbounds', section_id);
+			var opt  = opts && opts[0];
+			if (!opt) return [];
+			var v = opt.formvalue(section_id);
+			if (v === null || v === undefined) v = opt.cfgvalue(section_id);
+			if (Array.isArray(v)) return v;
+			if (typeof v === 'string' && v !== '')
+				return v.split(/[,\s]+/).filter(Boolean);
+			return [];
+		}
+
 		oDefault.renderWidget = function(section_id, option_index, cfgvalue) {
-			var picked = this.section.formvalue(section_id, 'urltest_outbounds');
-			if (!Array.isArray(picked)) picked = picked ? [picked] : [];
+			var picked = pickedMembers(this.map, section_id);
 			this.keylist = picked.slice();
 			this.vallist = picked.map(function(t) { return memberLabel[t] || t; });
 			return form.ListValue.prototype.renderWidget.call(this, section_id, option_index, cfgvalue);
@@ -373,8 +387,7 @@ return baseclass.extend({
 		oDefault.validate = function(section_id, value) {
 			if (!value)
 				return _('Pick a default outbound.');
-			var picked = this.section.formvalue(section_id, 'urltest_outbounds') || [];
-			if (!Array.isArray(picked)) picked = [picked];
+			var picked = pickedMembers(this.map, section_id);
 			if (picked.indexOf(value) < 0)
 				return _('Default must be one of the selected outbounds.');
 			return true;
