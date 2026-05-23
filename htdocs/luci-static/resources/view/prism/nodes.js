@@ -408,20 +408,40 @@ return baseclass.extend({
 		// oMembers.onchange handler couldn't update it. Render a single-
 		// select ui.Dropdown directly so the live add/remove path works
 		// (mirrors form.MultiValue's own widget pick).
+		//
+		// At the moment renderWidget runs during the modal-open render pass,
+		// the cloned `urltest_outbounds` option's `.data[section_id]` has
+		// not yet been populated by the modal map's section.load chain
+		// (verified empirically — calling renderWidget *after* modal mount
+		// produces the correct dropdown, but the initial call sees no
+		// picked members). So we render an empty placeholder synchronously
+		// to satisfy the render Promise, then in a `setTimeout(0)` — one
+		// tick later, with the modal in the DOM and load complete — call
+		// addChoices() to populate the real member list.
 		oDefault.renderWidget = function(section_id, option_index, cfgvalue) {
-			var picked  = pickedMembers(this.map, section_id);
-			var sortKey = [''].concat(picked);
-			var choices = { '': _('— none —') };
-			picked.forEach(function(t) { choices[t] = memberLabel[t] || t; });
-			var widget = new ui.Dropdown((cfgvalue != null) ? cfgvalue : '', choices, {
+			var initialValue = (cfgvalue != null) ? cfgvalue : '';
+			var widget = new ui.Dropdown(initialValue, { '': _('— none —') }, {
 				id:                 this.cbid(section_id),
-				sort:               sortKey,
+				sort:               [''],
 				optional:           true,
 				select_placeholder: _('— none —'),
 				validate:           this.getValidator(section_id),
 				disabled:           this.map.readonly
 			});
-			return widget.render();
+			var node = widget.render();
+			var self = this;
+			setTimeout(function() {
+				var w = self.getUIElement(section_id);
+				if (!w) return;
+				var picked = pickedMembers(self.map, section_id);
+				if (!picked.length) return;
+				var labels = {};
+				picked.forEach(function(t) { labels[t] = memberLabel[t] || t; });
+				w.addChoices(picked, labels);
+				if (initialValue && picked.indexOf(initialValue) >= 0)
+					w.setValue(initialValue);
+			}, 0);
+			return node;
 		};
 
 		oDefault.validate = function(section_id, value) {
