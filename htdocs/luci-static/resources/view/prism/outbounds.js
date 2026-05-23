@@ -117,21 +117,6 @@ return baseclass.extend({
 		s.addbtntitle = _('Add');
 		s.modaltitle = function() { return _('Subscription'); };
 
-		// node_count / last_sync / status are RPC-populated read-only fields
-		// shown in the grid row only — they carry no value worth editing in
-		// the modal. GridSection has no built-in "grid only" flag, so we
-		// filter them out at modal-render time. renderMoreOptionsModal clones
-		// children synchronously before yielding to the modal map, so a
-		// transient mutation of `this.children` is enough.
-		var GRID_ONLY = { 'node_count': true, 'last_sync': true, 'status': true };
-		var origRenderModal = s.renderMoreOptionsModal;
-		s.renderMoreOptionsModal = function(section_id, ev) {
-			var saved = this.children;
-			this.children = saved.filter(function(o) { return !GRID_ONLY[o.option]; });
-			try     { return origRenderModal.call(this, section_id, ev); }
-			finally { this.children = saved; }
-		};
-
 		var oEnabled = s.option(form.Flag, 'enabled', _('Enabled'));
 		oEnabled['default'] = '1';
 		oEnabled.rmempty = false;
@@ -141,7 +126,10 @@ return baseclass.extend({
 		oName.rmempty = false;
 		oName.placeholder = _('My Subscription');
 
-		s.option(form.DummyValue, 'node_count', _('Nodes'));
+		// RPC-populated read-only fields shown in the grid row only —
+		// modalonly=false excludes them from the per-row edit modal.
+		var oCount = s.option(form.DummyValue, 'node_count', _('Nodes'));
+		oCount.modalonly = false;
 
 		var oView = s.option(form.Button, '_view', _('View'));
 		oView.modalonly = false;
@@ -152,8 +140,10 @@ return baseclass.extend({
 			return self._showNodes(section_id);
 		};
 
-		s.option(form.DummyValue, 'last_sync',  _('Last sync'));
-		s.option(form.DummyValue, 'status',     _('Status'));
+		var oLast = s.option(form.DummyValue, 'last_sync',  _('Last sync'));
+		oLast.modalonly = false;
+		var oStatus = s.option(form.DummyValue, 'status',  _('Status'));
+		oStatus.modalonly = false;
 
 		var oUrl = s.option(form.Value, 'url', _('URL'));
 		oUrl.modalonly = true;
