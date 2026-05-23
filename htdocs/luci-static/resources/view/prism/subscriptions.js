@@ -29,6 +29,13 @@ var callReloadIfChanged = rpc.declare({
 	expect: { '': {} }
 });
 
+var callListSubscriptionNodes = rpc.declare({
+	object: 'luci.prism',
+	method: 'list_subscription_nodes',
+	params: ['id'],
+	expect: { '': {} }
+});
+
 return baseclass.extend({
 	load: function() {
 		return uci.load('prism');
@@ -56,6 +63,16 @@ return baseclass.extend({
 		oName.placeholder = _('My Subscription');
 
 		s.option(form.DummyValue, 'node_count', _('Nodes'));
+
+		var oView = s.option(form.Button, '_view', _('View'));
+		oView.modalonly = false;
+		oView.editable = true;
+		oView.inputtitle = _('View');
+		oView.inputstyle = 'neutral';
+		oView.onclick = function(ev, section_id) {
+			return self._showNodes(section_id);
+		};
+
 		s.option(form.DummyValue, 'last_sync',  _('Last sync'));
 		s.option(form.DummyValue, 'status',     _('Status'));
 
@@ -130,6 +147,69 @@ return baseclass.extend({
 					'click': ui.createHandlerFn(self, '_syncAll')
 				}, [ _('Sync all now') ]));
 			return node;
+		});
+	},
+
+	_showNodes: function(section_id) {
+		var name = uci.get('prism', section_id, 'name') || section_id;
+		ui.showModal(_('Nodes — %s').format(name), [
+			E('p', { 'class': 'spinning' }, [ _('Loading…') ]),
+			E('div', { 'class': 'right' }, [
+				E('button', {
+					'class': 'btn',
+					'click': ui.hideModal
+				}, [ _('Close') ])
+			])
+		]);
+		return callListSubscriptionNodes(section_id).then(function(res) {
+			var nodes = (res && res.nodes) || [];
+			var content;
+			if (nodes.length === 0) {
+				content = E('p', {}, [
+					_('No nodes. Sync this subscription to populate the list.')
+				]);
+			} else {
+				var rows = [
+					E('tr', { 'class': 'tr cbi-section-table-titles' }, [
+						E('th', { 'class': 'th cbi-section-table-cell' }, [ _('Name') ]),
+						E('th', { 'class': 'th cbi-section-table-cell' }, [ _('Type') ]),
+						E('th', { 'class': 'th cbi-section-table-cell' }, [ _('Server') ])
+					])
+				];
+				for (var i = 0; i < nodes.length; i++) {
+					var n = nodes[i];
+					var srv = n.server || '';
+					if (srv !== '' && n.server_port)
+						srv += ':' + n.server_port;
+					rows.push(E('tr', { 'class': 'tr cbi-section-table-row' }, [
+						E('td', { 'class': 'td' }, [ n.tag || '' ]),
+						E('td', { 'class': 'td' }, [ n.type || '' ]),
+						E('td', { 'class': 'td' }, [ srv ])
+					]));
+				}
+				content = E('div', { 'style': 'max-height:60vh; overflow:auto' }, [
+					E('table', { 'class': 'table cbi-section-table' }, rows)
+				]);
+			}
+			ui.showModal(_('Nodes — %s (%d)').format(name, nodes.length), [
+				content,
+				E('div', { 'class': 'right' }, [
+					E('button', {
+						'class': 'btn',
+						'click': ui.hideModal
+					}, [ _('Close') ])
+				])
+			]);
+		}).catch(function() {
+			ui.showModal(_('Nodes — %s').format(name), [
+				E('p', {}, [ _('Failed to load nodes.') ]),
+				E('div', { 'class': 'right' }, [
+					E('button', {
+						'class': 'btn',
+						'click': ui.hideModal
+					}, [ _('Close') ])
+				])
+			]);
 		});
 	},
 

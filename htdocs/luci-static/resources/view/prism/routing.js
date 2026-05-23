@@ -466,11 +466,42 @@ return baseclass.extend({
 		});
 		rsTokens.sort();
 
+		// Map sub_id → human-readable name and display order. Two subscriptions
+		// can carry nodes with identical tags; the label shown in the outbound
+		// dropdown must make clear which subscription a tag comes from, and
+		// the listing order must match the Subscriptions tab. Manual nodes
+		// (subscription === '') sort to the top, in Nodes-tab order.
+		var subName = {}, subOrder = {};
+		uci.sections('prism', 'subscription').forEach(function(sub, idx) {
+			subName[sub['.name']]  = sub.name || sub['.name'];
+			subOrder[sub['.name']] = idx;
+		});
+		function groupKey(sub_id) {
+			if (!sub_id) return 0;
+			if (sub_id in subOrder) return 1 + subOrder[sub_id];
+			return Infinity;
+		}
+
 		function addOutbounds(o) {
 			o.value('direct', _('direct (no proxy)'));
 			o.value('block',  _('block (drop)'));
-			outbounds.forEach(function(ob) {
-				o.value(ob.tag, ob.tag);
+			var entries = outbounds.map(function(ob, i) {
+				var label = (ob.subscription && subName[ob.subscription])
+					? subName[ob.subscription] + '/' + ob.tag
+					: ob.tag;
+				return {
+					tag:   ob.tag,
+					label: label,
+					group: groupKey(ob.subscription),
+					idx:   i
+				};
+			});
+			entries.sort(function(a, b) {
+				if (a.group !== b.group) return a.group - b.group;
+				return a.idx - b.idx;
+			});
+			entries.forEach(function(e) {
+				o.value(e.tag, e.label);
 			});
 		}
 
