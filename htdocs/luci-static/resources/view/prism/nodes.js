@@ -46,41 +46,60 @@ return baseclass.extend({
 		var outbounds = (data && data[1] && Array.isArray(data[1].outbounds))
 			? data[1].outbounds : [];
 
-		// Map sub_id → human-readable subscription name for label disambiguation.
-		// Two subscriptions can carry nodes with identical tags; sing-box itself
-		// dedupes by tag (first-seen wins, with manual overriding), but the
-		// label shown to the user must make clear which subscription a tag
-		// comes from.
-		var subName = {};
-		uci.sections('prism', 'subscription').forEach(function(sub) {
-			subName[sub['.name']] = sub.name || sub['.name'];
+		// Map sub_id → human-readable name and display order. Two subscriptions
+		// can carry nodes with identical tags; the label shown in the dropdown
+		// must make clear which subscription a tag comes from. Manual nodes
+		// (no subscription) and orphan tags (saved member whose source is
+		// gone) get their own ordering buckets.
+		var subName = {}, subOrder = {};
+		uci.sections('prism', 'subscription').forEach(function(sub, idx) {
+			subName[sub['.name']]  = sub.name || sub['.name'];
+			subOrder[sub['.name']] = idx;
 		});
 		function labelFor(tag, sub_id) {
 			if (sub_id && subName[sub_id])
 				return subName[sub_id] + '/' + tag;
 			return tag;
 		}
+		// Sort group: 0 = manual, 1+ = subscriptions in Subscriptions-tab
+		// order, Infinity = orphan (saved tag, source gone). Within a group,
+		// the caller's original index preserves sync order for sub nodes and
+		// Node-tab order for manual nodes.
+		function groupKey(sub_id) {
+			if (!sub_id) return 0;
+			if (sub_id in subOrder) return 1 + subOrder[sub_id];
+			return Infinity;
+		}
 
 		// URLTest member candidates: live outbounds plus any tag already
 		// stored on an existing urltest node, so a saved member whose node
 		// was removed still shows rather than being silently dropped.
 		var memberByTag = {};
-		outbounds.forEach(function(ob) {
-			if (ob && ob.tag)
-				memberByTag[ob.tag] = labelFor(ob.tag, ob.subscription);
+		outbounds.forEach(function(ob, i) {
+			if (ob && ob.tag && !(ob.tag in memberByTag)) {
+				memberByTag[ob.tag] = {
+					tag:   ob.tag,
+					label: labelFor(ob.tag, ob.subscription),
+					group: groupKey(ob.subscription),
+					idx:   i
+				};
+			}
 		});
 		uci.sections('prism', 'node').forEach(function(n) {
 			var obs = n.urltest_outbounds;
 			if (!Array.isArray(obs))
 				obs = obs ? String(obs).split(/[,\s]+/) : [];
 			obs.forEach(function(t) {
-				if (t && !memberByTag[t]) memberByTag[t] = t;
+				if (t && !(t in memberByTag)) {
+					memberByTag[t] = { tag: t, label: t, group: Infinity, idx: 0 };
+				}
 			});
 		});
-		var memberList = Object.keys(memberByTag).map(function(tag) {
-			return { tag: tag, label: memberByTag[tag] };
-		});
+		var memberList = [];
+		for (var k in memberByTag) memberList.push(memberByTag[k]);
 		memberList.sort(function(a, b) {
+			if (a.group !== b.group) return a.group - b.group;
+			if (a.idx   !== b.idx)   return a.idx   - b.idx;
 			return a.label < b.label ? -1 : a.label > b.label ? 1 : 0;
 		});
 

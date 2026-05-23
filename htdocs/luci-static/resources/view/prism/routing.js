@@ -466,26 +466,39 @@ return baseclass.extend({
 		});
 		rsTokens.sort();
 
-		// Map sub_id → human-readable subscription name. Two subscriptions can
-		// carry nodes with identical tags; the label shown in the outbound
-		// dropdown must make clear which subscription a tag comes from. Manual
-		// nodes (subscription === '') show their tag unprefixed.
-		var subName = {};
-		uci.sections('prism', 'subscription').forEach(function(sub) {
-			subName[sub['.name']] = sub.name || sub['.name'];
+		// Map sub_id → human-readable name and display order. Two subscriptions
+		// can carry nodes with identical tags; the label shown in the outbound
+		// dropdown must make clear which subscription a tag comes from, and
+		// the listing order must match the Subscriptions tab. Manual nodes
+		// (subscription === '') sort to the top, in Nodes-tab order.
+		var subName = {}, subOrder = {};
+		uci.sections('prism', 'subscription').forEach(function(sub, idx) {
+			subName[sub['.name']]  = sub.name || sub['.name'];
+			subOrder[sub['.name']] = idx;
 		});
+		function groupKey(sub_id) {
+			if (!sub_id) return 0;
+			if (sub_id in subOrder) return 1 + subOrder[sub_id];
+			return Infinity;
+		}
 
 		function addOutbounds(o) {
 			o.value('direct', _('direct (no proxy)'));
 			o.value('block',  _('block (drop)'));
-			var entries = outbounds.map(function(ob) {
+			var entries = outbounds.map(function(ob, i) {
 				var label = (ob.subscription && subName[ob.subscription])
 					? subName[ob.subscription] + '/' + ob.tag
 					: ob.tag;
-				return { tag: ob.tag, label: label };
+				return {
+					tag:   ob.tag,
+					label: label,
+					group: groupKey(ob.subscription),
+					idx:   i
+				};
 			});
 			entries.sort(function(a, b) {
-				return a.label < b.label ? -1 : a.label > b.label ? 1 : 0;
+				if (a.group !== b.group) return a.group - b.group;
+				return a.idx - b.idx;
 			});
 			entries.forEach(function(e) {
 				o.value(e.tag, e.label);
