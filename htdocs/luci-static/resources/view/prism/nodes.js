@@ -363,10 +363,18 @@ return baseclass.extend({
 		o.placeholder = '.*HK.*|.*JP.*';
 		o.depends({ type: 'urltest', urltest_mode: 'regex' });
 
+		// Test URL: combobox (form.Value auto-promotes to ui.Combobox when
+		// .value() entries are present) — preset picks for the two most
+		// common /generate_204 endpoints, plus free-text entry for any
+		// custom URL the user prefers to type.
 		o = s.taboption('group', form.Value, 'urltest_url', _('Test URL'));
 		o.modalonly = true;
-		o.placeholder = 'https://www.gstatic.com/generate_204';
 		o.depends('type', 'urltest');
+		o.default = 'https://www.gstatic.com/generate_204';
+		o.value('https://www.gstatic.com/generate_204',     'Google (HTTPS)');
+		o.value('http://www.gstatic.com/generate_204',      'Google (HTTP)');
+		o.value('https://cp.cloudflare.com/generate_204',   'Cloudflare (HTTPS)');
+		o.value('http://cp.cloudflare.com/generate_204',    'Cloudflare (HTTP)');
 
 		o = s.taboption('group', form.Value, 'urltest_interval', _('Interval'));
 		o.modalonly = true;
