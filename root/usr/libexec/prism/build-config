@@ -550,6 +550,13 @@ local function build_node_from_uci(s)
 		if mode == "regex" then
 			-- Store the pattern for regex expansion in build_outbounds step 3
 			ob._outbound_regex = s.urltest_regex or ""
+			local srcs = s.urltest_regex_sources
+			if type(srcs) == "string" and srcs ~= "" then
+				srcs = { srcs }
+			end
+			if type(srcs) == "table" and #srcs > 0 then
+				ob._outbound_regex_sources = srcs
+			end
 			ob.outbounds = {}
 		else
 			local raw = s.urltest_outbounds
@@ -602,13 +609,17 @@ local function build_outbounds(c)
 	-- would collide and make sing-box reject the whole config, so drop it.
 	local RESERVED_TAGS = { direct = true, block = true }
 
-	-- Manual nodes from UCI (reconstruct outbound from individual fields)
+	-- Manual nodes from UCI (reconstruct outbound from individual fields).
+	-- `_source` marks the origin so urltest regex can be restricted to a
+	-- subset of subscriptions; `_manual` is the sentinel for UCI-defined
+	-- nodes, mirroring the UI's MultiValue choice value.
 	c:foreach("prism", "node", function(s)
 		local ob = build_node_from_uci(s)
 		if ob and RESERVED_TAGS[ob.tag] then
 			io.stderr:write("prism build-config: node tag '" .. ob.tag ..
 				"' is reserved; skipping\n")
 		elseif ob and not seen[ob.tag] then
+			ob._source      = "_manual"
 			seen[ob.tag]    = true
 			all_map[ob.tag] = ob
 			all_ordered[#all_ordered + 1] = ob
@@ -637,6 +648,7 @@ local function build_outbounds(c)
 	local f = io.popen("find " .. NODES_DIR .. " -maxdepth 1 -name '*.json' 2>/dev/null | sort")
 	if f then
 		for path in f:lines() do
+			local sub_id = path:match("/([^/]+)%.json$")
 			local content = read_file(path)
 			if content and content ~= "" then
 				local ok, nodes = pcall(jsonc.parse, content)
@@ -649,6 +661,7 @@ local function build_outbounds(c)
 									io.stderr:write("prism build-config: subscription node "
 										.. "tag '" .. p.tag .. "' is reserved; skipping\n")
 								elseif not seen[p.tag] then
+									p._source      = sub_id
 									seen[p.tag]    = true
 									all_map[p.tag] = p
 									all_ordered[#all_ordered + 1] = p
@@ -700,13 +713,23 @@ local function build_outbounds(c)
 		local ob = all_map[tag]
 		if ob and (ob.type == "urltest" or ob.type == "selector") then
 			if ob._outbound_regex then
-				local pattern = ob._outbound_regex
+				local pattern  = ob._outbound_regex
+				local src_list = ob._outbound_regex_sources
 				ob._outbound_regex = nil  -- strip before handing to sing-box
+				ob._outbound_regex_sources = nil
+				-- Empty / nil source list means "match every source" — same
+				-- behaviour as before the urltest_regex_sources field existed.
+				local src_set = nil
+				if type(src_list) == "table" and #src_list > 0 then
+					src_set = {}
+					for _, sid in ipairs(src_list) do src_set[sid] = true end
+				end
 				if type(ob.outbounds) ~= "table" or #ob.outbounds == 0 then
 					ob.outbounds = {}
 					for _, other in ipairs(all_ordered) do
 						if other.type ~= "urltest" and other.type ~= "selector"
-						   and match_any(other.tag, pattern) then
+						   and match_any(other.tag, pattern)
+						   and (not src_set or src_set[other._source or ""]) then
 							ob.outbounds[#ob.outbounds + 1] = other.tag
 						end
 					end
@@ -771,6 +794,11 @@ local function build_outbounds(c)
 	local endpoints = {}
 	for _, ob in ipairs(all_ordered) do
 		if referenced[ob.tag] then
+			-- Strip Prism-internal markers before handing the node to sing-box,
+			-- which rejects unknown fields. `_outbound_regex(_sources)` are
+			-- already nil'd in step 3; `_source` is the origin tag used by the
+			-- regex-source filter above.
+			ob._source = nil
 			if ob._is_endpoint then
 				-- Prism-built WireGuard node → top-level endpoints array.
 				ob._is_endpoint = nil

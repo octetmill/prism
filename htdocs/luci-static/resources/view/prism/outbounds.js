@@ -519,6 +519,23 @@ return baseclass.extend({
 		o.placeholder = '.*HK.*|.*JP.*';
 		o.depends({ type: 'urltest', urltest_mode: 'regex' });
 
+		// Restrict regex matching to nodes from selected sources. Empty =
+		// match across every source (the behaviour before this field existed).
+		// Sentinel `_manual` covers UCI-defined manual nodes; remaining values
+		// are subscription section names. Subscriptions are anonymous
+		// (cfgXXXX), so `_manual` cannot collide with a real subscription id.
+		o = s.taboption('group', form.MultiValue, 'urltest_regex_sources', _('Sources'),
+			_('Subscriptions whose nodes are evaluated against the pattern. ' +
+			  'Leave empty to match nodes from every source.'));
+		o.widget = 'select';
+		o.value('_manual', _('Manual nodes'));
+		uci.sections('prism', 'subscription').forEach(function(sub) {
+			o.value(sub['.name'], sub.name || sub['.name']);
+		});
+		o.modalonly = true;
+		o.optional = true;
+		o.depends({ type: 'urltest', urltest_mode: 'regex' });
+
 		// Test URL: combobox (form.Value auto-promotes to ui.Combobox when
 		// .value() entries are present) — preset picks for the two most
 		// common /generate_204 endpoints, plus free-text entry for any
