@@ -1267,6 +1267,31 @@ local methods = {
 		end
 	},
 
+	-- Return the node list of one subscription, projected to the fields the
+	-- Subscriptions tab's "Nodes" modal renders (tag, type, server, port). The
+	-- on-disk file also carries a `payload` blob per node — the full sing-box
+	-- outbound JSON used by build-config — which is many KB per node and not
+	-- needed in the UI; stripping it here keeps the response small.
+	list_subscription_nodes = {
+		args = { id = "" },
+		call = function(args)
+			local id = args.id or ""
+			if not id:match("^[%w_%-]+$") then
+				return { nodes = {} }
+			end
+			local out = {}
+			for _, n in ipairs(read_nodes_file(id)) do
+				out[#out + 1] = {
+					tag         = n.tag or "",
+					type        = n.type or "",
+					server      = n.server or "",
+					server_port = tonumber(n.server_port) or 0
+				}
+			end
+			return { nodes = out }
+		end
+	},
+
 	list_rulesets = {
 		call = function()
 			local CACHE = "/etc/prism/rulesets-cache.json"

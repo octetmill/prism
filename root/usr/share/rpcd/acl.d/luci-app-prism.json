@@ -3,7 +3,7 @@
 		"description": "LuCI interface for sing-box",
 		"read": {
 			"ubus": {
-				"luci.prism": [ "get_status", "get_log", "get_config", "get_extra_config", "list_outbounds", "list_rulesets", "get_wan_dns" ]
+				"luci.prism": [ "get_status", "get_log", "get_config", "get_extra_config", "list_outbounds", "list_subscription_nodes", "list_rulesets", "get_wan_dns" ]
 			},
 			"uci": [ "prism" ]
 		},
