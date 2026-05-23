@@ -321,14 +321,14 @@ return baseclass.extend({
 		o.modalonly = true;
 		o.depends('type', 'urltest');
 
-		o = s.taboption('group', form.MultiValue, 'urltest_outbounds', _('Outbounds'));
+		var oMembers = s.taboption('group', form.MultiValue, 'urltest_outbounds', _('Outbounds'));
 		// 'select' renders a ui.Dropdown multi-select: checkboxes plus a
 		// built-in filter field inside the opened dropdown panel.
-		o.widget = 'select';
-		memberList.forEach(function(m) { o.value(m.tag, m.label); });
-		o.modalonly = true;
-		o.depends({ type: 'urltest', urltest_mode: 'manual' });
-		o.depends('type', 'selector');
+		oMembers.widget = 'select';
+		memberList.forEach(function(m) { oMembers.value(m.tag, m.label); });
+		oMembers.modalonly = true;
+		oMembers.depends({ type: 'urltest', urltest_mode: 'manual' });
+		oMembers.depends('type', 'selector');
 
 		o = s.taboption('group', form.Value, 'urltest_regex', _('Tag pattern'));
 		o.modalonly = true;
@@ -351,12 +351,25 @@ return baseclass.extend({
 		o.placeholder = '50';
 		o.depends('type', 'urltest');
 
-		// Selector default: must be one of the chosen members.
+		// Selector default: must be one of the chosen members. The choice list
+		// is built dynamically from the live "Outbounds" selection — at modal
+		// open via renderWidget, then kept in sync via oMembers.onchange.
+		var memberLabel = {};
+		memberList.forEach(function(m) { memberLabel[m.tag] = m.label; });
+
 		var oDefault = s.taboption('group', form.ListValue, 'selector_default', _('Default outbound'));
-		memberList.forEach(function(m) { oDefault.value(m.tag, m.label); });
 		oDefault.modalonly = true;
 		oDefault.rmempty = false;
 		oDefault.depends('type', 'selector');
+
+		oDefault.renderWidget = function(section_id, option_index, cfgvalue) {
+			var picked = this.section.formvalue(section_id, 'urltest_outbounds');
+			if (!Array.isArray(picked)) picked = picked ? [picked] : [];
+			this.keylist = picked.slice();
+			this.vallist = picked.map(function(t) { return memberLabel[t] || t; });
+			return form.ListValue.prototype.renderWidget.call(this, section_id, option_index, cfgvalue);
+		};
+
 		oDefault.validate = function(section_id, value) {
 			if (!value)
 				return _('Pick a default outbound.');
@@ -365,6 +378,19 @@ return baseclass.extend({
 			if (picked.indexOf(value) < 0)
 				return _('Default must be one of the selected outbounds.');
 			return true;
+		};
+
+		// When the member list changes, repopulate the default dropdown.
+		oMembers.onchange = function(ev, section_id, value) {
+			var widget = oDefault.getUIElement(section_id);
+			if (!widget) return;
+			var picked = Array.isArray(value) ? value : (value ? [value] : []);
+			var current = widget.getValue();
+			var labels = {};
+			picked.forEach(function(t) { labels[t] = memberLabel[t] || t; });
+			widget.clearChoices();
+			if (picked.length) widget.addChoices(picked, labels);
+			widget.setValue(picked.indexOf(current) >= 0 ? current : '');
 		};
 
 		this.map = m;
