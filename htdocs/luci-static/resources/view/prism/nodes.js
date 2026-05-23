@@ -4,6 +4,7 @@
 'use strict';
 'require baseclass';
 'require form';
+'require ui';
 'require uci';
 'require rpc';
 'require view.prism.lib.ordersave as ordersave';
@@ -402,12 +403,25 @@ return baseclass.extend({
 			return [];
 		}
 
+		// form.ListValue's default renderWidget builds a native <select> via
+		// ui.Select, which has no addChoices/clearChoices methods — so the
+		// oMembers.onchange handler couldn't update it. Render a single-
+		// select ui.Dropdown directly so the live add/remove path works
+		// (mirrors form.MultiValue's own widget pick).
 		oDefault.renderWidget = function(section_id, option_index, cfgvalue) {
-			var picked = pickedMembers(this.map, section_id);
-			this.keylist = [''].concat(picked);
-			this.vallist = [_('— none —')].concat(
-				picked.map(function(t) { return memberLabel[t] || t; }));
-			return form.ListValue.prototype.renderWidget.call(this, section_id, option_index, cfgvalue);
+			var picked  = pickedMembers(this.map, section_id);
+			var sortKey = [''].concat(picked);
+			var choices = { '': _('— none —') };
+			picked.forEach(function(t) { choices[t] = memberLabel[t] || t; });
+			var widget = new ui.Dropdown((cfgvalue != null) ? cfgvalue : '', choices, {
+				id:                 this.cbid(section_id),
+				sort:               sortKey,
+				optional:           true,
+				select_placeholder: _('— none —'),
+				validate:           this.getValidator(section_id),
+				disabled:           this.map.readonly
+			});
+			return widget.render();
 		};
 
 		oDefault.validate = function(section_id, value) {
