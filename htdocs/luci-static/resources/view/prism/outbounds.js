@@ -117,6 +117,21 @@ return baseclass.extend({
 		s.addbtntitle = _('Add');
 		s.modaltitle = function() { return _('Subscription'); };
 
+		// node_count / last_sync / status are RPC-populated read-only fields
+		// shown in the grid row only — they carry no value worth editing in
+		// the modal. GridSection has no built-in "grid only" flag, so we
+		// filter them out at modal-render time. renderMoreOptionsModal clones
+		// children synchronously before yielding to the modal map, so a
+		// transient mutation of `this.children` is enough.
+		var GRID_ONLY = { 'node_count': true, 'last_sync': true, 'status': true };
+		var origRenderModal = s.renderMoreOptionsModal;
+		s.renderMoreOptionsModal = function(section_id, ev) {
+			var saved = this.children;
+			this.children = saved.filter(function(o) { return !GRID_ONLY[o.option]; });
+			try     { return origRenderModal.call(this, section_id, ev); }
+			finally { this.children = saved; }
+		};
+
 		var oEnabled = s.option(form.Flag, 'enabled', _('Enabled'));
 		oEnabled['default'] = '1';
 		oEnabled.rmempty = false;
