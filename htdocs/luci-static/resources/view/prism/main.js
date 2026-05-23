@@ -12,8 +12,7 @@
 'require dom';
 'require session';
 'require view.prism.overview as overviewPanel';
-'require view.prism.subscriptions as subscriptionsPanel';
-'require view.prism.nodes as nodesPanel';
+'require view.prism.outbounds as outboundsPanel';
 'require view.prism.routing as routingPanel';
 'require view.prism.diagnostics as diagnosticsPanel';
 'require view.prism.service as servicePanel';
@@ -24,8 +23,7 @@
 
 var TABS = [
 	{ id: 'overview',      label: _('Overview'),      panel: overviewPanel },
-	{ id: 'subscriptions', label: _('Subscriptions'), panel: subscriptionsPanel },
-	{ id: 'nodes',         label: _('Nodes'),         panel: nodesPanel },
+	{ id: 'outbounds',     label: _('Outbounds'),     panel: outboundsPanel },
 	{ id: 'routing',       label: _('Routing'),       panel: routingPanel },
 	{ id: 'settings',      label: _('Settings'),      children: [
 		{ id: 'service',  label: _('Service'),  panel: servicePanel },
@@ -70,7 +68,13 @@ return view.extend({
 	_initialRoute: function() {
 		var raw = session.getLocalData('prism.activeTab') || '';
 		var parts = raw.split('/');
-		return { group: parts[0] || TABS[0].id, sub: parts[1] || null };
+		var group = parts[0] || TABS[0].id;
+		// Migrate stored tab ids from the pre-merge layout. The TABS filter
+		// in _activate() would otherwise fall back to TABS[0] (Overview),
+		// which is fine but surprising — land on the merged tab instead.
+		if (group === 'subscriptions' || group === 'nodes')
+			group = 'outbounds';
+		return { group: group, sub: parts[1] || null };
 	},
 
 	_buildMenu: function(items, activeId, onClick) {
