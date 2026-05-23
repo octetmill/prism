@@ -321,6 +321,11 @@ return baseclass.extend({
 		o.modalonly = true;
 		o.depends('type', 'urltest');
 
+		// Shared label lookup used by the dynamic selector_default dropdown
+		// below (both at modal open and inside oMembers.onchange).
+		var memberLabel = {};
+		memberList.forEach(function(m) { memberLabel[m.tag] = m.label; });
+
 		o = s.taboption('group', form.MultiValue, 'urltest_outbounds', _('Outbounds'));
 		// 'select' renders a ui.Dropdown multi-select: checkboxes plus a
 		// built-in filter field inside the opened dropdown panel.
@@ -329,6 +334,28 @@ return baseclass.extend({
 		o.modalonly = true;
 		o.depends({ type: 'urltest', urltest_mode: 'manual' });
 		o.depends('type', 'selector');
+		// When the picked member list changes, repopulate the sibling
+		// `selector_default` dropdown. Crucial: the GridSection edit modal
+		// builds a separate CBIMap with *clones* of these options
+		// (form.js renderMoreOptionsModal → cloneOptions), so a
+		// closure-captured reference to the outer `oDefault` would resolve
+		// to the wrong map. We look up the sibling option through `this.map`,
+		// which inside the modal IS the modal's clone map.
+		o.onchange = function(ev, section_id, value) {
+			var opts = this.map.lookupOption('selector_default', section_id);
+			var opt  = opts && opts[0];
+			if (!opt) return;
+			var widget = opt.getUIElement(section_id);
+			if (!widget) return;
+			var picked  = Array.isArray(value) ? value : (value ? [value] : []);
+			var current = widget.getValue();
+			var keys    = [''].concat(picked);
+			var labels  = { '': _('— none —') };
+			picked.forEach(function(t) { labels[t] = memberLabel[t] || t; });
+			widget.clearChoices(true);
+			widget.addChoices(keys, labels);
+			widget.setValue(picked.indexOf(current) >= 0 ? current : '');
+		};
 
 		o = s.taboption('group', form.Value, 'urltest_regex', _('Tag pattern'));
 		o.modalonly = true;
@@ -351,28 +378,41 @@ return baseclass.extend({
 		o.placeholder = '50';
 		o.depends('type', 'urltest');
 
-		// Selector default: optional. The dropdown lists every candidate
-		// member tag so the user can always pick one. If a non-empty value
-		// isn't actually in the chosen Outbounds at save time, validate
-		// rejects it — that's the source of truth, not the dropdown contents.
+		// Selector default: optional. The choice list is filtered at modal
+		// open to the section's currently-picked Outbounds and kept in sync
+		// by oMembers.onchange above.
 		var oDefault = s.taboption('group', form.ListValue, 'selector_default', _('Default outbound'));
 		oDefault.modalonly = true;
 		oDefault.optional = true;
 		oDefault.depends('type', 'selector');
-		oDefault.value('', _('— none —'));
-		memberList.forEach(function(m) { oDefault.value(m.tag, m.label); });
+
+		// Read the picked members of the currently-edited section. Inside the
+		// modal, `map` is the modal's clone CBIMap, so lookupOption resolves
+		// to the cloned `urltest_outbounds` whose formvalue/cfgvalue both
+		// reach the right widget/data.
+		function pickedMembers(map, section_id) {
+			var opts = map.lookupOption('urltest_outbounds', section_id);
+			var opt  = opts && opts[0];
+			if (!opt) return [];
+			var v = opt.formvalue(section_id);
+			if (v === null || v === undefined) v = opt.cfgvalue(section_id);
+			if (Array.isArray(v)) return v;
+			if (typeof v === 'string' && v !== '')
+				return v.split(/[,\s]+/).filter(Boolean);
+			return [];
+		}
+
+		oDefault.renderWidget = function(section_id, option_index, cfgvalue) {
+			var picked = pickedMembers(this.map, section_id);
+			this.keylist = [''].concat(picked);
+			this.vallist = [_('— none —')].concat(
+				picked.map(function(t) { return memberLabel[t] || t; }));
+			return form.ListValue.prototype.renderWidget.call(this, section_id, option_index, cfgvalue);
+		};
 
 		oDefault.validate = function(section_id, value) {
 			if (!value) return true;
-			var opts = this.map.lookupOption('urltest_outbounds', section_id);
-			var opt  = opts && opts[0];
-			if (!opt) return true;
-			var picked = opt.formvalue(section_id);
-			if (picked === null || picked === undefined)
-				picked = opt.cfgvalue(section_id);
-			if (!Array.isArray(picked))
-				picked = (typeof picked === 'string' && picked !== '')
-					? picked.split(/[,\s]+/).filter(Boolean) : [];
+			var picked = pickedMembers(this.map, section_id);
 			if (picked.indexOf(value) < 0)
 				return _('Default must be one of the selected outbounds.');
 			return true;
