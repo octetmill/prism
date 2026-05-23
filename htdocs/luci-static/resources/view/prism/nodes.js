@@ -371,6 +371,9 @@ return baseclass.extend({
 		o.modalonly = true;
 		o.depends('type', 'urltest');
 		o.default = 'https://www.gstatic.com/generate_204';
+		// Required (default is set) — drops the "unspecified" empty entry
+		// that form.Value would otherwise insert in the Combobox dropdown.
+		o.rmempty = false;
 		o.value('https://www.gstatic.com/generate_204',     'Google (HTTPS)');
 		o.value('http://www.gstatic.com/generate_204',      'Google (HTTP)');
 		o.value('https://cp.cloudflare.com/generate_204',   'Cloudflare (HTTPS)');
