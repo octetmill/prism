@@ -469,8 +469,9 @@ return baseclass.extend({
 		// Map sub_id → human-readable name and display order. Two subscriptions
 		// can carry nodes with identical tags; the label shown in the outbound
 		// dropdown must make clear which subscription a tag comes from, and
-		// the listing order must match the Subscriptions tab. Manual nodes
-		// (subscription === '') sort to the top, in Nodes-tab order.
+		// the listing order must match the Outbounds tab's Subscriptions
+		// section. Manual nodes (subscription === '') sort to the top, in
+		// Nodes-section order.
 		var subName = {}, subOrder = {};
 		uci.sections('prism', 'subscription').forEach(function(sub, idx) {
 			subName[sub['.name']]  = sub.name || sub['.name'];

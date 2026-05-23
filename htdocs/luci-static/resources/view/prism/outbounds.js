@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 OctetMill
 
+// Outbounds tab: subscriptions on top, manually-configured nodes below.
+// Both sections share one form.Map('prism') so a single Save & Apply commits
+// edits to both — they already share the same UCI config and the same global
+// revert (formpanel.resetGrid calls ui.changes.revert), so a unified footer is
+// the natural UX.
+
 'use strict';
 'require baseclass';
 'require form';
@@ -9,6 +15,32 @@
 'require rpc';
 'require view.prism.lib.ordersave as ordersave';
 'require view.prism.lib.formpanel as formpanel';
+
+var callSyncSubscription = rpc.declare({
+	object: 'luci.prism',
+	method: 'sync_subscription',
+	params: ['id'],
+	expect: { '': {} }
+});
+
+var callSyncAll = rpc.declare({
+	object: 'luci.prism',
+	method: 'sync_all_subscriptions',
+	expect: { '': {} }
+});
+
+var callReloadIfChanged = rpc.declare({
+	object: 'luci.prism',
+	method: 'reload_if_changed',
+	expect: { '': {} }
+});
+
+var callListSubscriptionNodes = rpc.declare({
+	object: 'luci.prism',
+	method: 'list_subscription_nodes',
+	params: ['id'],
+	expect: { '': {} }
+});
 
 var callListOutbounds = rpc.declare({
 	object: 'luci.prism',
@@ -44,6 +76,137 @@ return baseclass.extend({
 	},
 
 	render: function(data) {
+		var self = this;
+		var m = new form.Map('prism');
+
+		this._renderSubscriptions(m);
+		this._renderNodes(m, data);
+
+		this.map = m;
+		ordersave.install(m, 'subscription');
+		ordersave.install(m, 'node');
+
+		return m.render().then(function(node) {
+			// "Sync all now" sits next to the Add button of the
+			// subscriptions section — the first .cbi-section-create in
+			// document order, since subscriptions render before nodes.
+			var create = node.querySelector('.cbi-section-create');
+			if (create)
+				create.appendChild(E('button', {
+					'class': 'btn cbi-button cbi-button-neutral',
+					'style': 'margin-left:0.4em',
+					'click': ui.createHandlerFn(self, '_syncAll')
+				}, [ _('Sync all now') ]));
+			// Breathing room between the two GridSections — matches the
+			// gap between sibling sections on the stock DHCP page.
+			var nodeSection = node.querySelector('#cbi-prism-node');
+			if (nodeSection)
+				nodeSection.style.marginTop = '2em';
+			return node;
+		});
+	},
+
+	_renderSubscriptions: function(m) {
+		var self = this;
+
+		var s = m.section(form.GridSection, 'subscription', _('Subscriptions'),
+			_('Proxy subscriptions.'));
+		s.addremove = true;
+		s.sortable  = true;
+		s.anonymous = true;
+		s.addbtntitle = _('Add');
+		s.modaltitle = function() { return _('Subscription'); };
+
+		var oEnabled = s.option(form.Flag, 'enabled', _('Enabled'));
+		oEnabled['default'] = '1';
+		oEnabled.rmempty = false;
+		oEnabled.editable = true;
+
+		var oName = s.option(form.Value, 'name', _('Name'));
+		oName.rmempty = false;
+		oName.placeholder = _('My Subscription');
+
+		// RPC-populated read-only fields shown in the grid row only —
+		// modalonly=false excludes them from the per-row edit modal.
+		var oCount = s.option(form.DummyValue, 'node_count', _('Nodes'));
+		oCount.modalonly = false;
+
+		var oView = s.option(form.Button, '_view', _('View'));
+		oView.modalonly = false;
+		oView.editable = true;
+		oView.inputtitle = _('View');
+		oView.inputstyle = 'neutral';
+		oView.onclick = function(ev, section_id) {
+			return self._showNodes(section_id);
+		};
+
+		var oLast = s.option(form.DummyValue, 'last_sync',  _('Last sync'));
+		oLast.modalonly = false;
+		var oStatus = s.option(form.DummyValue, 'status',  _('Status'));
+		oStatus.modalonly = false;
+
+		var oUrl = s.option(form.Value, 'url', _('URL'));
+		oUrl.modalonly = true;
+		oUrl.rmempty = false;
+		oUrl.placeholder = 'https://example.com/sub';
+
+		var oAuto = s.option(form.Value, 'auto_update', _('Auto-update (hours)'),
+			_('0 disables periodic refresh.'));
+		oAuto.modalonly = true;
+		oAuto.datatype = 'uinteger';
+		oAuto['default'] = '0';
+
+		var oUA = s.option(form.Value, 'user_agent', _('User-Agent'));
+		oUA.modalonly = true;
+		oUA.placeholder = _('Leave blank for default');
+
+		var oSync = s.option(form.Button, '_sync', _('Sync'));
+		oSync.modalonly = false;
+		oSync.editable = true;
+		oSync.inputtitle = _('Sync');
+		oSync.inputstyle = 'apply';
+		oSync.onclick = function(ev, section_id) {
+			var btn = ev.currentTarget, label = btn.textContent;
+			btn.classList.remove('spinning');
+			var w = btn.offsetWidth, h = btn.offsetHeight;
+			btn.classList.add('spinning');
+			btn.style.width  = w + 'px';
+			btn.style.height = h + 'px';
+			btn.textContent = '';
+			return callSyncSubscription(section_id).then(function(res) {
+				var ok = res && res.status === 'ok';
+				ui.addNotification(null, E('p',
+					ok ? _('Synced: %d nodes.').format(res.node_count || 0)
+					   : _('Sync failed.')),
+					ok ? 'info' : 'warning');
+				if (!ok)
+					return;
+				return callReloadIfChanged().then(function(r) {
+					if (r && r.reloaded)
+						ui.addNotification(null,
+							E('p', _('Active outbound changed — sing-box reloaded.')), 'info');
+					// Close the edit modal first if the sync was triggered
+					// from inside it — remountActive() would orphan it.
+					ui.hideModal();
+					// The RPC committed node_count / status / last_sync to UCI
+					// on disk; reload from disk so the grid reflects them
+					// without staging phantom changes the way uci.set would.
+					uci.unload('prism');
+					return uci.load('prism').then(function() {
+						return self._prismHost.remountActive();
+					});
+				});
+			}).catch(function() {
+				ui.addNotification(null, E('p', _('Sync failed.')), 'error');
+			}).finally(function() {
+				btn.style.width  = '';
+				btn.style.height = '';
+				btn.textContent = label;
+			});
+		};
+	},
+
+	_renderNodes: function(m, data) {
 		var outbounds = (data && data[1] && Array.isArray(data[1].outbounds))
 			? data[1].outbounds : [];
 
@@ -62,10 +225,10 @@ return baseclass.extend({
 				return subName[sub_id] + '/' + tag;
 			return tag;
 		}
-		// Sort group: 0 = manual, 1+ = subscriptions in Subscriptions-tab
+		// Sort group: 0 = manual, 1+ = subscriptions in Subscriptions-section
 		// order, Infinity = orphan (saved tag, source gone). Within a group,
 		// the caller's original index preserves sync order for sub nodes and
-		// Node-tab order for manual nodes.
+		// Node-section order for manual nodes.
 		function groupKey(sub_id) {
 			if (!sub_id) return 0;
 			if (sub_id in subOrder) return 1 + subOrder[sub_id];
@@ -104,14 +267,12 @@ return baseclass.extend({
 			return a.label < b.label ? -1 : a.label > b.label ? 1 : 0;
 		});
 
-		var m = new form.Map('prism');
 		var s = m.section(form.GridSection, 'node', _('Nodes'),
-			_('Manually configured proxy nodes. Changes are staged until Save; ' +
-			  'Save & Apply also reloads the service.'));
+			_('Manually configured proxy nodes.'));
 		s.addremove = true;
 		s.sortable  = true;
 		s.anonymous = true;
-		s.addbtntitle = _('Add node');
+		s.addbtntitle = _('Add');
 		s.modaltitle = function() { return _('Node'); };
 
 		s.tab('general',   _('General'));
@@ -363,6 +524,23 @@ return baseclass.extend({
 		o.placeholder = '.*HK.*|.*JP.*';
 		o.depends({ type: 'urltest', urltest_mode: 'regex' });
 
+		// Restrict regex matching to nodes from selected sources. Empty =
+		// match across every source (the behaviour before this field existed).
+		// Sentinel `_manual` covers UCI-defined manual nodes; remaining values
+		// are subscription section names. Subscriptions are anonymous
+		// (cfgXXXX), so `_manual` cannot collide with a real subscription id.
+		o = s.taboption('group', form.MultiValue, 'urltest_regex_sources', _('Sources'),
+			_('Subscriptions whose nodes are evaluated against the pattern. ' +
+			  'Leave empty to match nodes from every source.'));
+		o.widget = 'select';
+		o.value('_manual', _('Manual nodes'));
+		uci.sections('prism', 'subscription').forEach(function(sub) {
+			o.value(sub['.name'], sub.name || sub['.name']);
+		});
+		o.modalonly = true;
+		o.optional = true;
+		o.depends({ type: 'urltest', urltest_mode: 'regex' });
+
 		// Test URL: combobox (form.Value auto-promotes to ui.Combobox when
 		// .value() entries are present) — preset picks for the two most
 		// common /generate_204 endpoints, plus free-text entry for any
@@ -462,10 +640,111 @@ return baseclass.extend({
 				return _('Default must be one of the selected outbounds.');
 			return true;
 		};
+	},
 
-		this.map = m;
-		ordersave.install(m, 'node');
-		return m.render();
+	_showNodes: function(section_id) {
+		var name = uci.get('prism', section_id, 'name') || section_id;
+		ui.showModal(_('Nodes — %s').format(name), [
+			E('p', { 'class': 'spinning' }, [ _('Loading…') ]),
+			E('div', { 'class': 'right' }, [
+				E('button', {
+					'class': 'btn',
+					'click': ui.hideModal
+				}, [ _('Close') ])
+			])
+		]);
+		return callListSubscriptionNodes(section_id).then(function(res) {
+			var nodes = (res && res.nodes) || [];
+			var content;
+			if (nodes.length === 0) {
+				content = E('p', {}, [
+					_('No nodes. Sync this subscription to populate the list.')
+				]);
+			} else {
+				var rows = [
+					E('tr', { 'class': 'tr cbi-section-table-titles' }, [
+						E('th', { 'class': 'th cbi-section-table-cell' }, [ _('Name') ]),
+						E('th', { 'class': 'th cbi-section-table-cell' }, [ _('Type') ]),
+						E('th', { 'class': 'th cbi-section-table-cell' }, [ _('Server') ])
+					])
+				];
+				for (var i = 0; i < nodes.length; i++) {
+					var n = nodes[i];
+					var srv = n.server || '';
+					if (srv !== '' && n.server_port)
+						srv += ':' + n.server_port;
+					rows.push(E('tr', { 'class': 'tr cbi-section-table-row' }, [
+						E('td', { 'class': 'td' }, [ n.tag || '' ]),
+						E('td', { 'class': 'td' }, [ n.type || '' ]),
+						E('td', { 'class': 'td' }, [ srv ])
+					]));
+				}
+				content = E('div', { 'style': 'max-height:60vh; overflow:auto' }, [
+					E('table', { 'class': 'table cbi-section-table' }, rows)
+				]);
+			}
+			ui.showModal(_('Nodes — %s (%d)').format(name, nodes.length), [
+				content,
+				E('div', { 'class': 'right' }, [
+					E('button', {
+						'class': 'btn',
+						'click': ui.hideModal
+					}, [ _('Close') ])
+				])
+			]);
+		}).catch(function() {
+			ui.showModal(_('Nodes — %s').format(name), [
+				E('p', {}, [ _('Failed to load nodes.') ]),
+				E('div', { 'class': 'right' }, [
+					E('button', {
+						'class': 'btn',
+						'click': ui.hideModal
+					}, [ _('Close') ])
+				])
+			]);
+		});
+	},
+
+	_syncAll: function() {
+		var self = this;
+		ui.showModal(_('Sync all subscriptions'), [
+			E('p', {}, [
+				_('This downloads every subscription and then reloads this tab ' +
+				  'from the saved configuration. Unsaved changes on this tab ' +
+				  'will be discarded.')
+			]),
+			E('div', { 'class': 'right' }, [
+				E('button', {
+					'class': 'btn',
+					'click': ui.hideModal
+				}, [ _('Cancel') ]),
+				' ',
+				E('button', {
+					'class': 'btn cbi-button cbi-button-positive',
+					'click': ui.createHandlerFn(self, '_doSyncAll')
+				}, [ _('Sync all') ])
+			])
+		]);
+	},
+
+	_doSyncAll: function() {
+		var self = this;
+		ui.hideModal();
+		return callSyncAll().then(function(res) {
+			ui.addNotification(null, E('p',
+				_('Sync all complete: %d synced, %d errors.')
+					.format(res.synced || 0, res.errors || 0)),
+				(res.errors || 0) > 0 ? 'warning' : 'info');
+			if (res && res.reloaded)
+				ui.addNotification(null,
+					E('p', _('Active outbound changed — sing-box reloaded.')), 'info');
+			uci.unload('prism');
+			return uci.load('prism').then(function() {
+				return self._prismHost.remountActive();
+			});
+		}).catch(function() {
+			ui.addNotification(null, E('p', _('Sync all failed.')), 'error');
+		});
 	},
 
 	handleSave:      function() { return formpanel.save(this); },
