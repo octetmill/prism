@@ -351,16 +351,15 @@ return baseclass.extend({
 		o.placeholder = '50';
 		o.depends('type', 'urltest');
 
-		// Selector default: must be one of the chosen members. Empty means
-		// sing-box uses the first member as default.
+		// Selector default: must be one of the chosen members.
 		var oDefault = s.taboption('group', form.ListValue, 'selector_default', _('Default outbound'));
-		oDefault.value('', _('First member'));
 		memberList.forEach(function(m) { oDefault.value(m.tag, m.label); });
 		oDefault.modalonly = true;
-		oDefault.optional = true;
+		oDefault.rmempty = false;
 		oDefault.depends('type', 'selector');
 		oDefault.validate = function(section_id, value) {
-			if (!value) return true;
+			if (!value)
+				return _('Pick a default outbound.');
 			var picked = this.section.formvalue(section_id, 'urltest_outbounds') || [];
 			if (!Array.isArray(picked)) picked = [picked];
 			if (picked.indexOf(value) < 0)
