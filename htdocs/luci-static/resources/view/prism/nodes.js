@@ -116,7 +116,7 @@ return baseclass.extend({
 		s.tab('general',   _('General'));
 		s.tab('transport', _('Transport'));
 		s.tab('tls',       _('TLS'));
-		s.tab('urltest',   _('URLTest'));
+		s.tab('group',     _('Group'));
 
 		var o;
 
@@ -130,10 +130,11 @@ return baseclass.extend({
 		oTag.placeholder = _('e.g. MY-VPS-HK');
 
 		var oType = s.taboption('general', form.ListValue, 'type', _('Type'));
-		[['vless','VLESS'],['vmess','VMess'],['trojan','Trojan'],
+		[['urltest','URLTest'],['selector','Selector'],
+		 ['vless','VLESS'],['vmess','VMess'],['trojan','Trojan'],
 		 ['shadowsocks','Shadowsocks'],['hysteria2','Hysteria2'],['tuic','TUIC'],
 		 ['anytls','AnyTLS'],['wireguard','WireGuard'],['socks','SOCKS5'],
-		 ['direct','Direct'],['urltest','URLTest']].forEach(function(t) {
+		 ['direct','Direct']].forEach(function(t) {
 			oType.value(t[0], t[1]);
 		});
 
@@ -309,41 +310,63 @@ return baseclass.extend({
 			opt.depends({ type: 'vmess', tls_enabled: '1' });
 		});
 
-		// ── URLTest ─────────────────────────────────────────────────────
-		o = s.taboption('urltest', form.ListValue, 'urltest_mode', _('Selection mode'));
+		// ── Group (urltest + selector) ──────────────────────────────────
+		// Both group types share `urltest_outbounds` as the member list — the
+		// UCI key keeps its historic name. Selector is manual-only (it needs an
+		// explicit default), so the mode/regex/url/interval/tolerance knobs are
+		// urltest-exclusive; `selector_default` is selector-exclusive.
+		o = s.taboption('group', form.ListValue, 'urltest_mode', _('Selection mode'));
 		o.value('manual', _('Manual (select nodes)'));
 		o.value('regex',  _('Regex (match by tag)'));
 		o.modalonly = true;
 		o.depends('type', 'urltest');
 
-		o = s.taboption('urltest', form.MultiValue, 'urltest_outbounds', _('Outbounds'));
+		o = s.taboption('group', form.MultiValue, 'urltest_outbounds', _('Outbounds'));
 		// 'select' renders a ui.Dropdown multi-select: checkboxes plus a
 		// built-in filter field inside the opened dropdown panel.
 		o.widget = 'select';
 		memberList.forEach(function(m) { o.value(m.tag, m.label); });
 		o.modalonly = true;
 		o.depends({ type: 'urltest', urltest_mode: 'manual' });
+		o.depends('type', 'selector');
 
-		o = s.taboption('urltest', form.Value, 'urltest_regex', _('Tag pattern'));
+		o = s.taboption('group', form.Value, 'urltest_regex', _('Tag pattern'));
 		o.modalonly = true;
 		o.placeholder = '.*HK.*|.*JP.*';
 		o.depends({ type: 'urltest', urltest_mode: 'regex' });
 
-		o = s.taboption('urltest', form.Value, 'urltest_url', _('Test URL'));
+		o = s.taboption('group', form.Value, 'urltest_url', _('Test URL'));
 		o.modalonly = true;
 		o.placeholder = 'https://www.gstatic.com/generate_204';
 		o.depends('type', 'urltest');
 
-		o = s.taboption('urltest', form.Value, 'urltest_interval', _('Interval'));
+		o = s.taboption('group', form.Value, 'urltest_interval', _('Interval'));
 		o.modalonly = true;
 		o.placeholder = '3m';
 		o.depends('type', 'urltest');
 
-		o = s.taboption('urltest', form.Value, 'urltest_tolerance', _('Tolerance (ms)'));
+		o = s.taboption('group', form.Value, 'urltest_tolerance', _('Tolerance (ms)'));
 		o.modalonly = true;
 		o.datatype = 'uinteger';
 		o.placeholder = '50';
 		o.depends('type', 'urltest');
+
+		// Selector default: must be one of the chosen members. Empty means
+		// sing-box uses the first member as default.
+		var oDefault = s.taboption('group', form.ListValue, 'selector_default', _('Default outbound'));
+		oDefault.value('', _('First member'));
+		memberList.forEach(function(m) { oDefault.value(m.tag, m.label); });
+		oDefault.modalonly = true;
+		oDefault.optional = true;
+		oDefault.depends('type', 'selector');
+		oDefault.validate = function(section_id, value) {
+			if (!value) return true;
+			var picked = this.section.formvalue(section_id, 'urltest_outbounds') || [];
+			if (!Array.isArray(picked)) picked = [picked];
+			if (picked.indexOf(value) < 0)
+				return _('Default must be one of the selected outbounds.');
+			return true;
+		};
 
 		this.map = m;
 		ordersave.install(m, 'node');
