@@ -566,6 +566,23 @@ local function build_node_from_uci(s)
 		if s.urltest_tolerance and s.urltest_tolerance ~= "" then
 			ob.tolerance = tonumber(s.urltest_tolerance)
 		end
+
+	elseif typ == "selector" then
+		-- Selector shares the `urltest_outbounds` UCI key for its member list
+		-- (the field is structurally identical). It is manual-only — the UI
+		-- offers no regex mode, since a selector needs an explicit default
+		-- and a regex-derived set has no stable default to pick.
+		local raw = s.urltest_outbounds
+		if type(raw) == "table" then
+			ob.outbounds = raw
+		elseif type(raw) == "string" and raw ~= "" then
+			ob.outbounds = { raw }
+		else
+			ob.outbounds = {}
+		end
+		if s.selector_default and s.selector_default ~= "" then
+			ob.default = s.selector_default
+		end
 	end
 
 	return ob
@@ -660,10 +677,10 @@ local function build_outbounds(c)
 		end
 	end)
 
-	-- ── Step 3: expand urltest outbounds transitively ──────────────────────
-	-- For each referenced urltest, expand _outbound_regex (Prism-internal
-	-- marker, must be stripped) then pull its member tags into the referenced
-	-- set.  The worklist handles nested urltest groups correctly.
+	-- ── Step 3: expand group (urltest / selector) outbounds transitively ──
+	-- For each referenced group, expand _outbound_regex (Prism-internal
+	-- marker, urltest-only, must be stripped) then pull its member tags into
+	-- the referenced set. The worklist handles nested groups correctly.
 	-- Lua patterns have no | alternation; we split on | manually.
 	local function match_any(tag, pattern)
 		for part in pattern:gmatch("[^|]+") do
@@ -681,14 +698,15 @@ local function build_outbounds(c)
 	while i <= #worklist do
 		local tag = worklist[i]; i = i + 1
 		local ob = all_map[tag]
-		if ob and ob.type == "urltest" then
+		if ob and (ob.type == "urltest" or ob.type == "selector") then
 			if ob._outbound_regex then
 				local pattern = ob._outbound_regex
 				ob._outbound_regex = nil  -- strip before handing to sing-box
 				if type(ob.outbounds) ~= "table" or #ob.outbounds == 0 then
 					ob.outbounds = {}
 					for _, other in ipairs(all_ordered) do
-						if other.type ~= "urltest" and match_any(other.tag, pattern) then
+						if other.type ~= "urltest" and other.type ~= "selector"
+						   and match_any(other.tag, pattern) then
 							ob.outbounds[#ob.outbounds + 1] = other.tag
 						end
 					end
@@ -699,19 +717,31 @@ local function build_outbounds(c)
 			-- make sing-box reject the whole config with "outbound not found".
 			if type(ob.outbounds) == "table" then
 				local kept = {}
+				local kept_set = {}
 				for _, member in ipairs(ob.outbounds) do
 					if all_map[member] or member == "direct" then
 						kept[#kept + 1] = member
+						kept_set[member] = true
 						if not referenced[member] then
 							referenced[member] = true
 							worklist[#worklist + 1] = member
 						end
 					else
-						io.stderr:write("prism build-config: urltest '" .. ob.tag ..
+						io.stderr:write("prism build-config: " .. ob.type ..
+							" '" .. ob.tag ..
 							"' drops missing member '" .. tostring(member) .. "'\n")
 					end
 				end
 				ob.outbounds = kept
+				-- A selector's default must be one of its members; drop a
+				-- stale value (e.g. a member since deleted) so sing-box does
+				-- not reject the config.
+				if ob.type == "selector" and ob.default
+				   and not kept_set[ob.default] then
+					io.stderr:write("prism build-config: selector '" .. ob.tag ..
+						"' drops missing default '" .. tostring(ob.default) .. "'\n")
+					ob.default = nil
+				end
 			end
 		end
 	end
@@ -754,9 +784,10 @@ local function build_outbounds(c)
 					.. "it will not work on sing-box 1.13\n")
 				outbounds[#outbounds + 1] = ob
 			else
-				if ob.type == "urltest"
+				if (ob.type == "urltest" or ob.type == "selector")
 				   and (type(ob.outbounds) ~= "table" or #ob.outbounds == 0) then
-					io.stderr:write("prism build-config: urltest '" .. ob.tag ..
+					io.stderr:write("prism build-config: " .. ob.type ..
+						" '" .. ob.tag ..
 						"' has no usable members; sing-box will reject the config\n")
 				end
 				outbounds[#outbounds + 1] = ob

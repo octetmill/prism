@@ -4,6 +4,7 @@
 'use strict';
 'require baseclass';
 'require form';
+'require ui';
 'require uci';
 'require rpc';
 'require view.prism.lib.ordersave as ordersave';
@@ -116,7 +117,7 @@ return baseclass.extend({
 		s.tab('general',   _('General'));
 		s.tab('transport', _('Transport'));
 		s.tab('tls',       _('TLS'));
-		s.tab('urltest',   _('URLTest'));
+		s.tab('group',     _('Group'));
 
 		var o;
 
@@ -130,10 +131,11 @@ return baseclass.extend({
 		oTag.placeholder = _('e.g. MY-VPS-HK');
 
 		var oType = s.taboption('general', form.ListValue, 'type', _('Type'));
-		[['vless','VLESS'],['vmess','VMess'],['trojan','Trojan'],
+		[['urltest','URLTest'],['selector','Selector'],
+		 ['vless','VLESS'],['vmess','VMess'],['trojan','Trojan'],
 		 ['shadowsocks','Shadowsocks'],['hysteria2','Hysteria2'],['tuic','TUIC'],
 		 ['anytls','AnyTLS'],['wireguard','WireGuard'],['socks','SOCKS5'],
-		 ['direct','Direct'],['urltest','URLTest']].forEach(function(t) {
+		 ['direct','Direct']].forEach(function(t) {
 			oType.value(t[0], t[1]);
 		});
 
@@ -309,41 +311,157 @@ return baseclass.extend({
 			opt.depends({ type: 'vmess', tls_enabled: '1' });
 		});
 
-		// ── URLTest ─────────────────────────────────────────────────────
-		o = s.taboption('urltest', form.ListValue, 'urltest_mode', _('Selection mode'));
+		// ── Group (urltest + selector) ──────────────────────────────────
+		// Both group types share `urltest_outbounds` as the member list — the
+		// UCI key keeps its historic name. Selector is manual-only (it needs an
+		// explicit default), so the mode/regex/url/interval/tolerance knobs are
+		// urltest-exclusive; `selector_default` is selector-exclusive.
+		o = s.taboption('group', form.ListValue, 'urltest_mode', _('Selection mode'));
 		o.value('manual', _('Manual (select nodes)'));
 		o.value('regex',  _('Regex (match by tag)'));
 		o.modalonly = true;
 		o.depends('type', 'urltest');
 
-		o = s.taboption('urltest', form.MultiValue, 'urltest_outbounds', _('Outbounds'));
+		// Shared label lookup used by the dynamic selector_default dropdown
+		// below (both at modal open and inside oMembers.onchange).
+		var memberLabel = {};
+		memberList.forEach(function(m) { memberLabel[m.tag] = m.label; });
+
+		o = s.taboption('group', form.MultiValue, 'urltest_outbounds', _('Outbounds'));
 		// 'select' renders a ui.Dropdown multi-select: checkboxes plus a
 		// built-in filter field inside the opened dropdown panel.
 		o.widget = 'select';
 		memberList.forEach(function(m) { o.value(m.tag, m.label); });
 		o.modalonly = true;
 		o.depends({ type: 'urltest', urltest_mode: 'manual' });
+		o.depends('type', 'selector');
+		// When the picked member list changes, repopulate the sibling
+		// `selector_default` dropdown. Crucial: the GridSection edit modal
+		// builds a separate CBIMap with *clones* of these options
+		// (form.js renderMoreOptionsModal → cloneOptions), so a
+		// closure-captured reference to the outer `oDefault` would resolve
+		// to the wrong map. We look up the sibling option through `this.map`,
+		// which inside the modal IS the modal's clone map.
+		o.onchange = function(ev, section_id, value) {
+			var opts = this.map.lookupOption('selector_default', section_id);
+			var opt  = opts && opts[0];
+			if (!opt) return;
+			var widget = opt.getUIElement(section_id);
+			if (!widget) return;
+			var picked  = Array.isArray(value) ? value : (value ? [value] : []);
+			var current = widget.getValue();
+			var keys    = [''].concat(picked);
+			var labels  = { '': _('— none —') };
+			picked.forEach(function(t) { labels[t] = memberLabel[t] || t; });
+			widget.clearChoices(true);
+			widget.addChoices(keys, labels);
+			widget.setValue(picked.indexOf(current) >= 0 ? current : '');
+		};
 
-		o = s.taboption('urltest', form.Value, 'urltest_regex', _('Tag pattern'));
+		o = s.taboption('group', form.Value, 'urltest_regex', _('Tag pattern'));
 		o.modalonly = true;
 		o.placeholder = '.*HK.*|.*JP.*';
 		o.depends({ type: 'urltest', urltest_mode: 'regex' });
 
-		o = s.taboption('urltest', form.Value, 'urltest_url', _('Test URL'));
+		// Test URL: combobox (form.Value auto-promotes to ui.Combobox when
+		// .value() entries are present) — preset picks for the two most
+		// common /generate_204 endpoints, plus free-text entry for any
+		// custom URL the user prefers to type.
+		o = s.taboption('group', form.Value, 'urltest_url', _('Test URL'));
 		o.modalonly = true;
-		o.placeholder = 'https://www.gstatic.com/generate_204';
 		o.depends('type', 'urltest');
+		o.default = 'https://www.gstatic.com/generate_204';
+		// Required (default is set) — drops the "unspecified" empty entry
+		// that form.Value would otherwise insert in the Combobox dropdown.
+		o.rmempty = false;
+		o.value('https://www.gstatic.com/generate_204',     'Google (HTTPS)');
+		o.value('http://www.gstatic.com/generate_204',      'Google (HTTP)');
+		o.value('https://cp.cloudflare.com/generate_204',   'Cloudflare (HTTPS)');
+		o.value('http://cp.cloudflare.com/generate_204',    'Cloudflare (HTTP)');
 
-		o = s.taboption('urltest', form.Value, 'urltest_interval', _('Interval'));
+		o = s.taboption('group', form.Value, 'urltest_interval', _('Interval'));
 		o.modalonly = true;
 		o.placeholder = '3m';
 		o.depends('type', 'urltest');
 
-		o = s.taboption('urltest', form.Value, 'urltest_tolerance', _('Tolerance (ms)'));
+		o = s.taboption('group', form.Value, 'urltest_tolerance', _('Tolerance (ms)'));
 		o.modalonly = true;
 		o.datatype = 'uinteger';
 		o.placeholder = '50';
 		o.depends('type', 'urltest');
+
+		// Selector default: optional. The choice list is filtered at modal
+		// open to the section's currently-picked Outbounds and kept in sync
+		// by oMembers.onchange above.
+		var oDefault = s.taboption('group', form.ListValue, 'selector_default', _('Default outbound'));
+		oDefault.modalonly = true;
+		oDefault.optional = true;
+		oDefault.depends('type', 'selector');
+
+		// Read the picked members of the currently-edited section. Inside the
+		// modal, `map` is the modal's clone CBIMap, so lookupOption resolves
+		// to the cloned `urltest_outbounds` whose formvalue/cfgvalue both
+		// reach the right widget/data.
+		function pickedMembers(map, section_id) {
+			var opts = map.lookupOption('urltest_outbounds', section_id);
+			var opt  = opts && opts[0];
+			if (!opt) return [];
+			var v = opt.formvalue(section_id);
+			if (v === null || v === undefined) v = opt.cfgvalue(section_id);
+			if (Array.isArray(v)) return v;
+			if (typeof v === 'string' && v !== '')
+				return v.split(/[,\s]+/).filter(Boolean);
+			return [];
+		}
+
+		// form.ListValue's default renderWidget builds a native <select> via
+		// ui.Select, which has no addChoices/clearChoices methods — so the
+		// oMembers.onchange handler couldn't update it. Render a single-
+		// select ui.Dropdown directly so the live add/remove path works
+		// (mirrors form.MultiValue's own widget pick).
+		//
+		// At the moment renderWidget runs during the modal-open render pass,
+		// the cloned `urltest_outbounds` option's `.data[section_id]` has
+		// not yet been populated by the modal map's section.load chain
+		// (verified empirically — calling renderWidget *after* modal mount
+		// produces the correct dropdown, but the initial call sees no
+		// picked members). So we render an empty placeholder synchronously
+		// to satisfy the render Promise, then in a `setTimeout(0)` — one
+		// tick later, with the modal in the DOM and load complete — call
+		// addChoices() to populate the real member list.
+		oDefault.renderWidget = function(section_id, option_index, cfgvalue) {
+			var initialValue = (cfgvalue != null) ? cfgvalue : '';
+			var widget = new ui.Dropdown(initialValue, { '': _('— none —') }, {
+				id:                 this.cbid(section_id),
+				sort:               [''],
+				optional:           true,
+				select_placeholder: _('— none —'),
+				validate:           this.getValidator(section_id),
+				disabled:           this.map.readonly
+			});
+			var node = widget.render();
+			var self = this;
+			setTimeout(function() {
+				var w = self.getUIElement(section_id);
+				if (!w) return;
+				var picked = pickedMembers(self.map, section_id);
+				if (!picked.length) return;
+				var labels = {};
+				picked.forEach(function(t) { labels[t] = memberLabel[t] || t; });
+				w.addChoices(picked, labels);
+				if (initialValue && picked.indexOf(initialValue) >= 0)
+					w.setValue(initialValue);
+			}, 0);
+			return node;
+		};
+
+		oDefault.validate = function(section_id, value) {
+			if (!value) return true;
+			var picked = pickedMembers(this.map, section_id);
+			if (picked.indexOf(value) < 0)
+				return _('Default must be one of the selected outbounds.');
+			return true;
+		};
 
 		this.map = m;
 		ordersave.install(m, 'node');
