@@ -97,6 +97,11 @@ return baseclass.extend({
 					'style': 'margin-left:0.4em',
 					'click': ui.createHandlerFn(self, '_syncAll')
 				}, [ _('Sync all now') ]));
+			// Breathing room between the two GridSections — matches the
+			// gap between sibling sections on the stock DHCP page.
+			var nodeSection = node.querySelector('#cbi-prism-node');
+			if (nodeSection)
+				nodeSection.style.marginTop = '2em';
 			return node;
 		});
 	},
