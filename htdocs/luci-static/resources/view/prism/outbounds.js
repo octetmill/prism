@@ -110,7 +110,7 @@ return baseclass.extend({
 		var self = this;
 
 		var s = m.section(form.GridSection, 'subscription', _('Subscriptions'),
-			_('Proxy subscriptions. Changes are staged until Save; Save & Apply also reloads the service.'));
+			_('Proxy subscriptions.'));
 		s.addremove = true;
 		s.sortable  = true;
 		s.anonymous = true;
@@ -263,8 +263,7 @@ return baseclass.extend({
 		});
 
 		var s = m.section(form.GridSection, 'node', _('Nodes'),
-			_('Manually configured proxy nodes. Changes are staged until Save; ' +
-			  'Save & Apply also reloads the service.'));
+			_('Manually configured proxy nodes.'));
 		s.addremove = true;
 		s.sortable  = true;
 		s.anonymous = true;
