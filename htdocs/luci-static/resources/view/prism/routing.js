@@ -651,11 +651,16 @@ return baseclass.extend({
 		});
 		return m.render().then(function(node) {
 			// Breathing room between the rules grid's Add button and the
-			// Rule-set sources section — mirrors the gap servers.js adds
-			// between Subscriptions and Nodes.
-			var rsSection = node.querySelector('#cbi-prism-global');
-			if (rsSection)
-				rsSection.style.marginTop = '4em';
+			// Rule-set sources section. NamedSection renders its h3 and
+			// description outside the `#cbi-{config}-{name}` options wrapper,
+			// so a margin on that wrapper only pushed the options down —
+			// target the heading by its text instead, which pushes the whole
+			// visual block down.
+			var heading = _('Rule-set sources');
+			node.querySelectorAll('h3').forEach(function(h) {
+				if (h.textContent === heading)
+					h.style.marginTop = '4em';
+			});
 			return node;
 		});
 	},
