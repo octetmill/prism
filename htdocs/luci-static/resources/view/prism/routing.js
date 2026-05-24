@@ -656,10 +656,12 @@ return baseclass.extend({
 			// so a margin on that wrapper only pushed the options down —
 			// target the heading by its text instead, which pushes the whole
 			// visual block down.
-			var heading = _('Rule-set sources');
+			var gaps = { };
+			gaps[_('Rule-set sources')] = '2em';
+			gaps[_('Custom rule-sets')] = '2em';
 			node.querySelectorAll('h3').forEach(function(h) {
-				if (h.textContent === heading)
-					h.style.marginTop = '2em';
+				var g = gaps[h.textContent];
+				if (g) h.style.marginTop = g;
 			});
 			return node;
 		});
