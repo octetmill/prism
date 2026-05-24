@@ -125,50 +125,6 @@ return baseclass.extend({
 			return opt;
 		}
 
-		// ── General ──────────────────────────────────────────────────────
-		var sGen = m.section(form.NamedSection, 'global', 'prism', _('General'));
-		sGen.addremove = false;
-
-		var oLog = sGen.option(form.ListValue, 'log_level',
-			_('sing-box log level'),
-			_('Verbosity of the sing-box service log. Info logs every connection; warning is recommended for normal use.'));
-		oLog.value('error', _('Error'));
-		oLog.value('warn',  _('Warning'));
-		oLog.value('info',  _('Info'));
-		oLog.value('debug', _('Debug'));
-		oLog.default = 'warn';
-
-		var oPLog = sGen.option(form.ListValue, 'prism_log_level',
-			_('Prism log level'),
-			_('Which Prism control-plane events (service / config / firewall / DNS / sync) appear in the Prism log on the Status page. Filters display only — syslog still accumulates everything.'));
-		oPLog.value('error',  _('Error'));
-		oPLog.value('warning', _('Warning'));
-		oPLog.value('notice', _('Notice'));
-		oPLog.value('info',   _('Info'));
-		oPLog.value('debug',  _('Debug'));
-		oPLog.default = 'info';
-
-		// Rule-set fetching config — moved here from the Routing tab. These
-		// are global set-once knobs (which CDN, and whether to fetch via WAN
-		// or through the proxy); they have no day-to-day interplay with rules
-		// themselves, so they don't earn space on the Routing page.
-		var oDelivery = sGen.option(form.ListValue, 'ruleset_delivery',
-			_('Rule-set delivery'),
-			_('Where sing-box fetches the rule-sets referenced by routing rules. ' +
-			  'GitHub raw, or the jsDelivr CDN for GitHub-blocked regions.'));
-		oDelivery.value('github',   _('GitHub (raw)'));
-		oDelivery.value('jsdelivr', _('jsDelivr CDN'));
-		oDelivery['default'] = 'github';
-
-		var oDetour = sGen.option(form.ListValue, 'ruleset_download_detour',
-			_('Rule-set download via'),
-			_('How sing-box fetches rule-sets: straight out the WAN, or ' +
-			  'through the default outbound (the proxy) when the WAN cannot ' +
-			  'reach the rule-set host.'));
-		oDetour.value('direct',  _('Direct (WAN)'));
-		oDetour.value('default', _('Default outbound (proxy)'));
-		oDetour['default'] = 'direct';
-
 		// ── Network ──────────────────────────────────────────────────────
 		var sNet = m.section(form.NamedSection, 'inbounds', 'prism', _('Network'));
 		sNet.addremove = false;
@@ -182,9 +138,18 @@ return baseclass.extend({
 		oMode.value('tproxy_mixed', _('TProxy + Mixed — transparent proxy and explicit HTTP/SOCKS5'));
 		oMode['default'] = 'tproxy';
 
-		var oInet6 = sNet.option(form.Flag, 'inet6',
-			_('Enable IPv6'), _('Proxy IPv6 traffic'));
-		oInet6.rmempty = false;
+		// tproxy / tproxy_mixed group — sits directly below Mode so the
+		// mode-dependent rows are visually adjacent to the selector that
+		// reveals them.
+		var oTproxySelf = sNet.option(form.Flag, 'tproxy_self',
+			_('Proxy router traffic'),
+			_('Also send traffic originated by the router itself through sing-box ' +
+			  '(needed for subscription / rule-set downloads when the source is blocked). ' +
+			  'Disable only to keep admin traffic (SSH out, opkg, ntp) untunneled for debugging.'));
+		oTproxySelf['default'] = '1';
+		oTproxySelf.rmempty = false;
+		oTproxySelf.depends('mode', 'tproxy');
+		oTproxySelf.depends('mode', 'tproxy_mixed');
 
 		var oTproxyPort = advance(sNet.option(form.Value, 'tproxy_port', _('TProxy port')));
 		oTproxyPort.datatype = 'port';
@@ -192,16 +157,7 @@ return baseclass.extend({
 		oTproxyPort.depends('mode', 'tproxy');
 		oTproxyPort.depends('mode', 'tproxy_mixed');
 
-		var oTproxySelf = advance(sNet.option(form.Flag, 'tproxy_self',
-			_('Proxy router traffic'),
-			_('Also send traffic originated by the router itself through sing-box ' +
-			  '(needed for subscription / rule-set downloads when the source is blocked). ' +
-			  'Disable only to keep admin traffic (SSH out, opkg, ntp) untunneled for debugging.')));
-		oTproxySelf['default'] = '1';
-		oTproxySelf.rmempty = false;
-		oTproxySelf.depends('mode', 'tproxy');
-		oTproxySelf.depends('mode', 'tproxy_mixed');
-
+		// tproxy_mixed only group
 		var oMixedListen = advance(sNet.option(form.Value, 'mixed_listen', _('Mixed listen address')));
 		oMixedListen.placeholder = '127.0.0.1';
 		oMixedListen.depends('mode', 'tproxy_mixed');
@@ -211,6 +167,7 @@ return baseclass.extend({
 		oMixedPort.placeholder = '2080';
 		oMixedPort.depends('mode', 'tproxy_mixed');
 
+		// tun only group
 		var oTunAddr = advance(sNet.option(form.Value, 'tun_address', _('TUN IPv4 address')));
 		oTunAddr.placeholder = '172.19.0.1/30';
 		oTunAddr.depends('mode', 'tun');
@@ -232,6 +189,11 @@ return baseclass.extend({
 		oTunAutoRoute['default'] = '1';
 		oTunAutoRoute.rmempty = false;
 		oTunAutoRoute.depends('mode', 'tun');
+
+		// always-visible Network options at the bottom of the section
+		var oInet6 = sNet.option(form.Flag, 'inet6',
+			_('Enable IPv6'), _('Proxy IPv6 traffic'));
+		oInet6.rmempty = false;
 
 		// ── DNS ──────────────────────────────────────────────────────────
 		var sDns = m.section(form.NamedSection, 'dns', 'prism', _('DNS'),
@@ -291,6 +253,52 @@ return baseclass.extend({
 		oFakeipV6.placeholder = 'fc00::/18';
 		oFakeipV6.datatype = 'cidr6';
 		oFakeipV6.depends('fakeip_enabled', '1');
+
+		// ── General (rule-sets + logging) ────────────────────────────────
+		// Rule-set fetching plus log-verbosity knobs live together at the
+		// bottom of the page — they are set-once / diagnostic, not part of
+		// the daily proxy-and-DNS configuration above. One NamedSection per
+		// UCI section is a hard rule (multiple sections binding the same
+		// UCI section name collide on the generated DOM id), so rule-sets
+		// and logging share this single "General" section.
+		var sGen = m.section(form.NamedSection, 'global', 'prism', _('General'));
+		sGen.addremove = false;
+
+		var oDelivery = sGen.option(form.ListValue, 'ruleset_delivery',
+			_('Rule-set delivery'),
+			_('Where sing-box fetches the rule-sets referenced by routing rules. ' +
+			  'GitHub raw, or the jsDelivr CDN for GitHub-blocked regions.'));
+		oDelivery.value('github',   _('GitHub (raw)'));
+		oDelivery.value('jsdelivr', _('jsDelivr CDN'));
+		oDelivery['default'] = 'github';
+
+		var oDetour = advance(sGen.option(form.ListValue, 'ruleset_download_detour',
+			_('Rule-set download via'),
+			_('How sing-box fetches rule-sets: straight out the WAN, or ' +
+			  'through the default outbound (the proxy) when the WAN cannot ' +
+			  'reach the rule-set host.')));
+		oDetour.value('direct',  _('Direct (WAN)'));
+		oDetour.value('default', _('Default outbound (proxy)'));
+		oDetour['default'] = 'direct';
+
+		var oLog = advance(sGen.option(form.ListValue, 'log_level',
+			_('sing-box log level'),
+			_('Verbosity of the sing-box service log. Info logs every connection; warning is recommended for normal use.')));
+		oLog.value('error', _('Error'));
+		oLog.value('warn',  _('Warning'));
+		oLog.value('info',  _('Info'));
+		oLog.value('debug', _('Debug'));
+		oLog.default = 'warn';
+
+		var oPLog = advance(sGen.option(form.ListValue, 'prism_log_level',
+			_('Prism log level'),
+			_('Which Prism control-plane events (service / config / firewall / DNS / sync) appear in the Prism log on the Status page. Filters display only — syslog still accumulates everything.')));
+		oPLog.value('error',  _('Error'));
+		oPLog.value('warning', _('Warning'));
+		oPLog.value('notice', _('Notice'));
+		oPLog.value('info',   _('Info'));
+		oPLog.value('debug',  _('Debug'));
+		oPLog.default = 'info';
 
 		this.map = m;
 		this._advOpts = advOpts;
