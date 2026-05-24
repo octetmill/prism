@@ -1,28 +1,36 @@
 # Prism
 
-LuCI web interface for [sing-box](https://sing-box.sagernet.org/) on OpenWrt.
+A point-and-click web UI for [sing-box](https://sing-box.sagernet.org/) on
+OpenWrt. Manage proxy subscriptions, routing rules, rule-sets and DNS from
+your router's admin page — no JSON editing required.
 
-Prism adds a single **Services → Prism** page to the LuCI UI, organised
-into tabs:
+<!--
+  TODO: drop a screenshot at docs/screenshot.png and uncomment:
+  ![Prism dashboard](docs/screenshot.png)
+-->
 
-| Tab | Purpose |
+## What you get
+
+A single **Services → Prism** page in LuCI, organised into four tabs:
+
+| Tab | What it does |
 |---|---|
-| Status   | Service status, start / stop / restart, active default server, log tail, full-log and generated-config modals |
-| Nodes    | Proxy subscriptions (auto-update + sync) and manually-configured nodes |
-| Routing  | Destination-based routing rules and rule-set sources |
-| Settings | Network mode, DNS, rule-set delivery, logging and advanced overrides |
+| **Status**   | See whether sing-box is running, start / stop / restart it, view the live log, peek at the generated config. |
+| **Nodes**    | Add proxy subscriptions that auto-refresh on a schedule; or paste in individual nodes by hand. Supports VLESS, VMess, Trojan, Shadowsocks, Hysteria2, TUIC, AnyTLS, WireGuard and SOCKS. |
+| **Routing**  | Build routing rules with AND/OR conditions (domain match, IP/CIDR, rule-set, protocol, port), pick the outbound per rule, and configure rule-set sources. |
+| **Settings** | Inbound mode, DNS upstreams, rule-set delivery, logging and a handful of advanced overrides. |
 
-## Requirements
+Everything is stored in standard UCI config (`/etc/config/prism`); the
+sing-box JSON config is generated for you.
 
-- OpenWrt **25.12+** (APK) or **24.10** (IPK/opkg)
-- Runtime dependencies (installed automatically): `luci-base`, `luci-lib-jsonc`, `sing-box (>=1.12)`, `rpcd`, `rpcd-mod-rpcsys`, `uclient-fetch`, `ca-bundle`
+## Install
 
-## Installing
+### Latest snapshot (rolling, recommended)
 
-### Latest snapshot (rolling, recommended for testing)
+Rebuilt on every commit. The URL is stable — re-run this snippet later to
+upgrade.
 
-Stable URL — rebuilt on every commit, always the tip of active development.
-`apk` doesn't accept remote URLs directly, so download first:
+OpenWrt **25.12+** (APK):
 
 ```sh
 ssh root@192.168.1.1 '
@@ -32,7 +40,7 @@ ssh root@192.168.1.1 '
 '
 ```
 
-For OpenWrt 24.10 (opkg):
+OpenWrt **24.10** (opkg):
 
 ```sh
 ssh root@192.168.1.1 '
@@ -42,79 +50,76 @@ ssh root@192.168.1.1 '
 '
 ```
 
+Then open `http://<router>/cgi-bin/luci/admin/services/prism` and head to
+the **Nodes** tab to add your first subscription.
+
 ### Tagged release
 
-Download the latest `.apk` (OpenWrt 25.12+) or `.ipk` (OpenWrt 24.10) from the
+Pick the latest `.apk` (25.12+) or `.ipk` (24.10) from the
 [Releases](../../releases) page, copy it to the router, and install with
 `apk add --allow-untrusted` or `opkg install`.
 
-## Building from source
+### Requirements
 
-Requires apk-tools 3.x (`apk mkpkg`), `fakeroot`, `tar`, `gzip`, `ar`, `find`, `wc`.
-On distributions without apk-tools 3.x packaged, build it from source — see
-`.github/workflows/snapshot.yml` for the exact invocation used by CI.
+OpenWrt 24.10 or 25.12+ with `sing-box ≥ 1.12`. The package pulls in
+everything else it needs (`luci-base`, `luci-lib-jsonc`, `rpcd`,
+`rpcd-mod-rpcsys`, `uclient-fetch`, `ca-bundle`).
 
-```sh
-sh .github/workflows/package.sh
-# → dist/luci-app-prism-<version>-r<release>.apk
-# → dist/luci-app-prism_<version>-<release>_all.ipk
-```
+## Upgrade
 
-Version derivation:
+Re-run the same install snippet — APK and opkg both replace in place. The
+UCI config at `/etc/config/prism` is marked as a conffile, so your
+settings survive upgrades.
 
-| Situation | Example version |
-|---|---|
-| Snapshot build (any branch, no `v*` tag at HEAD) | `0.1.0_pre7-r1` |
-| Tag build (CI from `v0.1.0`)                     | `0.1.0-r1`      |
-| Tag build (CI from `v0.1.0-r2`)                  | `0.1.0-r2`      |
-
-`PKG_VERSION` in the `Makefile` is the **next** release being worked toward.
-Snapshots are `<PKG_VERSION>_pre<N>` where N = commits since the last `v*` tag.
-
-### Using the OpenWrt SDK
+## Uninstall
 
 ```sh
-cp -r /path/to/prism <sdk>/package/luci-app-prism
-make package/luci-app-prism/compile V=s
+apk del luci-app-prism            # OpenWrt 25.12+
+opkg remove luci-app-prism        # OpenWrt 24.10
 ```
 
-Output: `bin/packages/<arch>/base/luci-app-prism_*.apk`
+This stops the service and removes the package. Your `/etc/config/prism`
+is preserved unless you also run `rm /etc/config/prism`.
 
-## CI
+## Troubleshooting
 
-| Workflow | Trigger | Output |
-|---|---|---|
-| **Snapshot** | Push to any non-`main` branch | Asset replaced on rolling `snapshot` pre-release (stable URL); also archived as a workflow artifact for 30 days |
-| **Release**  | Push of a `v*` tag             | New immutable GitHub release at that tag, with APK and IPK assets |
+**Where are the logs?**
+The Status tab has *View full log*. From a shell:
 
-## Repository layout
-
+```sh
+logread -e prism
+logread -e sing-box
 ```
-.github/
-├── actions/install-apk-tools/   # CI: build apk-tools 3.x
-└── workflows/
-    ├── package.sh               # Standalone APK + IPK builder
-    ├── snapshot.yml             # CI: snapshot on every branch push
-    └── release.yml              # CI: release on v* tag push
-Makefile                         # OpenWrt SDK build descriptor (luci.mk)
-htdocs/luci-static/resources/view/prism/
-├── main.js                      # Host view — the tab shell
-├── status.js  nodes.js  routing.js  settings.js   # One panel per tab
-└── lib/                         # Shared view helpers (formpanel, ordersave)
-root/
-├── etc/
-│   ├── config/prism             # Default UCI config (conffile)
-│   ├── init.d/prism             # procd init script
-│   └── uci-defaults/            # One-time config migrations
-└── usr/
-    ├── libexec/prism/           # build-config, firewall.sh, fetch-catalog,
-    │                            #   sync-subscriptions, watchdog, hourly, prismlib.lua
-    ├── libexec/rpcd/luci.prism  # rpcd handler
-    └── share/
-        ├── luci/menu.d/luci-app-prism.json
-        └── rpcd/acl.d/luci-app-prism.json
-po/templates/luci-app-prism.pot  # Gettext translation template
+
+**What's actually being sent to sing-box?**
+Status tab → *View generated config*, or:
+
+```sh
+cat /var/etc/prism/sing-box.json
 ```
+
+**Service won't start.**
+Prism runs `sing-box check` before starting and refuses to swap in a
+broken config — the existing config keeps running. Look at the Prism log
+for the rejection reason, fix it in the UI, save & apply.
+
+**Stop the proxy without uninstalling.**
+Status tab → *Stop*, and toggle *Autostart* off if you don't want it to
+come back on reboot.
+
+**Reset to defaults.**
+```sh
+rm /etc/config/prism
+apk add --force-overwrite --allow-untrusted /tmp/prism.apk
+```
+(replace `apk` with `opkg install --force-reinstall` on 24.10). The
+shipped uci-defaults will re-seed the config.
+
+## Contributing
+
+Build instructions, CI layout, and developer conventions live in
+[`CONTRIBUTING.md`](CONTRIBUTING.md). Design rationale for non-obvious
+decisions is in [`docs/decisions.md`](docs/decisions.md).
 
 ## License
 
