@@ -1341,6 +1341,32 @@ local methods = {
 		end
 	},
 
+	-- Active DHCP leases from busybox dnsmasq's lease file. Used by the
+	-- Bypass section on the Routing tab to autocomplete MAC / IP entries
+	-- against current LAN clients. The file format is
+	--   <expire-ts> <mac> <ip> <hostname-or-*> <client-id>
+	list_dhcp_leases = {
+		call = function()
+			local leases = {}
+			local f = io.open("/tmp/dhcp.leases", "r")
+			if f then
+				for line in f:lines() do
+					local mac, ip, hostname =
+						line:match("^%S+%s+(%S+)%s+(%S+)%s+(%S+)")
+					if mac and ip then
+						leases[#leases + 1] = {
+							mac      = mac:lower(),
+							ip       = ip,
+							hostname = (hostname == "*") and "" or hostname
+						}
+					end
+				end
+				f:close()
+			end
+			return { leases = leases }
+		end
+	},
+
 	list_rulesets = {
 		call = function()
 			local CACHE = "/etc/prism/rulesets-cache.json"

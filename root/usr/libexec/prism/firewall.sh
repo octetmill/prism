@@ -41,6 +41,42 @@ V6_RESERVED='::1, ::/128, ::ffff:0.0.0.0/96, 64:ff9b::/96,
 
 uci_get() { uci -q get "prism.$1.$2" 2>/dev/null; }
 
+# Emit `accept` rules for every enabled `bypass` UCI section at the head of
+# the prerouting chain — matching LAN packets exit before any TPROXY work,
+# so the host's traffic never touches sing-box. Only invoked for tproxy /
+# tproxy_mixed modes; in tun mode build-config emits the equivalent
+# source_ip_cidr direct rule into the sing-box config instead.
+emit_bypasses() {
+	local section enabled kind value
+	uci -q show prism 2>/dev/null | sed -n 's/^prism\.\([^=]*\)=bypass$/\1/p' | \
+	while read -r section; do
+		enabled=$(uci_get "$section" enabled)
+		[ "$enabled" = "0" ] && continue
+		kind=$(uci_get "$section" kind)
+		value=$(uci_get "$section" value)
+		[ -z "$value" ] && continue
+		case "$kind" in
+			mac)
+				# Reject anything that isn't a plausible MAC — nft errors on
+				# a malformed token would kill the whole ruleset load.
+				echo "$value" | grep -qE '^[0-9a-fA-F]{2}([:.-][0-9a-fA-F]{2}){5}$' \
+					&& echo "		ether saddr $value accept"
+				;;
+			ip)
+				case "$value" in
+					*.*)
+						echo "$value" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$' \
+							&& echo "		ip saddr $value accept"
+						;;
+					*:*)
+						echo "		ip6 saddr $value accept"
+						;;
+				esac
+				;;
+		esac
+	done
+}
+
 # Log a Prism control-plane event to syslog. $1 is the severity
 # (info/notice/warn/err); the remaining args form the message.
 prism_log() {
@@ -91,6 +127,11 @@ build_nft() {
 		# the OUTPUT chain — those packets need to be TPROXY'd here.
 		echo "		iif lo meta mark != $MARK accept"
 		echo "		meta l4proto != { tcp, udp } accept"
+		echo ""
+		# Per-host bypass: matching LAN packets exit here, never touching
+		# sing-box. Emitted before the fakeip carve-out so a bypassed client
+		# whose DNS happens to return a fake-IP-range address still escapes.
+		emit_bypasses
 		echo ""
 		if [ "$fakeip" = "1" ]; then
 			# Fake-IP destinations sit inside the reserved ranges below, but a

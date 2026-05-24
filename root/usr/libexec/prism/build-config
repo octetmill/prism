@@ -1099,6 +1099,33 @@ local function build_route(c, prepared)
 	-- before any subsequent rules inspect it (sing-box 1.11+ action syntax).
 	route.rules[#route.rules + 1] = { action = "sniff" }
 
+	-- Per-host bypass for tun mode. firewall.sh handles bypasses directly
+	-- in tproxy / tproxy_mixed via an `accept` rule at the head of the
+	-- prerouting chain; here we get the same effect at the routing layer
+	-- so a bypassed source_ip lands on the `direct` outbound before any
+	-- user rule can claim it. MAC bypasses are inert in tun mode (the L2
+	-- address is not visible at the IP layer the TUN device exposes) — the
+	-- UI surfaces a warning row for those entries.
+	if imode == "tun" then
+		local cidrs = {}
+		c:foreach("prism", "bypass", function(s)
+			if s.enabled ~= "0" and s.kind == "ip"
+			   and s.value and s.value ~= "" then
+				local v = s.value
+				if not v:find("/", 1, true) then
+					v = v .. (v:find(":", 1, true) and "/128" or "/32")
+				end
+				cidrs[#cidrs + 1] = v
+			end
+		end)
+		if #cidrs > 0 then
+			route.rules[#route.rules + 1] = {
+				source_ip_cidr = cidrs,
+				outbound       = "direct"
+			}
+		end
+	end
+
 	-- DNS hijack: traffic destined for any DNS server is intercepted and
 	-- answered by sing-box's resolver. The dns-out outbound was removed in
 	-- sing-box 1.12 in favour of the explicit hijack-dns action.

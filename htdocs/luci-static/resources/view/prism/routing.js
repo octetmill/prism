@@ -22,6 +22,12 @@ var callListRulesets = rpc.declare({
 	expect: { '': {} }
 });
 
+var callListDhcpLeases = rpc.declare({
+	object: 'luci.prism',
+	method: 'list_dhcp_leases',
+	expect: { '': {} }
+});
+
 // Sniffed application protocols sing-box can match on. Endpoint-only match
 // dimensions (process, package, user, wifi) are deliberately not exposed —
 // they are invisible for traffic forwarded from LAN clients.
@@ -419,7 +425,8 @@ return baseclass.extend({
 		return Promise.all([
 			uci.load('prism'),
 			callListOutbounds().catch(function() { return {}; }),
-			callListRulesets().catch(function() { return {}; })
+			callListRulesets().catch(function() { return {}; }),
+			callListDhcpLeases().catch(function() { return {}; })
 		]);
 	},
 
@@ -555,6 +562,87 @@ return baseclass.extend({
 		oCond.rsSuggest    = rsTokens;
 		oCond.protoSuggest = PROTOCOLS.slice().sort();
 
+		// ── bypass ──────────────────────────────────────────────────────
+		// LAN clients listed here skip the proxy entirely — applied via
+		// nftables `accept` rules at the head of the prerouting chain
+		// (tproxy / tproxy_mixed modes), or as a source_ip_cidr direct
+		// rule in the sing-box config (tun mode, IP entries only — MAC is
+		// not visible at the IP layer the TUN device exposes, so MAC
+		// entries are inert in tun mode and a warning is surfaced inline).
+		var leases = (data && data[3] && Array.isArray(data[3].leases))
+			? data[3].leases : [];
+		var imode = uci.get('prism', 'inbounds', 'mode') || 'tproxy';
+
+		var bp = m.section(form.GridSection, 'bypass', _('Bypass'),
+			_('LAN clients listed here skip the proxy entirely. Useful for ' +
+			  'devices that need direct WAN access (corporate VPN clients, ' +
+			  'gaming consoles, IoT). MAC bypass requires TProxy or TProxy + ' +
+			  'Mixed mode; IP bypass works in all modes.'));
+		bp.addremove = true;
+		bp.anonymous = true;
+		bp.addbtntitle = _('Add');
+		bp.modaltitle = function() { return _('Bypass'); };
+
+		var bpEnabled = bp.option(form.Flag, 'enabled', _('On'));
+		bpEnabled['default'] = '1';
+		bpEnabled.rmempty = false;
+		bpEnabled.editable = true;
+
+		var bpName = bp.option(form.Value, 'name', _('Name'));
+		bpName.placeholder = _('Optional label');
+
+		var bpKind = bp.option(form.ListValue, 'kind', _('Type'));
+		bpKind.value('mac', _('MAC'));
+		bpKind.value('ip',  _('IP'));
+		bpKind['default'] = 'mac';
+		bpKind.editable = true;
+
+		var bpValue = bp.option(form.Value, 'value', _('Value'));
+		bpValue.rmempty = false;
+		bpValue.placeholder = '00:11:22:33:44:55';
+		// Suggestions: every active DHCP lease appears twice — once keyed
+		// by MAC, once by IP — so the combobox matches whichever the user
+		// picked as `kind`. Label format puts the hostname first so typing
+		// part of the name filters quickly.
+		leases.forEach(function(l) {
+			var name = l.hostname || _('(no hostname)');
+			if (l.mac) bpValue.value(l.mac, name + ' — ' + l.mac + ' (' + l.ip + ')');
+			if (l.ip)  bpValue.value(l.ip,  name + ' — ' + l.ip  + ' (' + l.mac + ')');
+		});
+		bpValue.validate = function(section_id, value) {
+			if (!value || value === '')
+				return _('A value is required.');
+			var kindOpts = this.map.lookupOption('kind', section_id);
+			var kind = (kindOpts && kindOpts[0])
+				? (kindOpts[0].formvalue(section_id) || 'mac') : 'mac';
+			if (kind === 'mac') {
+				if (!/^[0-9a-fA-F]{2}([:.-][0-9a-fA-F]{2}){5}$/.test(value))
+					return _('Not a valid MAC address.');
+			} else {
+				// IPv4 dotted-quad, with optional /N for the v2-CIDR case.
+				// IPv6 short-form for completeness; the firewall handles
+				// both transparently.
+				if (!/^([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+|[0-9a-fA-F:]+)(\/[0-9]+)?$/.test(value))
+					return _('Not a valid IP address.');
+			}
+			return true;
+		};
+
+		// Grid-only column: warn when a MAC entry won't fire because the
+		// current inbound mode is `tun`. Empty cell otherwise — invisible
+		// in the common (tproxy) case.
+		var bpWarn = bp.option(form.DummyValue, '_warn', '');
+		bpWarn.modalonly = false;
+		bpWarn.cfgvalue = function(section_id) {
+			var kind = uci.get('prism', section_id, 'kind') || 'mac';
+			if (kind === 'mac' && imode === 'tun')
+				return E('span', { 'class': 'label-warning',
+					'style': 'padding:1px 6px; border-radius:3px;',
+					'title': _('MAC bypass requires TProxy or TProxy + Mixed mode')
+				}, [ _('⚠ TUN mode: ignored') ]);
+			return '';
+		};
+
 		// ── rule-set sources ────────────────────────────────────────────
 		// Folded in from the former Settings → Rule-sets sub-tab. These
 		// fields belong with Routing because a rule's `ruleset` conditions
@@ -630,6 +718,7 @@ return baseclass.extend({
 			// target the heading by its text instead, which pushes the whole
 			// visual block down.
 			var gaps = { };
+			gaps[_('Bypass')]            = '2em';
 			gaps[_('Rule-set sources')] = '2em';
 			gaps[_('Custom rule-sets')] = '2em';
 			node.querySelectorAll('h3').forEach(function(h) {
