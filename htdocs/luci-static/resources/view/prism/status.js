@@ -1,10 +1,39 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 OctetMill
 
+// Status tab: service controls + recent log + generated-config preview.
+// This is a transitional merge of the former Overview and Diagnostics panels —
+// the body is unchanged from those two stacked. A follow-up commit replaces it
+// with the new compact layout (status row, 20-line log tail, modal config).
+
 'use strict';
 'require baseclass';
 'require rpc';
 'require ui';
+
+var callGetStatus = rpc.declare({
+	object: 'luci.prism',
+	method: 'get_status',
+	expect: { '': {} }
+});
+
+var callStart = rpc.declare({
+	object: 'luci.prism',
+	method: 'start',
+	expect: { '': {} }
+});
+
+var callStop = rpc.declare({
+	object: 'luci.prism',
+	method: 'stop',
+	expect: { '': {} }
+});
+
+var callRestart = rpc.declare({
+	object: 'luci.prism',
+	method: 'restart',
+	expect: { '': {} }
+});
 
 var callGetLog = rpc.declare({
 	object: 'luci.prism',
@@ -28,25 +57,30 @@ var callReload = rpc.declare({
 var LINE_OPTIONS = [50, 100, 200, 500];
 
 return baseclass.extend({
-	_refreshTimer: null,
-	_lines:        200,
+	_logTimer:    null,
+	_statusTimer: null,
+	_lines:       200,
 
 	load: function() {
 		// Degrade gracefully — a failed RPC must not blank the whole tab.
 		return Promise.all([
+			callGetStatus().catch(function() { return {}; }),
 			callGetLog(this._lines || 200).catch(function() { return {}; }),
 			callGetConfig().catch(function() { return {}; })
 		]);
 	},
 
 	render: function(results) {
-		var logData    = (results && results[0]) || {};
-		var configData = (results && results[1]) || {};
+		var status     = (results && results[0]) || {};
+		var logData    = (results && results[1]) || {};
+		var configData = (results && results[2]) || {};
 		var logLines   = (Array.isArray(logData.log) ? logData.log : []).join('\n');
 		var configText = configData.json  || '';
 		var configPath = configData.path  || '/var/etc/prism/sing-box.json';
 		var configHas  = !!configData.exists;
 		var configErr  = configData.error || '';
+
+		var self = this;
 
 		var lineSel = E('select', {
 			'id': 'prism-log-lines',
@@ -54,7 +88,7 @@ return baseclass.extend({
 			'style': 'padding:0.25em 0.4em; border:1px solid rgba(128,128,128,0.4); border-radius:3px;',
 			'change': L.bind(function(ev) {
 				this._lines = Number(ev.target.value) || 200;
-				this._refresh();
+				this._refreshLog();
 			}, this)
 		}, LINE_OPTIONS.map(function(n) {
 			return E('option', { 'value': String(n), 'selected': n === 200 ? 'selected' : null }, [ String(n) ]);
@@ -62,7 +96,50 @@ return baseclass.extend({
 
 		var node = E('div', { 'class': 'cbi-map' }, [
 
-			// --- Log section -------------------------------------------------
+			// --- Service controls (was overview.js) -------------------------
+			E('div', { 'class': 'cbi-section' }, [
+				E('div', { 'class': 'cbi-section-descr' }, [
+					_('sing-box proxy engine status and controls.')
+				]),
+				E('div', { 'class': 'cbi-value' }, [
+					E('label', { 'class': 'cbi-value-title' }, [ _('Status') ]),
+					E('div', { 'class': 'cbi-value-field' }, [
+						E('span', { 'id': 'prism-status-badge' }, [
+							self._renderBadge(status.running)
+						]),
+						E('span', { 'style': 'margin-left:1em;' }, [
+							E('button', {
+								'class': 'btn cbi-button cbi-button-apply',
+								'style': 'margin-right:0.3em;',
+								'click': ui.createHandlerFn(self, 'handleStart')
+							}, [ _('Start') ]),
+							E('button', {
+								'class': 'btn cbi-button cbi-button-remove',
+								'style': 'margin-right:0.3em;',
+								'click': ui.createHandlerFn(self, 'handleStop')
+							}, [ _('Stop') ]),
+							E('button', {
+								'class': 'btn cbi-button cbi-button-neutral',
+								'click': ui.createHandlerFn(self, 'handleRestart')
+							}, [ _('Restart') ])
+						])
+					])
+				]),
+				E('div', { 'class': 'cbi-value' }, [
+					E('label', { 'class': 'cbi-value-title' }, [ _('Autostart at boot') ]),
+					E('div', { 'class': 'cbi-value-field', 'id': 'prism-autostart-field' }, [
+						status.enabled ? _('Yes') : _('No')
+					])
+				]),
+				E('div', { 'class': 'cbi-value' }, [
+					E('label', { 'class': 'cbi-value-title' }, [ _('Version') ]),
+					E('div', { 'class': 'cbi-value-field' }, [
+						status.version || _('Unknown')
+					])
+				])
+			]),
+
+			// --- Log section (was diagnostics.js) ---------------------------
 			E('div', { 'class': 'cbi-section', 'id': 'prism-log-section' }, [
 				E('h3', {}, [ _('Log') ]),
 				E('div', { 'class': 'cbi-section-descr' }, [
@@ -72,7 +149,7 @@ return baseclass.extend({
 					E('div', { 'class': 'cbi-value-field' }, [
 						E('button', {
 							'class': 'btn cbi-button cbi-button-neutral',
-							'click': ui.createHandlerFn(this, this._refresh)
+							'click': ui.createHandlerFn(this, this._refreshLog)
 						}, [ _('Refresh') ]),
 						' \xA0 ',
 						E('label', {}, [
@@ -82,10 +159,10 @@ return baseclass.extend({
 								'checked': 'checked',
 								'style': 'margin-right:0.3em',
 								'change': L.bind(function(ev) {
-									if (ev.target.checked) this._scheduleRefresh();
-									else if (this._refreshTimer) {
-										clearTimeout(this._refreshTimer);
-										this._refreshTimer = null;
+									if (ev.target.checked) this._scheduleLogRefresh();
+									else if (this._logTimer) {
+										clearTimeout(this._logTimer);
+										this._logTimer = null;
 									}
 								}, this)
 							}),
@@ -115,7 +192,7 @@ return baseclass.extend({
 				}, [ logLines ])
 			]),
 
-			// --- Generated config preview ------------------------------------
+			// --- Generated config preview (was diagnostics.js) --------------
 			E('div', { 'class': 'cbi-section', 'id': 'prism-cfg-section' }, [
 				E('h3', {}, [ _('Generated Configuration') ]),
 				E('div', { 'class': 'cbi-section-descr' }, [
@@ -158,36 +235,111 @@ return baseclass.extend({
 			])
 		]);
 
-		this._scheduleRefresh();
+		this._scheduleStatusRefresh();
+		this._scheduleLogRefresh();
 		requestAnimationFrame(function() {
 			var el = document.getElementById('prism-log-output');
 			if (el) el.scrollTop = el.scrollHeight;
 		});
+
 		return node;
 	},
 
-	_refresh: function() {
+	// ── Service controls ──────────────────────────────────────────────────
+
+	_renderBadge: function(running) {
+		return running
+			? E('span', { 'class': 'label-success' }, [ _('Running') ])
+			: E('span', { 'class': 'label-warning' }, [ _('Stopped') ]);
+	},
+
+	handleStart: function() {
+		var self = this;
+		return callStart().then(function(res) {
+			if (res && res.ok === false) {
+				ui.addNotification(null, E('p', _('Start failed — check the log below.')), 'error');
+			} else {
+				ui.addNotification(null, E('p', _('Service started.')), 'info');
+			}
+			return self._refreshStatusNow();
+		});
+	},
+
+	handleStop: function() {
+		var self = this;
+		return callStop().then(function() {
+			ui.addNotification(null, E('p', _('Service stopped.')), 'info');
+			return self._refreshStatusNow();
+		});
+	},
+
+	handleRestart: function() {
+		var self = this;
+		return callRestart().then(function(res) {
+			if (res && res.ok === false) {
+				ui.addNotification(null, E('p', _('Restart failed — check the log below.')), 'error');
+			} else {
+				ui.addNotification(null, E('p', _('Service restarted.')), 'info');
+			}
+			return self._refreshStatusNow();
+		});
+	},
+
+	updateStatus: function(status) {
+		var el = document.getElementById('prism-status-badge');
+		if (!el) return;
+		while (el.firstChild) el.removeChild(el.firstChild);
+		el.appendChild(this._renderBadge(status.running));
+		// The Start/Stop RPCs flip the autostart flag too, so keep that row
+		// in sync rather than letting it go stale until the tab is reopened.
+		var as = document.getElementById('prism-autostart-field');
+		if (as) as.textContent = status.enabled ? _('Yes') : _('No');
+		this._scheduleStatusRefresh();
+	},
+
+	_refreshStatusNow: function() {
+		return callGetStatus().then(L.bind(this.updateStatus, this));
+	},
+
+	_scheduleStatusRefresh: function() {
+		// Bail if the panel's DOM is gone (tab switched away) so a failed
+		// in-flight poll cannot resurrect the timer after _teardown.
+		if (!document.getElementById('prism-status-badge'))
+			return;
+		if (this._statusTimer)
+			clearTimeout(this._statusTimer);
+		this._statusTimer = setTimeout(L.bind(function() {
+			callGetStatus().then(L.bind(this.updateStatus, this)).catch(L.bind(function() {
+				// reschedule even on RPC failure so the loop survives transient errors
+				this._scheduleStatusRefresh();
+			}, this));
+		}, this), 5000);
+	},
+
+	// ── Log + config preview ──────────────────────────────────────────────
+
+	_refreshLog: function() {
 		return callGetLog(this._lines || 200).then(L.bind(function(data) {
 			var el = document.getElementById('prism-log-output');
 			if (!el) return;
 			el.value = (Array.isArray(data.log) ? data.log : []).join('\n');
 			var cb = document.getElementById('prism-log-autoscroll');
 			if (cb && cb.checked) el.scrollTop = el.scrollHeight;
-			this._scheduleRefresh();
+			this._scheduleLogRefresh();
 		}, this)).catch(L.bind(function() {
-			this._scheduleRefresh();
+			this._scheduleLogRefresh();
 		}, this));
 	},
 
-	_scheduleRefresh: function() {
-		if (this._refreshTimer) {
-			clearTimeout(this._refreshTimer);
-			this._refreshTimer = null;
+	_scheduleLogRefresh: function() {
+		if (this._logTimer) {
+			clearTimeout(this._logTimer);
+			this._logTimer = null;
 		}
 		var cb = document.getElementById('prism-log-autorefresh');
 		if (cb && !cb.checked) return;
 		if (!document.getElementById('prism-log-output')) return;
-		this._refreshTimer = setTimeout(L.bind(this._refresh, this), 3000);
+		this._logTimer = setTimeout(L.bind(this._refreshLog, this), 3000);
 	},
 
 	_refreshPreview: function() {
@@ -220,9 +372,13 @@ return baseclass.extend({
 
 	// Called by the host shell when this panel's tab is switched away.
 	_teardown: function() {
-		if (this._refreshTimer) {
-			clearTimeout(this._refreshTimer);
-			this._refreshTimer = null;
+		if (this._statusTimer) {
+			clearTimeout(this._statusTimer);
+			this._statusTimer = null;
+		}
+		if (this._logTimer) {
+			clearTimeout(this._logTimer);
+			this._logTimer = null;
 		}
 	},
 

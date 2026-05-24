@@ -11,29 +11,28 @@
 'require ui';
 'require dom';
 'require session';
-'require view.prism.overview as overviewPanel';
-'require view.prism.outbounds as outboundsPanel';
+'require view.prism.status as statusPanel';
+'require view.prism.servers as serversPanel';
 'require view.prism.routing as routingPanel';
-'require view.prism.diagnostics as diagnosticsPanel';
-'require view.prism.service as servicePanel';
-'require view.prism.inbound as inboundPanel';
-'require view.prism.dns as dnsPanel';
-'require view.prism.rulesets as rulesetsPanel';
-'require view.prism.advanced as advancedPanel';
+'require view.prism.settings as settingsPanel';
 
 var TABS = [
-	{ id: 'overview',      label: _('Overview'),      panel: overviewPanel },
-	{ id: 'outbounds',     label: _('Outbounds'),     panel: outboundsPanel },
-	{ id: 'routing',       label: _('Routing'),       panel: routingPanel },
-	{ id: 'settings',      label: _('Settings'),      children: [
-		{ id: 'service',  label: _('Service'),  panel: servicePanel },
-		{ id: 'inbound',  label: _('Inbound'),  panel: inboundPanel },
-		{ id: 'dns',      label: _('DNS'),      panel: dnsPanel },
-		{ id: 'rulesets', label: _('Rule-sets'), panel: rulesetsPanel },
-		{ id: 'advanced', label: _('Advanced'), panel: advancedPanel }
-	] },
-	{ id: 'diagnostics',   label: _('Diagnostics'),   panel: diagnosticsPanel }
+	{ id: 'status',   label: _('Status'),   panel: statusPanel },
+	{ id: 'servers',  label: _('Servers'),  panel: serversPanel },
+	{ id: 'routing',  label: _('Routing'),  panel: routingPanel },
+	{ id: 'settings', label: _('Settings'), panel: settingsPanel }
 ];
+
+// Old tab ids encountered in saved session state, mapped to current top-level
+// ids. Anything else falls through to TABS[0]. The pre-2026-05-22 ids
+// subscriptions/nodes were rolled into outbounds; outbounds is now servers.
+var TAB_REDIRECT = {
+	overview:      'status',
+	diagnostics:   'status',
+	outbounds:     'servers',
+	subscriptions: 'servers',
+	nodes:         'servers'
+};
 
 return view.extend({
 	// The host owns its own footers per active panel; suppress the framework one.
@@ -69,12 +68,16 @@ return view.extend({
 		var raw = session.getLocalData('prism.activeTab') || '';
 		var parts = raw.split('/');
 		var group = parts[0] || TABS[0].id;
-		// Migrate stored tab ids from the pre-merge layout. The TABS filter
-		// in _activate() would otherwise fall back to TABS[0] (Overview),
-		// which is fine but surprising — land on the merged tab instead.
-		if (group === 'subscriptions' || group === 'nodes')
-			group = 'outbounds';
-		return { group: group, sub: parts[1] || null };
+		// Redirect stored ids from prior layouts so a Save & Apply (which
+		// reloads the page) lands on the equivalent merged tab instead of
+		// silently falling back to TABS[0].
+		if (TAB_REDIRECT[group])
+			group = TAB_REDIRECT[group];
+		// Old settings/<sub> ids now collapse to the single Settings tab.
+		var sub = parts[1] || null;
+		if (group === 'settings')
+			sub = null;
+		return { group: group, sub: sub };
 	},
 
 	_buildMenu: function(items, activeId, onClick) {

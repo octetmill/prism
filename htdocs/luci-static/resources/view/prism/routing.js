@@ -467,11 +467,11 @@ return baseclass.extend({
 		rsTokens.sort();
 
 		// Map sub_id → human-readable name and display order. Two subscriptions
-		// can carry nodes with identical tags; the label shown in the outbound
+		// can carry nodes with identical tags; the label shown in the server
 		// dropdown must make clear which subscription a tag comes from, and
-		// the listing order must match the Outbounds tab's Subscriptions
+		// the listing order must match the Servers tab's Subscriptions
 		// section. Manual nodes (subscription === '') sort to the top, in
-		// Nodes-section order.
+		// section order.
 		var subName = {}, subOrder = {};
 		uci.sections('prism', 'subscription').forEach(function(sub, idx) {
 			subName[sub['.name']]  = sub.name || sub['.name'];
@@ -483,7 +483,7 @@ return baseclass.extend({
 			return Infinity;
 		}
 
-		function addOutbounds(o) {
+		function addServers(o) {
 			o.value('direct', _('direct (no proxy)'));
 			o.value('block',  _('block (drop)'));
 			var entries = outbounds.map(function(ob, i) {
@@ -508,19 +508,19 @@ return baseclass.extend({
 
 		var m = new form.Map('prism');
 
-		// ── default outbound ────────────────────────────────────────────
-		var ds = m.section(form.NamedSection, 'routing', 'routing', _('Default outbound'),
-			_('Outbound for traffic not matched by any rule below.'));
+		// ── default server ──────────────────────────────────────────────
+		var ds = m.section(form.NamedSection, 'routing', 'routing', _('Default server'),
+			_('Server for traffic not matched by any rule below.'));
 		ds.addremove = false;
 
-		var oFinal = ds.option(form.ListValue, 'final_outbound', _('Default outbound'));
-		addOutbounds(oFinal);
+		var oFinal = ds.option(form.ListValue, 'final_outbound', _('Default server'));
+		addServers(oFinal);
 
 		// ── rules ───────────────────────────────────────────────────────
 		var s = m.section(form.GridSection, 'rule', _('Rules'),
 			_('Evaluated top-to-bottom; first match wins. Each rule matches a ' +
 			  'destination built from one or more conditions joined with ' +
-			  'AND / OR, and sends matching traffic to an outbound. Changes ' +
+			  'AND / OR, and sends matching traffic to a server. Changes ' +
 			  'are staged until Save; Save & Apply also reloads the service.'));
 		s.addremove = true;
 		s.sortable  = true;
@@ -559,8 +559,8 @@ return baseclass.extend({
 			return ruleSummary(section_id);
 		};
 
-		var oOut = s.option(form.ListValue, 'outbound', _('Outbound'));
-		addOutbounds(oOut);
+		var oOut = s.option(form.ListValue, 'outbound', _('Server'));
+		addServers(oOut);
 
 		// ── Destination — the condition builder ──────────────────────────
 		var oCond = s.option(ConditionList, '_conditions', _('Conditions'),
@@ -569,11 +569,68 @@ return baseclass.extend({
 			  'binds tighter than OR, so a rule matches an OR of AND-groups ' +
 			  '(see the preview below). Set a row to "is not" to invert it. ' +
 			  'A rule with no conditions does nothing and is skipped — the ' +
-			  'default outbound already handles otherwise-unmatched traffic.'));
+			  'default server already handles otherwise-unmatched traffic.'));
 		oCond.modalonly = true;
 		oCond.rsSuggest      = rsTokens;
 		oCond.countrySuggest = COUNTRIES;
 		oCond.protoSuggest   = PROTOCOLS.slice().sort();
+
+		// ── rule-set sources ────────────────────────────────────────────
+		// Folded in from the former Settings → Rule-sets sub-tab. These
+		// fields belong with Routing because a rule's `ruleset` /  `country`
+		// conditions reference them — co-locating avoids tab-hopping when
+		// adding a new rule that needs a custom rule-set.
+		var rsSrc = m.section(form.NamedSection, 'global', 'prism', _('Rule-set sources'),
+			_('Where sing-box fetches the rule-sets referenced by your rules.'));
+		rsSrc.addremove = false;
+
+		var oDelivery = rsSrc.option(form.ListValue, 'ruleset_delivery', _('Delivery'),
+			_('GitHub raw, or the jsDelivr CDN for GitHub-blocked regions.'));
+		oDelivery.value('github',   _('GitHub (raw)'));
+		oDelivery.value('jsdelivr', _('jsDelivr CDN'));
+		oDelivery['default'] = 'github';
+
+		var oDetour = rsSrc.option(form.ListValue, 'ruleset_download_detour', _('Download via'),
+			_('How sing-box fetches rule-sets: straight out the WAN, or ' +
+			  'through the default outbound (the proxy) when the WAN cannot ' +
+			  'reach the rule-set host.'));
+		oDetour.value('direct',  _('Direct (WAN)'));
+		oDetour.value('default', _('Default outbound (proxy)'));
+		oDetour['default'] = 'direct';
+
+		var oCountry = rsSrc.option(form.ListValue, 'country_provider', _('Country provider'),
+			_('Source for the geoip / geosite rule-sets that a routing rule\'s ' +
+			  'Countries field expands to.'));
+		oCountry.value('sagernet',  'SagerNet');
+		oCountry.value('metacubex', 'MetaCubeX');
+		oCountry['default'] = 'sagernet';
+
+		// ── custom rule-sets ────────────────────────────────────────────
+		var cs = m.section(form.GridSection, 'customrs', _('Custom rule-sets'),
+			_('Rule-sets fetched from an explicit URL. Reference one in a ' +
+			  'routing rule by its label.'));
+		cs.addremove = true;
+		cs.anonymous = true;
+		cs.addbtntitle = _('Add custom rule-set');
+
+		var oLabel = cs.option(form.Value, 'label', _('Label'));
+		oLabel.rmempty = false;
+		oLabel.validate = function(section_id, value) {
+			if (!value)
+				return _('A label is required.');
+			if (value.indexOf('/') >= 0)
+				return _('The label must not contain "/".');
+			return true;
+		};
+
+		var oUrl = cs.option(form.Value, 'url', _('URL'));
+		oUrl.rmempty = false;
+		oUrl.placeholder = 'https://…/rules.srs';
+
+		var oFmt = cs.option(form.ListValue, 'format', _('Format'));
+		oFmt.value('binary', _('Binary (.srs)'));
+		oFmt.value('source', _('Source (.json)'));
+		oFmt['default'] = 'binary';
 
 		this.map = m;
 		// Renumber rule `order` from section position, ensure the routing
