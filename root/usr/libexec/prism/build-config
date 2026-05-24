@@ -1138,6 +1138,19 @@ local function build_route(c, prepared)
 		route.rules[#route.rules + 1] = { inbound = "dns-in", action = "hijack-dns" }
 	end
 
+	-- Private destinations bypass the proxy. RFC1918, loopback, link-local,
+	-- multicast and IPv6 ULA all match ip_is_private (sing/common/network
+	-- IsPublicAddr); CGNAT (100.64/10) and the IPv4 fakeip default
+	-- (198.18/15) intentionally do not. In tproxy / tproxy_mixed mode this
+	-- is inert because firewall.sh already filters reserved ranges at
+	-- prerouting; in tun mode it is load-bearing — without it a Default
+	-- server pointing at a proxy would tunnel LAN-to-LAN traffic too.
+	-- Fakeip-mapped destinations are safe: sing-box demaps them to an FQDN
+	-- at the start of matchRule (route/route.go:434), before any rule
+	-- evaluates, so by the time this rule runs metadata.Destination.Addr
+	-- is invalid and ip_is_private short-circuits to false.
+	route.rules[#route.rules + 1] = { ip_is_private = true, outbound = "direct" }
+
 	-- Remote rule-set objects, deduplicated by tag across rules. sing-box
 	-- downloads and refreshes each one itself; download_detour decides
 	-- whether that fetch goes out the WAN ("direct") or, when blank, through
