@@ -255,16 +255,17 @@ return baseclass.extend({
 		oFakeipV6.datatype = 'cidr6';
 		oFakeipV6.depends('fakeip_enabled', '1');
 
-		// ── Rule-sets + Logging ──────────────────────────────────────────
-		// Two visual groups bottom of the page. One NamedSection per UCI
-		// section is a hard rule (multiple sections binding the same UCI
-		// section name collide on the generated DOM id), so the section is
-		// titled "Rule-sets" and a "Logging" subheader is injected in
-		// _postRender before the first log-level option.
-		var sGen = m.section(form.NamedSection, 'global', 'prism', _('Rule-sets'));
-		sGen.addremove = false;
+		// ── Rule-sets ────────────────────────────────────────────────────
+		// Two visually distinct sections (Rule-sets, Logging) both bind to
+		// the same `global` UCI section. The only DOM-id collision this
+		// causes is the wrapper div's `cbi-prism-global` — every per-option
+		// id (`cbid.prism.global.<name>`) stays unique as long as no option
+		// name is reused across the two sections, which form save/load,
+		// validation and getUIElement rely on, not the wrapper id.
+		var sRulesets = m.section(form.NamedSection, 'global', 'prism', _('Rule-sets'));
+		sRulesets.addremove = false;
 
-		var oDelivery = sGen.option(form.ListValue, 'ruleset_delivery',
+		var oDelivery = sRulesets.option(form.ListValue, 'ruleset_delivery',
 			_('Rule-set delivery'),
 			_('Where sing-box fetches the rule-sets referenced by routing rules. ' +
 			  'GitHub raw, or the jsDelivr CDN for GitHub-blocked regions.'));
@@ -272,7 +273,7 @@ return baseclass.extend({
 		oDelivery.value('jsdelivr', _('jsDelivr CDN'));
 		oDelivery['default'] = 'github';
 
-		var oDetour = advance(sGen.option(form.ListValue, 'ruleset_download_detour',
+		var oDetour = advance(sRulesets.option(form.ListValue, 'ruleset_download_detour',
 			_('Rule-set download via'),
 			_('How sing-box fetches rule-sets: straight out the WAN, or ' +
 			  'through the default outbound (the proxy) when the WAN cannot ' +
@@ -281,19 +282,25 @@ return baseclass.extend({
 		oDetour.value('default', _('Default outbound (proxy)'));
 		oDetour['default'] = 'direct';
 
-		var oLog = advance(sGen.option(form.ListValue, 'log_level',
+		// ── Logging ──────────────────────────────────────────────────────
+		// Entire section is Advanced — its wrapper div gets the
+		// prism-advanced class in _postRender, so individual rows do not
+		// need to be tagged via advance().
+		var sLogging = m.section(form.NamedSection, 'global', 'prism', _('Logging'));
+		sLogging.addremove = false;
+
+		var oLog = sLogging.option(form.ListValue, 'log_level',
 			_('sing-box log level'),
-			_('Verbosity of the sing-box service log. Info logs every connection; warning is recommended for normal use.')));
-		oLog._prismSubheader = _('Logging');
+			_('Verbosity of the sing-box service log. Info logs every connection; warning is recommended for normal use.'));
 		oLog.value('error', _('Error'));
 		oLog.value('warn',  _('Warning'));
 		oLog.value('info',  _('Info'));
 		oLog.value('debug', _('Debug'));
 		oLog.default = 'warn';
 
-		var oPLog = advance(sGen.option(form.ListValue, 'prism_log_level',
+		var oPLog = sLogging.option(form.ListValue, 'prism_log_level',
 			_('Prism log level'),
-			_('Which Prism control-plane events (service / config / firewall / DNS / sync) appear in the Prism log on the Status page. Filters display only — syslog still accumulates everything.')));
+			_('Which Prism control-plane events (service / config / firewall / DNS / sync) appear in the Prism log on the Status page. Filters display only — syslog still accumulates everything.'));
 		oPLog.value('error',  _('Error'));
 		oPLog.value('warning', _('Warning'));
 		oPLog.value('notice', _('Notice'));
@@ -303,6 +310,10 @@ return baseclass.extend({
 
 		this.map = m;
 		this._advOpts = advOpts;
+		// Sections whose whole content is Advanced. _postRender tags their
+		// wrapper div with prism-advanced so the section header + every row
+		// hides as one unit when the toggle is off.
+		this._advSections = [sLogging];
 
 		return m.render().then(L.bind(this._postRender, this, extraText));
 	},
@@ -323,17 +334,24 @@ return baseclass.extend({
 			var input = formNode.querySelector(sel);
 			if (!input) return;
 			var row = input.closest('.cbi-value');
-			if (!row) return;
-			row.classList.add('prism-advanced');
-			// Inject a sub-section header before this row when marked. The
-			// header inherits the Advanced visibility class so an all-advanced
-			// subgroup (Logging) hides cleanly when the toggle is off.
-			if (opt._prismSubheader) {
-				var hdr = E('h3', {
-					'class': 'prism-subheader prism-advanced'
-				}, [ opt._prismSubheader ]);
-				row.parentNode.insertBefore(hdr, row);
-			}
+			if (row) row.classList.add('prism-advanced');
+		});
+
+		// Whole-section Advanced: walk up from the section's first option
+		// row to its enclosing .cbi-section. Two NamedSections binding the
+		// same UCI section share a wrapper-div id, but each option's cbid is
+		// still unique, so this lookup lands on the right section.
+		(this._advSections || []).forEach(function(section) {
+			var opts = (section.children || []).filter(function(o) {
+				return typeof o.cbid === 'function';
+			});
+			if (!opts.length) return;
+			var firstOpt = opts[0];
+			var sel = '#' + firstOpt.cbid(section.section).replace(/\./g, '\\.');
+			var input = formNode.querySelector(sel);
+			if (!input) return;
+			var sectionEl = input.closest('.cbi-section');
+			if (sectionEl) sectionEl.classList.add('prism-advanced');
 		});
 
 		// Extra-overrides panel — same class so it hides with the rest.
@@ -374,8 +392,6 @@ return baseclass.extend({
 			'.cbi-map .prism-advanced{display:none}' +
 			'.cbi-map.prism-show-advanced .cbi-value.prism-advanced{display:flex}' +
 			'.cbi-map.prism-show-advanced .cbi-section.prism-advanced{display:block}' +
-			'.cbi-map.prism-show-advanced .prism-subheader.prism-advanced{display:block}' +
-			'.prism-subheader{margin:1.5em 0 0.75em}' +
 			'.prism-adv-toggle{display:inline-flex;align-items:center;gap:0.4em;' +
 				'margin:0.4em 0 1em;padding:0.2em 0.4em;cursor:pointer;' +
 				'font-size:0.95em;user-select:none}' +
