@@ -323,7 +323,7 @@ return baseclass.extend({
 			'.cbi-map .prism-advanced{display:none}' +
 			'.cbi-map.prism-show-advanced .cbi-value.prism-advanced{display:flex}' +
 			'.cbi-map.prism-show-advanced .cbi-section.prism-advanced{display:block}' +
-			'.prism-adv-toggle{margin:1.5em 0 0.75em;padding:0.75em 1em;' +
+			'.prism-adv-toggle{margin:0.5em 0 1em;padding:0.75em 1em;' +
 				'background:rgba(128,128,128,0.08);' +
 				'border:1px solid rgba(128,128,128,0.5);' +
 				'border-radius:4px;cursor:pointer}' +
@@ -345,16 +345,18 @@ return baseclass.extend({
 		]);
 		details.addEventListener('toggle', function() {
 			formNode.classList.toggle('prism-show-advanced', details.open);
-			// Most advanced rows are interleaved with their basic siblings
-			// (tproxy_port under mode, fakeip ranges under fakeip_enabled, …),
-			// so opening the expander reveals content *above* the toggle and
-			// the browser's reflow lands the user on an unrelated row. Pin
-			// the toggle back into view so the click result is predictable.
-			details.scrollIntoView({ behavior: 'smooth', block: 'center' });
 		});
 
+		// The toggle goes at the TOP of the form, not at the bottom — the
+		// advanced rows are interleaved with their basic siblings throughout
+		// the form (tproxy_port under mode, fakeip ranges under fakeip_enabled,
+		// etc.), so a bottom-of-page disclosure widget broke both the
+		// "content lives inside <details>" mental model and the scroll
+		// position on toggle. A top-of-page filter reads more honestly as
+		// "show advanced rows wherever they live below" and keeps the user's
+		// scroll anchored when the page reflows underneath.
+		formNode.insertBefore(details, formNode.firstChild);
 		formNode.appendChild(styleEl);
-		formNode.appendChild(details);
 		formNode.appendChild(extraSection);
 
 		return formNode;
