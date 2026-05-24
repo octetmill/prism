@@ -525,7 +525,7 @@ return baseclass.extend({
 		s.addremove = true;
 		s.sortable  = true;
 		s.anonymous = true;
-		s.addbtntitle = _('Add rule');
+		s.addbtntitle = _('Add');
 		s.modaltitle = function() { return _('Routing rule'); };
 
 		// Create each rule as a NAMED section with a stable generated name.
@@ -611,7 +611,7 @@ return baseclass.extend({
 			  'routing rule by its label.'));
 		cs.addremove = true;
 		cs.anonymous = true;
-		cs.addbtntitle = _('Add custom rule-set');
+		cs.addbtntitle = _('Add');
 
 		var oLabel = cs.option(form.Value, 'label', _('Label'));
 		oLabel.rmempty = false;
@@ -649,7 +649,15 @@ return baseclass.extend({
 					uci.remove('prism', c['.name']);
 			});
 		});
-		return m.render();
+		return m.render().then(function(node) {
+			// Breathing room between the rules grid's Add button and the
+			// Rule-set sources section — mirrors the gap servers.js adds
+			// between Subscriptions and Nodes.
+			var rsSection = node.querySelector('#cbi-prism-global');
+			if (rsSection)
+				rsSection.style.marginTop = '2em';
+			return node;
+		});
 	},
 
 	handleSave:      function() { return formpanel.save(this); },
