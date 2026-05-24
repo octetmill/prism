@@ -772,7 +772,8 @@ return baseclass.extend({
 			// target the heading by its text instead, which pushes the whole
 			// visual block down.
 			var gaps = { };
-			gaps[_('Bypass')]            = '2em';
+			gaps[_('Rules')]            = '2em';
+			gaps[_('Bypass')]           = '2em';
 			gaps[_('Rule-set sources')] = '2em';
 			gaps[_('Custom rule-sets')] = '2em';
 			node.querySelectorAll('h3').forEach(function(h) {
