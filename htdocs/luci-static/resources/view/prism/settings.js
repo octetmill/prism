@@ -9,7 +9,8 @@
 // which is a hopping cost the new layout removes.
 //
 // "Enable Prism" is intentionally NOT in this form: the Status page owns
-// runtime control via Start/Stop, so the master flag has one source of truth.
+// the persistent enable toggle (and the transient Stop/Start/Restart
+// runtime controls), so the master flag has one source of truth.
 //
 // Advanced overrides (/etc/prism/extra.json) live at the bottom inside the
 // same Advanced expander — they are RPC-backed rather than UCI-backed, so

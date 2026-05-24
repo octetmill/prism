@@ -4,21 +4,30 @@
 // Status tab: the dashboard. Answers "is it working?" at a glance and "why
 // not?" without leaving the page.
 //
+// Two distinct concepts, two distinct controls — see the
+// "Enable toggle + transient Stop split" entry in docs/decisions.md:
+//
+//   * Enable toggle (persistent, UCI global.enabled) — installs-but-dormant
+//     vs. installed-and-running. Off hides the runtime row entirely; the
+//     service won't autostart and the watchdog stays idle.
+//   * Stop / Start / Restart (transient, tmpfs marker) — diagnostic
+//     pause/resume/cycle without flipping the persistent flag. Reboot
+//     clears the marker, so an enabled-but-paused service resumes
+//     automatically.
+//
 // Layout (top → bottom):
-//   ● Running/Stopped  via  <active-node>   [Stop] [Restart]
+//   [ ✓ ] Enable Prism                                   ← persistent
+//   ● Running / ○ Paused / ● Stopped  via  <active-node>  [actions]
 //   Subscriptions: N · Active rules: N
 //   <recent activity — 20-line log tail, auto-refreshed>
 //   [View full log] [View generated config]
-//   sing-box X.Y.Z · Autostart · Mode
+//   sing-box X.Y.Z · Mode
 //
-// Restart on a stopped service just calls start, so no separate Start button
-// is needed — Stop and Restart cover every transition.
-//
-// Two 2s pollers — one for service status (badge + autostart), one for the
-// log tail. Both are torn down on tab switch via _teardown. The full log
-// viewer and the generated-config preview live in on-demand modals (the
-// prior Diagnostics panel rendered them inline; here they would crowd the
-// glance-first layout).
+// Two 2s pollers — one for service status (badge + actions + footer), one
+// for the log tail. Both are torn down on tab switch via _teardown. The
+// full log viewer and the generated-config preview live in on-demand
+// modals (the prior Diagnostics panel rendered them inline; here they
+// would crowd the glance-first layout).
 //
 // The active-node line shows `routing.final_outbound` from UCI — the tag
 // of the default node the rule chain falls through to (a group counts as a
@@ -34,6 +43,13 @@
 var callGetStatus = rpc.declare({
 	object: 'luci.prism',
 	method: 'get_status',
+	expect: { '': {} }
+});
+
+var callSetEnabled = rpc.declare({
+	object: 'luci.prism',
+	method: 'set_enabled',
+	params: [ 'enabled' ],
 	expect: { '': {} }
 });
 
@@ -166,47 +182,30 @@ return baseclass.extend({
 
 		var node = E('div', { 'class': 'cbi-map' }, [
 
-			// ── Status row ─────────────────────────────────────────────
-			// One big colored line — large enough that "is it working?" is
-			// answerable from across the room. The action toolbar is
-			// state-dependent: a stopped instance shows only Start (the
-			// `start` RPC sets `enabled=1` and execs start, which is the
-			// single in-UI path to bring a fresh install up); a running
-			// instance shows Stop + Restart. The toolbar is rebuilt by
-			// _updateStatus on every poll tick so it follows state changes.
+			// ── Enable toggle ──────────────────────────────────────────
+			// Persistent master switch (UCI global.enabled). Off = the
+			// service won't autostart, watchdog stays idle, runtime row
+			// hidden. The container is id'd so _updateStatus can refresh
+			// the checkbox state without re-rendering the whole panel
+			// (matters for a poll discovering an out-of-band UCI change).
 			E('div', { 'class': 'cbi-section' }, [
 				E('div', {
-					'style': 'display:flex; flex-wrap:wrap; align-items:center; ' +
-					         'gap:0.7em; padding:0.2em 0; font-size:1.45em; line-height:1.3;'
-				}, [
-					E('span', { 'id': 'prism-status-badge' }, [
-						this._renderBadge(status.running)
-					]),
-					E('span', { 'style': 'opacity:0.6; font-weight:normal;' }, [
-						_('via')
-					]),
-					E('strong', { 'id': 'prism-active-node' }, [
-						active || _('— no default')
-					]),
-					E('span', {
-						'id': 'prism-status-actions',
-						'style': 'margin-left:auto; display:flex; gap:0.3em; font-size:0.7em;'
-					}, this._renderActions(status.running))
-				]),
-				E('div', {
-					'style': 'margin-top:0.5em;'
-				}, [
-					_('Subscriptions: %d').format(subCount),
-					' · ',
-					_('Active rules: %d').format(ruleCount)
-				]),
-				E('div', {
-					'id': 'prism-status-footer',
-					'style': 'margin-top:0.25em;'
-				}, [
-					this._renderFooter(status, mode)
-				])
+					'id': 'prism-enable-row',
+					'style': 'display:flex; align-items:center; gap:0.6em;'
+				}, this._renderEnable(status.enabled))
 			]),
+
+			// ── Runtime row ────────────────────────────────────────────
+			// Hidden entirely when the master switch is off — nothing to
+			// say and nothing to do. The container is rebuilt by
+			// _updateStatus on every poll tick so the runtime state
+			// (running / paused / unexpectedly-stopped) and its action
+			// toolbar follow the service.
+			E('div', {
+				'id': 'prism-runtime-section',
+				'class': 'cbi-section',
+				'style': status.enabled ? '' : 'display:none;'
+			}, this._renderRuntime(status, active, subCount, ruleCount, mode)),
 
 			// ── Recent activity ────────────────────────────────────────
 			// Two stacked boxes — Prism control-plane events (sparse) and
@@ -268,35 +267,57 @@ return baseclass.extend({
 
 	// ── Renderers ─────────────────────────────────────────────────────────
 
-	_renderBadge: function(running) {
+	// Three runtime states: 'running' (sing-box up), 'paused' (user clicked
+	// Stop, marker present), 'stopped' (down without a marker — typically
+	// a crash that exhausted procd respawn before the watchdog re-armed).
+	_runtimeState: function(status) {
+		if (status.running) return 'running';
+		if (status.paused)  return 'paused';
+		return 'stopped';
+	},
+
+	_renderBadge: function(state) {
 		// Plain colored text rather than a `label-*` pill — pills are sized
 		// for inline form labels and look cramped at the 1.45em status row.
-		var color = running ? '#26a65b' : '#dc3545';
+		var spec = {
+			running: { color: '#26a65b', text: _('● Running') },
+			paused:  { color: '#888',    text: _('○ Paused')  },
+			stopped: { color: '#dc3545', text: _('● Stopped') }
+		}[state];
 		return E('span', {
-			'style': 'color:' + color + '; font-weight:bold;'
-		}, [ running ? _('● Running') : _('● Stopped') ]);
+			'style': 'color:' + spec.color + '; font-weight:bold;'
+		}, [ spec.text ]);
 	},
 
 	_renderFooter: function(status, mode) {
-		var autostart = status.enabled ? _('on') : _('off');
-		return _('%s · Autostart: %s · Mode: %s').format(
-			shortVersion(status.version), autostart, mode);
+		// Autostart used to live here as a read-out of `enabled`; with the
+		// Enable toggle now the visible control for that flag, the footer
+		// would just echo it. Mode + version stay — they're not
+		// duplicated elsewhere on the page.
+		return _('%s · Mode: %s').format(shortVersion(status.version), mode);
 	},
 
-	_renderActions: function(running) {
-		if (!running) {
+	_renderActions: function(state) {
+		// running → Stop + Restart
+		// paused  → Start + Restart (Start clears the marker)
+		// stopped → Start + Restart (recover an unexpectedly-down service)
+		if (state === 'running') {
 			return [
 				E('button', {
-					'class': 'btn cbi-button cbi-button-apply',
-					'click': ui.createHandlerFn(this, 'handleStart')
-				}, [ _('Start') ])
+					'class': 'btn cbi-button cbi-button-remove',
+					'click': ui.createHandlerFn(this, 'handleStop')
+				}, [ _('Stop') ]),
+				E('button', {
+					'class': 'btn cbi-button cbi-button-neutral',
+					'click': ui.createHandlerFn(this, 'handleRestart')
+				}, [ _('Restart') ])
 			];
 		}
 		return [
 			E('button', {
-				'class': 'btn cbi-button cbi-button-remove',
-				'click': ui.createHandlerFn(this, 'handleStop')
-			}, [ _('Stop') ]),
+				'class': 'btn cbi-button cbi-button-apply',
+				'click': ui.createHandlerFn(this, 'handleStart')
+			}, [ _('Start') ]),
 			E('button', {
 				'class': 'btn cbi-button cbi-button-neutral',
 				'click': ui.createHandlerFn(this, 'handleRestart')
@@ -304,7 +325,96 @@ return baseclass.extend({
 		];
 	},
 
+	_renderEnable: function(enabled) {
+		// A plain checkbox + label, big enough that "is Prism turned on?"
+		// is a glance question. ui.createHandlerFn binds `this` and the
+		// notification-on-error wrapping is shared with the runtime
+		// handlers.
+		var cb = E('input', {
+			'type': 'checkbox',
+			'id': 'prism-enable-checkbox',
+			'class': 'cbi-input-checkbox',
+			'style': 'width:1.2em; height:1.2em; margin:0;',
+			'click': ui.createHandlerFn(this, 'handleToggleEnabled')
+		});
+		if (enabled) cb.checked = true;
+		return [
+			cb,
+			E('label', {
+				'for': 'prism-enable-checkbox',
+				'style': 'font-size:1.15em; font-weight:bold; cursor:pointer; margin:0;'
+			}, [ _('Enable Prism') ]),
+			E('span', { 'style': 'opacity:0.6; font-size:0.9em;' }, [
+				enabled
+					? _('— sing-box runs and autostarts at boot')
+					: _('— installed but dormant; no service, no autostart')
+			])
+		];
+	},
+
+	_renderRuntime: function(status, active, subCount, ruleCount, mode) {
+		// The whole runtime section (badge row, counts, footer). Called
+		// from render() to build the initial DOM, and again from
+		// _updateStatus when the enable state flips on so the contents
+		// appear without a full re-render.
+		var state = this._runtimeState(status);
+		return [
+			E('div', {
+				'style': 'display:flex; flex-wrap:wrap; align-items:center; ' +
+				         'gap:0.7em; padding:0.2em 0; font-size:1.45em; line-height:1.3;'
+			}, [
+				E('span', { 'id': 'prism-status-badge' }, [
+					this._renderBadge(state)
+				]),
+				E('span', { 'style': 'opacity:0.6; font-weight:normal;' }, [
+					_('via')
+				]),
+				E('strong', { 'id': 'prism-active-node' }, [
+					active || _('— no default')
+				]),
+				E('span', {
+					'id': 'prism-status-actions',
+					'style': 'margin-left:auto; display:flex; gap:0.3em; font-size:0.7em;'
+				}, this._renderActions(state))
+			]),
+			E('div', {
+				'id': 'prism-status-pausenote',
+				'style': state === 'paused'
+					? 'margin-top:0.4em; font-size:0.9em; opacity:0.7;'
+					: 'display:none;'
+			}, [ _('Paused for testing — will resume on next reboot.') ]),
+			E('div', { 'style': 'margin-top:0.5em;' }, [
+				_('Subscriptions: %d').format(subCount),
+				' · ',
+				_('Active rules: %d').format(ruleCount)
+			]),
+			E('div', {
+				'id': 'prism-status-footer',
+				'style': 'margin-top:0.25em;'
+			}, [
+				this._renderFooter(status, mode)
+			])
+		];
+	},
+
 	// ── Status controls + polling ─────────────────────────────────────────
+
+	handleToggleEnabled: function(ev) {
+		var self = this;
+		var cb = document.getElementById('prism-enable-checkbox');
+		var on = !!(cb && cb.checked);
+		return callSetEnabled(on).then(function(res) {
+			if (res && res.ok === false) {
+				ui.addNotification(null, E('p',
+					on ? _('Enable failed — check the log below.')
+					   : _('Disable failed — check the log below.')), 'error');
+			} else {
+				ui.addNotification(null, E('p',
+					on ? _('Prism enabled.') : _('Prism disabled.')), 'info');
+			}
+			return self._refreshStatusNow();
+		});
+	},
 
 	handleStart: function() {
 		var self = this;
@@ -321,7 +431,8 @@ return baseclass.extend({
 	handleStop: function() {
 		var self = this;
 		return callStop().then(function() {
-			ui.addNotification(null, E('p', _('Service stopped.')), 'info');
+			ui.addNotification(null, E('p',
+				_('Service stopped — will resume on next reboot.')), 'info');
 			return self._refreshStatusNow();
 		});
 	},
@@ -339,22 +450,65 @@ return baseclass.extend({
 	},
 
 	_updateStatus: function(status) {
+		// Reflect any out-of-band change to `enabled` (a CLI `uci set`, a
+		// concurrent admin) into the checkbox state. Don't fire the click
+		// handler — that would loop back into set_enabled.
+		var cb = document.getElementById('prism-enable-checkbox');
+		if (cb) cb.checked = !!status.enabled;
+
+		// Show/hide the runtime section as a whole. When flipping from
+		// disabled→enabled, the section was previously hidden but its
+		// inner DOM is still the stale snapshot from render(); rebuild it
+		// from current values so the badge/actions/footer match.
+		var runtime = document.getElementById('prism-runtime-section');
+		if (runtime) {
+			if (status.enabled) {
+				runtime.style.display = '';
+				if (!document.getElementById('prism-status-badge')) {
+					var active = uci.get('prism', 'routing', 'final_outbound') || '';
+					var mode   = uci.get('prism', 'inbounds', 'mode') || 'tproxy';
+					var subCount = uci.sections('prism', 'subscription').length;
+					var ruleCount = uci.sections('prism', 'rule').filter(function(r) {
+						return r.enabled !== '0';
+					}).length;
+					while (runtime.firstChild) runtime.removeChild(runtime.firstChild);
+					this._renderRuntime(status, active, subCount, ruleCount, mode)
+						.forEach(function(n) { runtime.appendChild(n); });
+					return;
+				}
+			} else {
+				runtime.style.display = 'none';
+				return;
+			}
+		}
+
+		var state = this._runtimeState(status);
+
 		var badge = document.getElementById('prism-status-badge');
 		if (badge) {
 			while (badge.firstChild) badge.removeChild(badge.firstChild);
-			badge.appendChild(this._renderBadge(status.running));
+			badge.appendChild(this._renderBadge(state));
 		}
 		var actions = document.getElementById('prism-status-actions');
 		if (actions) {
 			while (actions.firstChild) actions.removeChild(actions.firstChild);
-			this._renderActions(status.running).forEach(function(b) {
+			this._renderActions(state).forEach(function(b) {
 				actions.appendChild(b);
 			});
 		}
+		var pausenote = document.getElementById('prism-status-pausenote');
+		if (pausenote) {
+			pausenote.style.display = (state === 'paused') ? '' : 'none';
+			if (state === 'paused') {
+				pausenote.style.marginTop = '0.4em';
+				pausenote.style.fontSize  = '0.9em';
+				pausenote.style.opacity   = '0.7';
+			}
+		}
 		var footer = document.getElementById('prism-status-footer');
 		if (footer) {
-			var mode = uci.get('prism', 'inbounds', 'mode') || 'tproxy';
-			footer.textContent = this._renderFooter(status, mode);
+			var mode2 = uci.get('prism', 'inbounds', 'mode') || 'tproxy';
+			footer.textContent = this._renderFooter(status, mode2);
 		}
 	},
 
