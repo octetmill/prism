@@ -316,14 +316,24 @@ return baseclass.extend({
 		]);
 
 		// One inline <style> block scoped by the prism-show-advanced class.
-		// Two `display` rules cover both .cbi-value rows (flex by default)
-		// and the .cbi-section overrides panel (block).
+		// The toggle is styled as a prominent section header so the user
+		// notices it; a custom ::before chevron rotates on open as the open
+		// indicator (the default <summary> marker is a tiny dim triangle).
 		var styleEl = E('style', {}, [
 			'.cbi-map .prism-advanced{display:none}' +
 			'.cbi-map.prism-show-advanced .cbi-value.prism-advanced{display:flex}' +
 			'.cbi-map.prism-show-advanced .cbi-section.prism-advanced{display:block}' +
-			'.prism-adv-toggle{margin:1em 0 0.5em 0;padding:0.4em 0.6em;border:1px solid rgba(128,128,128,0.3);border-radius:3px;cursor:pointer}' +
-			'.prism-adv-toggle summary{font-weight:bold;outline:none}'
+			'.prism-adv-toggle{margin:1.5em 0 0.75em;padding:0.75em 1em;' +
+				'background:rgba(128,128,128,0.08);' +
+				'border:1px solid rgba(128,128,128,0.5);' +
+				'border-radius:4px;cursor:pointer}' +
+			'.prism-adv-toggle:hover{background:rgba(128,128,128,0.15)}' +
+			'.prism-adv-toggle summary{font-weight:bold;font-size:1.05em;' +
+				'outline:none;list-style:none}' +
+			'.prism-adv-toggle summary::-webkit-details-marker{display:none}' +
+			'.prism-adv-toggle summary::before{content:"\\25B8";display:inline-block;' +
+				'margin-right:0.5em;transition:transform 0.15s ease}' +
+			'.prism-adv-toggle[open] summary::before{transform:rotate(90deg)}'
 		]);
 
 		// <details> is the disclosure trigger — its open state drives the
@@ -331,7 +341,7 @@ return baseclass.extend({
 		// rows live in their original sections (hidden by default), so the
 		// expander only flips a class, it doesn't move DOM.
 		var details = E('details', { 'class': 'prism-adv-toggle' }, [
-			E('summary', {}, [ _('Show advanced settings') ])
+			E('summary', {}, [ _('Advanced settings') ])
 		]);
 		details.addEventListener('toggle', function() {
 			formNode.classList.toggle('prism-show-advanced', details.open);
