@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 OctetMill
 
-// Outbounds tab: subscriptions on top, manually-configured nodes below.
+// Servers tab: subscriptions on top, manually-configured proxies below.
+// "Server" is the user-facing noun for what sing-box calls an outbound — the
+// UCI section names (`node`, `subscription`) and the RPC method names
+// (list_outbounds) keep the historic spelling.
 // Both sections share one form.Map('prism') so a single Save & Apply commits
 // edits to both — they already share the same UCI config and the same global
 // revert (formpanel.resetGrid calls ui.changes.revert), so a unified footer is
@@ -110,7 +113,7 @@ return baseclass.extend({
 		var self = this;
 
 		var s = m.section(form.GridSection, 'subscription', _('Subscriptions'),
-			_('Proxy subscriptions.'));
+			_('Server subscriptions.'));
 		s.addremove = true;
 		s.sortable  = true;
 		s.anonymous = true;
@@ -128,7 +131,7 @@ return baseclass.extend({
 
 		// RPC-populated read-only fields shown in the grid row only —
 		// modalonly=false excludes them from the per-row edit modal.
-		var oCount = s.option(form.DummyValue, 'node_count', _('Nodes'));
+		var oCount = s.option(form.DummyValue, 'node_count', _('Servers'));
 		oCount.modalonly = false;
 
 		var oView = s.option(form.Button, '_view', _('View'));
@@ -184,7 +187,7 @@ return baseclass.extend({
 				return callReloadIfChanged().then(function(r) {
 					if (r && r.reloaded)
 						ui.addNotification(null,
-							E('p', _('Active outbound changed — sing-box reloaded.')), 'info');
+							E('p', _('Active server changed — sing-box reloaded.')), 'info');
 					// Close the edit modal first if the sync was triggered
 					// from inside it — remountActive() would orphan it.
 					ui.hideModal();
@@ -267,13 +270,13 @@ return baseclass.extend({
 			return a.label < b.label ? -1 : a.label > b.label ? 1 : 0;
 		});
 
-		var s = m.section(form.GridSection, 'node', _('Nodes'),
-			_('Manually configured proxy nodes.'));
+		var s = m.section(form.GridSection, 'node', _('Servers'),
+			_('Manually configured proxy servers.'));
 		s.addremove = true;
 		s.sortable  = true;
 		s.anonymous = true;
 		s.addbtntitle = _('Add');
-		s.modaltitle = function() { return _('Node'); };
+		s.modaltitle = function() { return _('Server'); };
 
 		s.tab('general',   _('General'));
 		s.tab('transport', _('Transport'));
@@ -488,7 +491,7 @@ return baseclass.extend({
 		var memberLabel = {};
 		memberList.forEach(function(m) { memberLabel[m.tag] = m.label; });
 
-		o = s.taboption('group', form.MultiValue, 'urltest_outbounds', _('Outbounds'));
+		o = s.taboption('group', form.MultiValue, 'urltest_outbounds', _('Members'));
 		// 'select' renders a ui.Dropdown multi-select: checkboxes plus a
 		// built-in filter field inside the opened dropdown panel.
 		o.widget = 'select';
@@ -569,9 +572,9 @@ return baseclass.extend({
 		o.depends('type', 'urltest');
 
 		// Selector default: optional. The choice list is filtered at modal
-		// open to the section's currently-picked Outbounds and kept in sync
+		// open to the section's currently-picked members and kept in sync
 		// by oMembers.onchange above.
-		var oDefault = s.taboption('group', form.ListValue, 'selector_default', _('Default outbound'));
+		var oDefault = s.taboption('group', form.ListValue, 'selector_default', _('Default member'));
 		oDefault.modalonly = true;
 		oDefault.optional = true;
 		oDefault.depends('type', 'selector');
@@ -637,7 +640,7 @@ return baseclass.extend({
 			if (!value) return true;
 			var picked = pickedMembers(this.map, section_id);
 			if (picked.indexOf(value) < 0)
-				return _('Default must be one of the selected outbounds.');
+				return _('Default must be one of the selected members.');
 			return true;
 		};
 	},
@@ -737,7 +740,7 @@ return baseclass.extend({
 				(res.errors || 0) > 0 ? 'warning' : 'info');
 			if (res && res.reloaded)
 				ui.addNotification(null,
-					E('p', _('Active outbound changed — sing-box reloaded.')), 'info');
+					E('p', _('Active server changed — sing-box reloaded.')), 'info');
 			uci.unload('prism');
 			return uci.load('prism').then(function() {
 				return self._prismHost.remountActive();

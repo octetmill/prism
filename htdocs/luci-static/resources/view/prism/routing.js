@@ -22,6 +22,12 @@ var callListRulesets = rpc.declare({
 	expect: { '': {} }
 });
 
+var callListDhcpLeases = rpc.declare({
+	object: 'luci.prism',
+	method: 'list_dhcp_leases',
+	expect: { '': {} }
+});
+
 // Sniffed application protocols sing-box can match on. Endpoint-only match
 // dimensions (process, package, user, wifi) are deliberately not exposed —
 // they are invisible for traffic forwarded from LAN clients.
@@ -30,27 +36,9 @@ var PROTOCOLS = [
 	'bittorrent', 'dtls', 'ssh', 'rdp', 'ntp'
 ];
 
-var COUNTRIES = [
-	['cn', 'China (cn)'],          ['us', 'United States (us)'],
-	['gb', 'United Kingdom (gb)'], ['de', 'Germany (de)'],
-	['fr', 'France (fr)'],         ['ru', 'Russia (ru)'],
-	['jp', 'Japan (jp)'],          ['kr', 'South Korea (kr)'],
-	['hk', 'Hong Kong (hk)'],      ['tw', 'Taiwan (tw)'],
-	['sg', 'Singapore (sg)'],      ['in', 'India (in)'],
-	['ir', 'Iran (ir)'],           ['br', 'Brazil (br)'],
-	['au', 'Australia (au)'],      ['ca', 'Canada (ca)'],
-	['it', 'Italy (it)'],          ['es', 'Spain (es)'],
-	['nl', 'Netherlands (nl)'],    ['se', 'Sweden (se)'],
-	['ch', 'Switzerland (ch)'],    ['tr', 'Turkey (tr)'],
-	['ua', 'Ukraine (ua)'],        ['pl', 'Poland (pl)'],
-	['vn', 'Vietnam (vn)'],        ['th', 'Thailand (th)'],
-	['id', 'Indonesia (id)'],      ['ph', 'Philippines (ph)'],
-	['ae', 'UAE (ae)'],            ['sa', 'Saudi Arabia (sa)']
-];
-
 // A routing rule's destination is an ordered list of conditions, each of one
 // of these kinds. domain* / ip_cidr / protocol / port are native sing-box
-// matchers; ruleset / country resolve to rule-set references.
+// matchers; ruleset resolves to a rule-set reference.
 var KINDS = [
 	[ 'domain',         _('Domain (exact)') ],
 	[ 'domain_suffix',  _('Domain suffix')  ],
@@ -58,7 +46,6 @@ var KINDS = [
 	[ 'domain_regex',   _('Domain regex')   ],
 	[ 'ip_cidr',        _('IP / CIDR')      ],
 	[ 'ruleset',        _('Rule-set')       ],
-	[ 'country',        _('Country')        ],
 	[ 'protocol',       _('Protocol')       ],
 	[ 'port',           _('Port')           ]
 ];
@@ -70,7 +57,6 @@ var KIND_SHORT = {
 	domain_regex:   _('regex'),
 	ip_cidr:        _('IP'),
 	ruleset:        _('rule-set'),
-	country:        _('country'),
 	protocol:       _('protocol'),
 	port:           _('port')
 };
@@ -82,7 +68,6 @@ var PLACEHOLDERS = {
 	domain_regex:   '.*\\.example\\.com$',
 	ip_cidr:        '192.0.2.0/24',
 	ruleset:        'sagernet/geosite-cn',
-	country:        'cn',
 	protocol:       'tls',
 	port:           '80, 443, 8000-8100'
 };
@@ -139,18 +124,16 @@ function ruleSummary(rule_name) {
 // backed by child `condition` UCI sections rather than a field on the rule,
 // so `cfgvalue` reads them and `parse` reconciles them. form.DummyValue is
 // the base — it carries no input/validation machinery to clash with the
-// fully custom `parse`. The suggestion sets (rsSuggest / countrySuggest /
-// protoSuggest) are assigned per-instance in render(), once the rule-set
-// catalog has loaded.
+// fully custom `parse`. The suggestion sets (rsSuggest / protoSuggest) are
+// assigned per-instance in render(), once the rule-set catalog has loaded.
 var ConditionList = form.DummyValue.extend({
 	cfgvalue: function(section_id) {
 		return readConditions(section_id);
 	},
 
 	renderWidget: function(section_id) {
-		var rsSuggest      = this.rsSuggest      || null;
-		var countrySuggest = this.countrySuggest || null;
-		var protoSuggest   = this.protoSuggest   || null;
+		var rsSuggest    = this.rsSuggest    || null;
+		var protoSuggest = this.protoSuggest || null;
 
 		var rowsEl  = E('div', {});
 		var preview = E('div', {
@@ -159,7 +142,6 @@ var ConditionList = form.DummyValue.extend({
 
 		function suggestionsFor(kind) {
 			if (kind === 'ruleset')  return rsSuggest;
-			if (kind === 'country')  return countrySuggest;
 			if (kind === 'protocol') return protoSuggest;
 			return null;
 		}
@@ -443,7 +425,8 @@ return baseclass.extend({
 		return Promise.all([
 			uci.load('prism'),
 			callListOutbounds().catch(function() { return {}; }),
-			callListRulesets().catch(function() { return {}; })
+			callListRulesets().catch(function() { return {}; }),
+			callListDhcpLeases().catch(function() { return {}; })
 		]);
 	},
 
@@ -467,11 +450,11 @@ return baseclass.extend({
 		rsTokens.sort();
 
 		// Map sub_id → human-readable name and display order. Two subscriptions
-		// can carry nodes with identical tags; the label shown in the outbound
+		// can carry nodes with identical tags; the label shown in the server
 		// dropdown must make clear which subscription a tag comes from, and
-		// the listing order must match the Outbounds tab's Subscriptions
+		// the listing order must match the Servers tab's Subscriptions
 		// section. Manual nodes (subscription === '') sort to the top, in
-		// Nodes-section order.
+		// section order.
 		var subName = {}, subOrder = {};
 		uci.sections('prism', 'subscription').forEach(function(sub, idx) {
 			subName[sub['.name']]  = sub.name || sub['.name'];
@@ -483,7 +466,7 @@ return baseclass.extend({
 			return Infinity;
 		}
 
-		function addOutbounds(o) {
+		function addServers(o) {
 			o.value('direct', _('direct (no proxy)'));
 			o.value('block',  _('block (drop)'));
 			var entries = outbounds.map(function(ob, i) {
@@ -508,24 +491,24 @@ return baseclass.extend({
 
 		var m = new form.Map('prism');
 
-		// ── default outbound ────────────────────────────────────────────
-		var ds = m.section(form.NamedSection, 'routing', 'routing', _('Default outbound'),
-			_('Outbound for traffic not matched by any rule below.'));
+		// ── default server ──────────────────────────────────────────────
+		var ds = m.section(form.NamedSection, 'routing', 'routing', _('Default server'),
+			_('Server for traffic not matched by any rule below.'));
 		ds.addremove = false;
 
-		var oFinal = ds.option(form.ListValue, 'final_outbound', _('Default outbound'));
-		addOutbounds(oFinal);
+		var oFinal = ds.option(form.ListValue, 'final_outbound', _('Default server'));
+		addServers(oFinal);
 
 		// ── rules ───────────────────────────────────────────────────────
 		var s = m.section(form.GridSection, 'rule', _('Rules'),
 			_('Evaluated top-to-bottom; first match wins. Each rule matches a ' +
 			  'destination built from one or more conditions joined with ' +
-			  'AND / OR, and sends matching traffic to an outbound. Changes ' +
+			  'AND / OR, and sends matching traffic to a server. Changes ' +
 			  'are staged until Save; Save & Apply also reloads the service.'));
 		s.addremove = true;
 		s.sortable  = true;
 		s.anonymous = true;
-		s.addbtntitle = _('Add rule');
+		s.addbtntitle = _('Add');
 		s.modaltitle = function() { return _('Routing rule'); };
 
 		// Create each rule as a NAMED section with a stable generated name.
@@ -559,8 +542,13 @@ return baseclass.extend({
 			return ruleSummary(section_id);
 		};
 
-		var oOut = s.option(form.ListValue, 'outbound', _('Outbound'));
-		addOutbounds(oOut);
+		var oOut = s.option(form.ListValue, 'outbound', _('Server'));
+		addServers(oOut);
+		// Render the server choice as an inline dropdown in the grid row so
+		// rebinding a rule to a different server is one click, not a modal
+		// open. The edit stays in-memory until the panel-level Save & Apply,
+		// matching the inline Enabled checkbox above.
+		oOut.editable = true;
 
 		// ── Destination — the condition builder ──────────────────────────
 		var oCond = s.option(ConditionList, '_conditions', _('Conditions'),
@@ -569,11 +557,176 @@ return baseclass.extend({
 			  'binds tighter than OR, so a rule matches an OR of AND-groups ' +
 			  '(see the preview below). Set a row to "is not" to invert it. ' +
 			  'A rule with no conditions does nothing and is skipped — the ' +
-			  'default outbound already handles otherwise-unmatched traffic.'));
+			  'default server already handles otherwise-unmatched traffic.'));
 		oCond.modalonly = true;
-		oCond.rsSuggest      = rsTokens;
-		oCond.countrySuggest = COUNTRIES;
-		oCond.protoSuggest   = PROTOCOLS.slice().sort();
+		oCond.rsSuggest    = rsTokens;
+		oCond.protoSuggest = PROTOCOLS.slice().sort();
+
+		// ── custom rule-sets ────────────────────────────────────────────
+		// Lives in Routing because routing rules reference these by label;
+		// the global delivery / download-detour knobs that used to sit next
+		// to this section moved to Settings — they're set-once-and-forgotten
+		// config, not something the user tweaks while editing rules.
+		var cs = m.section(form.GridSection, 'customrs', _('Custom rule-sets'),
+			_('Rule-sets fetched from an explicit URL. Reference one in a ' +
+			  'routing rule by its label.'));
+		cs.addremove = true;
+		cs.anonymous = true;
+		cs.addbtntitle = _('Add');
+
+		var oLabel = cs.option(form.Value, 'label', _('Label'));
+		oLabel.rmempty = false;
+		oLabel.validate = function(section_id, value) {
+			if (!value)
+				return _('A label is required.');
+			if (value.indexOf('/') >= 0)
+				return _('The label must not contain "/".');
+			return true;
+		};
+
+		var oUrl = cs.option(form.Value, 'url', _('URL'));
+		oUrl.rmempty = false;
+		oUrl.placeholder = 'https://…/rules.srs';
+
+		var oFmt = cs.option(form.ListValue, 'format', _('Format'));
+		oFmt.value('binary', _('Binary (.srs)'));
+		oFmt.value('source', _('Source (.json)'));
+		oFmt['default'] = 'binary';
+
+		// ── bypass ──────────────────────────────────────────────────────
+		// LAN clients listed here skip the proxy entirely — applied via
+		// nftables `accept` rules at the head of the prerouting chain
+		// (tproxy / tproxy_mixed modes), or as a source_ip_cidr direct
+		// rule in the sing-box config (tun mode, IP entries only — MAC is
+		// not visible at the IP layer the TUN device exposes, so MAC
+		// entries are inert in tun mode and a warning is surfaced inline).
+		var leases = (data && data[3] && Array.isArray(data[3].leases))
+			? data[3].leases : [];
+		var imode = uci.get('prism', 'inbounds', 'mode') || 'tproxy';
+
+		var bp = m.section(form.GridSection, 'bypass', _('Bypass'),
+			_('LAN clients listed here skip the proxy entirely. Useful for ' +
+			  'devices that need direct WAN access (corporate VPN clients, ' +
+			  'gaming consoles, IoT). MAC bypass requires TProxy or TProxy + ' +
+			  'Mixed mode; IP bypass works in all modes.'));
+		bp.addremove = true;
+		bp.anonymous = true;
+		bp.addbtntitle = _('Add');
+		bp.modaltitle = function() { return _('Bypass'); };
+
+		var bpEnabled = bp.option(form.Flag, 'enabled', _('On'));
+		bpEnabled['default'] = '1';
+		bpEnabled.rmempty = false;
+		bpEnabled.editable = true;
+
+		var bpName = bp.option(form.Value, 'name', _('Name'));
+		bpName.placeholder = _('Optional label');
+
+		var bpKind = bp.option(form.ListValue, 'kind', _('Type'));
+		bpKind.value('mac', _('MAC'));
+		bpKind.value('ip',  _('IP'));
+		bpKind['default'] = 'mac';
+
+		// Build the suggestion list for the Value combobox once per kind —
+		// each DHCP lease contributes a single entry whose key matches the
+		// chosen kind. The label leads with the hostname so filter-by-typing
+		// works on the human name, and includes the "other" identifier as
+		// secondary info.
+		function bypassChoices(kind) {
+			var keys = [], labels = {};
+			leases.forEach(function(l) {
+				var name  = l.hostname || _('(no hostname)');
+				var key   = (kind === 'mac') ? l.mac : l.ip;
+				var other = (kind === 'mac') ? l.ip  : l.mac;
+				if (!key || key === '') return;
+				keys.push(key);
+				labels[key] = name + ' — ' + key + ' (' + other + ')';
+			});
+			return [keys, labels];
+		}
+
+		var bpValue = bp.option(form.Value, 'value', _('Value'));
+		bpValue.rmempty = false;
+		bpValue.placeholder = '00:11:22:33:44:55';
+		// form.Value falls back to a plain ui.Textfield when no .value()
+		// entries are declared at construction; force a ui.Combobox so
+		// addChoices / clearChoices are available for the kind-driven
+		// repopulation below. Initial choices are seeded asynchronously
+		// once the modal is mounted (same setTimeout(0) trick servers.js
+		// uses for selector_default — at the synchronous render pass the
+		// cloned-modal option's data hasn't been hydrated yet).
+		bpValue.renderWidget = function(section_id, option_index, cfgvalue) {
+			var widget = new ui.Combobox(cfgvalue != null ? cfgvalue : '', {}, {
+				id:          this.cbid(section_id),
+				sort:        false,
+				optional:    false,
+				placeholder: this.placeholder,
+				validate:    this.getValidator(section_id),
+				disabled:    this.map.readonly
+			});
+			var node = widget.render();
+			var self = this;
+			setTimeout(function() {
+				var w = self.getUIElement(section_id);
+				if (!w) return;
+				var kindOpts = self.map.lookupOption('kind', section_id);
+				var kind = (kindOpts && kindOpts[0])
+					? (kindOpts[0].formvalue(section_id) || 'mac') : 'mac';
+				var c = bypassChoices(kind);
+				w.clearChoices(true);
+				w.addChoices(c[0], c[1]);
+			}, 0);
+			return node;
+		};
+		// Repopulate the Value combobox when the user flips MAC ↔ IP, so
+		// the visible suggestions always match the current kind. Same
+		// cross-map rule as servers.js: inside the modal `this.map` is the
+		// clone, lookupOption finds the modal's sibling, getUIElement
+		// returns the live widget.
+		bpKind.onchange = function(ev, section_id, value) {
+			var bpValueOpts = this.map.lookupOption('value', section_id);
+			var opt = bpValueOpts && bpValueOpts[0];
+			if (!opt) return;
+			var w = opt.getUIElement(section_id);
+			if (!w || typeof w.clearChoices !== 'function') return;
+			var c = bypassChoices(value);
+			w.clearChoices(true);
+			w.addChoices(c[0], c[1]);
+		};
+
+		bpValue.validate = function(section_id, value) {
+			if (!value || value === '')
+				return _('A value is required.');
+			var kindOpts = this.map.lookupOption('kind', section_id);
+			var kind = (kindOpts && kindOpts[0])
+				? (kindOpts[0].formvalue(section_id) || 'mac') : 'mac';
+			if (kind === 'mac') {
+				if (!/^[0-9a-fA-F]{2}([:.-][0-9a-fA-F]{2}){5}$/.test(value))
+					return _('Not a valid MAC address.');
+			} else {
+				// IPv4 dotted-quad, with optional /N for the v2-CIDR case.
+				// IPv6 short-form for completeness; the firewall handles
+				// both transparently.
+				if (!/^([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+|[0-9a-fA-F:]+)(\/[0-9]+)?$/.test(value))
+					return _('Not a valid IP address.');
+			}
+			return true;
+		};
+
+		// Grid-only column: warn when a MAC entry won't fire because the
+		// current inbound mode is `tun`. Empty cell otherwise — invisible
+		// in the common (tproxy) case.
+		var bpWarn = bp.option(form.DummyValue, '_warn', '');
+		bpWarn.modalonly = false;
+		bpWarn.cfgvalue = function(section_id) {
+			var kind = uci.get('prism', section_id, 'kind') || 'mac';
+			if (kind === 'mac' && imode === 'tun')
+				return E('span', { 'class': 'label-warning',
+					'style': 'padding:1px 6px; border-radius:3px;',
+					'title': _('MAC bypass requires TProxy or TProxy + Mixed mode')
+				}, [ _('⚠ TUN mode: ignored') ]);
+			return '';
+		};
 
 		this.map = m;
 		// Renumber rule `order` from section position, ensure the routing
@@ -592,7 +745,23 @@ return baseclass.extend({
 					uci.remove('prism', c['.name']);
 			});
 		});
-		return m.render();
+		return m.render().then(function(node) {
+			// Breathing room between the rules grid's Add button and the
+			// Rule-set sources section. NamedSection renders its h3 and
+			// description outside the `#cbi-{config}-{name}` options wrapper,
+			// so a margin on that wrapper only pushed the options down —
+			// target the heading by its text instead, which pushes the whole
+			// visual block down.
+			var gaps = { };
+			gaps[_('Rules')]            = '2em';
+			gaps[_('Custom rule-sets')] = '2em';
+			gaps[_('Bypass')]           = '2em';
+			node.querySelectorAll('h3').forEach(function(h) {
+				var g = gaps[h.textContent];
+				if (g) h.style.marginTop = g;
+			});
+			return node;
+		});
 	},
 
 	handleSave:      function() { return formpanel.save(this); },
