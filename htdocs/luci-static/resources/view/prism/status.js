@@ -69,7 +69,6 @@ var callGetConfig = rpc.declare({
 });
 
 var TAIL_LINES   = 20;
-var PRISM_TAIL_LINES = 10;
 var POLL_MS      = 2000;
 var FULL_LOG_LINES = 500;
 
@@ -218,7 +217,7 @@ return baseclass.extend({
 					'class': 'cbi-input-textarea',
 					'readonly': 'readonly',
 					'wrap': 'off',
-					'rows': String(PRISM_TAIL_LINES),
+					'rows': String(TAIL_LINES),
 					'style': 'width:100%; resize:none; overflow-y:hidden; ' +
 					         'font-family:monospace; font-size:0.8em; ' +
 					         'line-height:1.35; background:rgba(128,128,128,0.05);'
