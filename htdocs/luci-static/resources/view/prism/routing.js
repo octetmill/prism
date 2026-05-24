@@ -595,20 +595,74 @@ return baseclass.extend({
 		bpKind.value('mac', _('MAC'));
 		bpKind.value('ip',  _('IP'));
 		bpKind['default'] = 'mac';
-		bpKind.editable = true;
+
+		// Build the suggestion list for the Value combobox once per kind —
+		// each DHCP lease contributes a single entry whose key matches the
+		// chosen kind. The label leads with the hostname so filter-by-typing
+		// works on the human name, and includes the "other" identifier as
+		// secondary info.
+		function bypassChoices(kind) {
+			var keys = [], labels = {};
+			leases.forEach(function(l) {
+				var name  = l.hostname || _('(no hostname)');
+				var key   = (kind === 'mac') ? l.mac : l.ip;
+				var other = (kind === 'mac') ? l.ip  : l.mac;
+				if (!key || key === '') return;
+				keys.push(key);
+				labels[key] = name + ' — ' + key + ' (' + other + ')';
+			});
+			return [keys, labels];
+		}
 
 		var bpValue = bp.option(form.Value, 'value', _('Value'));
 		bpValue.rmempty = false;
 		bpValue.placeholder = '00:11:22:33:44:55';
-		// Suggestions: every active DHCP lease appears twice — once keyed
-		// by MAC, once by IP — so the combobox matches whichever the user
-		// picked as `kind`. Label format puts the hostname first so typing
-		// part of the name filters quickly.
-		leases.forEach(function(l) {
-			var name = l.hostname || _('(no hostname)');
-			if (l.mac) bpValue.value(l.mac, name + ' — ' + l.mac + ' (' + l.ip + ')');
-			if (l.ip)  bpValue.value(l.ip,  name + ' — ' + l.ip  + ' (' + l.mac + ')');
-		});
+		// form.Value falls back to a plain ui.Textfield when no .value()
+		// entries are declared at construction; force a ui.Combobox so
+		// addChoices / clearChoices are available for the kind-driven
+		// repopulation below. Initial choices are seeded asynchronously
+		// once the modal is mounted (same setTimeout(0) trick servers.js
+		// uses for selector_default — at the synchronous render pass the
+		// cloned-modal option's data hasn't been hydrated yet).
+		bpValue.renderWidget = function(section_id, option_index, cfgvalue) {
+			var widget = new ui.Combobox(cfgvalue != null ? cfgvalue : '', {}, {
+				id:          this.cbid(section_id),
+				sort:        false,
+				optional:    false,
+				placeholder: this.placeholder,
+				validate:    this.getValidator(section_id),
+				disabled:    this.map.readonly
+			});
+			var node = widget.render();
+			var self = this;
+			setTimeout(function() {
+				var w = self.getUIElement(section_id);
+				if (!w) return;
+				var kindOpts = self.map.lookupOption('kind', section_id);
+				var kind = (kindOpts && kindOpts[0])
+					? (kindOpts[0].formvalue(section_id) || 'mac') : 'mac';
+				var c = bypassChoices(kind);
+				w.clearChoices(true);
+				w.addChoices(c[0], c[1]);
+			}, 0);
+			return node;
+		};
+		// Repopulate the Value combobox when the user flips MAC ↔ IP, so
+		// the visible suggestions always match the current kind. Same
+		// cross-map rule as servers.js: inside the modal `this.map` is the
+		// clone, lookupOption finds the modal's sibling, getUIElement
+		// returns the live widget.
+		bpKind.onchange = function(ev, section_id, value) {
+			var bpValueOpts = this.map.lookupOption('value', section_id);
+			var opt = bpValueOpts && bpValueOpts[0];
+			if (!opt) return;
+			var w = opt.getUIElement(section_id);
+			if (!w || typeof w.clearChoices !== 'function') return;
+			var c = bypassChoices(value);
+			w.clearChoices(true);
+			w.addChoices(c[0], c[1]);
+		};
+
 		bpValue.validate = function(section_id, value) {
 			if (!value || value === '')
 				return _('A value is required.');
