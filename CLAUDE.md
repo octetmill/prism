@@ -37,9 +37,9 @@ auto-generated branch.
 
 ## Target Platform
 
-- **OS**: OpenWrt 25.12+ exclusively — no compatibility shims for older releases
-- **Architecture**: Any architecture OpenWrt 25.12 supports (MIPS, ARM, x86, …)
-- **Package format**: APK (Alpine Package Keeper) — OpenWrt 25.12 dropped opkg/IPK
+- **OS**: OpenWrt 25.12+ (primary) and 24.10 (secondary, via IPK) — no compatibility shims for releases older than 24.10
+- **Architecture**: Any architecture OpenWrt 24.10 / 25.12 supports (MIPS, ARM, x86, …)
+- **Package format**: APK (Alpine Package Keeper) on 25.12+; IPK (opkg) on 24.10. CI builds both formats from one source.
 - **Web framework**: LuCI — JavaScript views + rpcd (modern approach)
 - **Config system**: UCI (Unified Configuration Interface)
 - **Lua version**: 5.1 — used only for rpcd handler scripts, not for LuCI views

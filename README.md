@@ -7,16 +7,14 @@ into tabs:
 
 | Tab | Purpose |
 |---|---|
-| Overview | Service status and start / stop / restart controls |
-| Subscriptions | Proxy-subscription URLs with periodic auto-update |
-| Nodes | Manually-configured proxy nodes |
-| Routing | Destination-based routing rules |
-| Settings | Service, inbound, DNS, rule-set and advanced options |
-| Diagnostics | Live log tail and a generated-config preview |
+| Status   | Service status, start / stop / restart, active default server, log tail, full-log and generated-config modals |
+| Nodes    | Proxy subscriptions (auto-update + sync) and manually-configured nodes |
+| Routing  | Destination-based routing rules and rule-set sources |
+| Settings | Network mode, DNS, rule-set delivery, logging and advanced overrides |
 
 ## Requirements
 
-- OpenWrt **25.12+** (APK) or **≤24.10** (IPK/opkg)
+- OpenWrt **25.12+** (APK) or **24.10** (IPK/opkg)
 - Runtime dependencies (installed automatically): `luci-base`, `luci-lib-jsonc`, `sing-box (>=1.12)`, `rpcd`, `rpcd-mod-rpcsys`, `uclient-fetch`, `ca-bundle`
 
 ## Installing
@@ -34,7 +32,7 @@ ssh root@192.168.1.1 '
 '
 ```
 
-For OpenWrt ≤24.10 (opkg):
+For OpenWrt 24.10 (opkg):
 
 ```sh
 ssh root@192.168.1.1 '
@@ -46,7 +44,7 @@ ssh root@192.168.1.1 '
 
 ### Tagged release
 
-Download the latest `.apk` (OpenWrt 25.12+) or `.ipk` (OpenWrt ≤24.10) from the
+Download the latest `.apk` (OpenWrt 25.12+) or `.ipk` (OpenWrt 24.10) from the
 [Releases](../../releases) page, copy it to the router, and install with
 `apk add --allow-untrusted` or `opkg install`.
 
@@ -101,8 +99,7 @@ Output: `bin/packages/<arch>/base/luci-app-prism_*.apk`
 Makefile                         # OpenWrt SDK build descriptor (luci.mk)
 htdocs/luci-static/resources/view/prism/
 ├── main.js                      # Host view — the tab shell
-├── overview.js  subscriptions.js  nodes.js  routing.js  diagnostics.js
-├── service.js  inbound.js  dns.js  rulesets.js  advanced.js
+├── status.js  nodes.js  routing.js  settings.js   # One panel per tab
 └── lib/                         # Shared view helpers (formpanel, ordersave)
 root/
 ├── etc/
@@ -110,7 +107,7 @@ root/
 │   ├── init.d/prism             # procd init script
 │   └── uci-defaults/            # One-time config migrations
 └── usr/
-    ├── libexec/prism/           # build-config, firewall.sh, fetch-rulesets,
+    ├── libexec/prism/           # build-config, firewall.sh, fetch-catalog,
     │                            #   sync-subscriptions, watchdog, hourly, prismlib.lua
     ├── libexec/rpcd/luci.prism  # rpcd handler
     └── share/
