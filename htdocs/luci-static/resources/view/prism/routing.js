@@ -655,7 +655,7 @@ return baseclass.extend({
 			// between Subscriptions and Nodes.
 			var rsSection = node.querySelector('#cbi-prism-global');
 			if (rsSection)
-				rsSection.style.marginTop = '2em';
+				rsSection.style.marginTop = '4em';
 			return node;
 		});
 	},
