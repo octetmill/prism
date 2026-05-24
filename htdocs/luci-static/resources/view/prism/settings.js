@@ -112,7 +112,7 @@ return baseclass.extend({
 		var wanDns     = wanDnsInfo.wan_dns || null;
 		var extraText  = extraData.json || '';
 
-		var m = new form.Map('prism', '', _('sing-box settings'));
+		var m = new form.Map('prism');
 
 		// Collect option objects that should live behind the Advanced expander.
 		// After m.render(), each option's input id is `cbid.prism.<section>.<name>`
