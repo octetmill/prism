@@ -5,11 +5,14 @@
 // not?" without leaving the page.
 //
 // Layout (top → bottom):
-//   ● Running/Stopped  via  <active-server>   [Start|Stop] [Restart]
+//   ● Running/Stopped  via  <active-server>   [Stop] [Restart]
 //   Subscriptions: N · Active rules: N
 //   <recent activity — 20-line log tail, auto-refreshed>
 //   [View full log] [View generated config]
 //   sing-box X.Y.Z · Autostart · Mode
+//
+// Restart on a stopped service just calls start, so no separate Start button
+// is needed — Stop and Restart cover every transition.
 //
 // Two 2s pollers — one for service status (badge + autostart), one for the
 // log tail. Both are torn down on tab switch via _teardown. The full log
@@ -30,12 +33,6 @@
 var callGetStatus = rpc.declare({
 	object: 'luci.prism',
 	method: 'get_status',
-	expect: { '': {} }
-});
-
-var callStart = rpc.declare({
-	object: 'luci.prism',
-	method: 'start',
 	expect: { '': {} }
 });
 
@@ -68,6 +65,60 @@ var TAIL_LINES = 20;
 var POLL_MS    = 2000;
 var FULL_LOG_LINES = 500;
 
+// Strip the syslog wrapper, sing-box's redundant inner UTC timestamp, and the
+// ANSI color escapes from a single log line. The on-disk format is
+//   "Sun May 24 08:34:01 2026 daemon.err sing-box[9596]: +0000 2026-05-24 ...
+//    \x1b[31mERROR\x1b[0m [\x1b[38;5;226m6532...\x1b[0m 5.0s] <msg>"
+// — half the row is timestamps and ANSI noise. We compress to a single
+// "YYYY/MM/DD HH:MM:SS <message>" so the message itself fits the visible
+// width of the log box without horizontal scrolling for every line.
+var MONTHS = {
+	Jan: '01', Feb: '02', Mar: '03', Apr: '04', May: '05', Jun: '06',
+	Jul: '07', Aug: '08', Sep: '09', Oct: '10', Nov: '11', Dec: '12'
+};
+// syslog ts (Mon Day HH:MM:SS Year), then "daemon.<sev> <tag>[<pid>]:",
+// then sing-box's own optional "+TZ YYYY-MM-DD HH:MM:SS " prefix, then msg.
+var LOG_RE = /^\w{3} (\w{3})\s+(\d+) (\d{2}:\d{2}:\d{2}) (\d{4}) \S+ \S+:\s*(?:[+-]\d{4}\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\s+)?(.*)$/;
+var ANSI_RE = /\x1b\[[0-9;]*m/g;
+
+function cleanLogLine(line) {
+	var s = String(line).replace(ANSI_RE, '');
+	var m = s.match(LOG_RE);
+	if (!m) return s;
+	var mm = MONTHS[m[1]] || '00';
+	var dd = (m[2].length < 2 ? '0' : '') + m[2];
+	return m[4] + '/' + mm + '/' + dd + ' ' + m[3] + ' ' + m[5];
+}
+
+function formatLog(lines) {
+	if (!Array.isArray(lines)) return '';
+	return lines.map(cleanLogLine).join('\n');
+}
+
+// "sing-box version 1.12.17" → "sing-box 1.12.17" (drop the redundant
+// "version" word) so the footer template doesn't render "sing-box sing-box ".
+function shortVersion(v) {
+	if (!v) return _('unknown version');
+	return String(v).replace(/^sing-box version\s+/, 'sing-box ');
+}
+
+// Trigger a browser download of the given JSON text as sing-box.json. Uses a
+// Blob URL rather than a data: URL — large configs would otherwise blow past
+// the data-URL length limit some browsers still enforce.
+function downloadConfig(json) {
+	var blob = new Blob([ json ], { type: 'application/json' });
+	var url  = URL.createObjectURL(blob);
+	var a    = document.createElement('a');
+	a.href     = url;
+	a.download = 'sing-box.json';
+	document.body.appendChild(a);
+	a.click();
+	document.body.removeChild(a);
+	// Defer revocation a frame so Safari has time to dispatch the download
+	// before the URL becomes invalid.
+	requestAnimationFrame(function() { URL.revokeObjectURL(url); });
+}
+
 return baseclass.extend({
 	_statusTimer: null,
 	_logTimer:    null,
@@ -85,7 +136,7 @@ return baseclass.extend({
 	render: function(results) {
 		var status   = (results && results[0]) || {};
 		var logData  = (results && results[1]) || {};
-		var logLines = (Array.isArray(logData.log) ? logData.log : []).join('\n');
+		var logText  = formatLog(logData.log);
 
 		var active = uci.get('prism', 'routing', 'final_outbound') || '';
 		var mode   = uci.get('prism', 'inbounds', 'mode') || 'tproxy';
@@ -99,25 +150,25 @@ return baseclass.extend({
 		var node = E('div', { 'class': 'cbi-map' }, [
 
 			// ── Status row ─────────────────────────────────────────────
+			// One big colored line — large enough that "is it working?" is
+			// answerable from across the room. Restart on a stopped service
+			// just starts it, so no separate Start button — Stop and Restart
+			// cover every transition.
 			E('div', { 'class': 'cbi-section' }, [
 				E('div', {
 					'style': 'display:flex; flex-wrap:wrap; align-items:center; ' +
-					         'gap:0.9em; padding:0.2em 0;'
+					         'gap:0.7em; padding:0.2em 0; font-size:1.45em; line-height:1.3;'
 				}, [
-					E('span', { 'id': 'prism-status-badge', 'style': 'font-size:1.05em;' }, [
+					E('span', { 'id': 'prism-status-badge' }, [
 						this._renderBadge(status.running)
 					]),
-					E('span', { 'style': 'font-size:0.95em;' }, [
-						_('via') + ' ',
-						E('strong', { 'id': 'prism-active-server' }, [
-							active || _('— no default')
-						])
+					E('span', { 'style': 'opacity:0.6; font-weight:normal;' }, [
+						_('via')
 					]),
-					E('span', { 'style': 'margin-left:auto; display:flex; gap:0.3em;' }, [
-						E('button', {
-							'class': 'btn cbi-button cbi-button-apply',
-							'click': ui.createHandlerFn(self, 'handleStart')
-						}, [ _('Start') ]),
+					E('strong', { 'id': 'prism-active-server' }, [
+						active || _('— no default')
+					]),
+					E('span', { 'style': 'margin-left:auto; display:flex; gap:0.3em; font-size:0.7em;' }, [
 						E('button', {
 							'class': 'btn cbi-button cbi-button-remove',
 							'click': ui.createHandlerFn(self, 'handleStop')
@@ -129,7 +180,7 @@ return baseclass.extend({
 					])
 				]),
 				E('div', {
-					'style': 'margin-top:0.5em; font-size:0.85em; opacity:0.75;'
+					'style': 'margin-top:0.5em; font-size:0.9em; opacity:0.75;'
 				}, [
 					_('Subscriptions: %d').format(subCount),
 					' · ',
@@ -138,6 +189,10 @@ return baseclass.extend({
 			]),
 
 			// ── Recent activity ────────────────────────────────────────
+			// Fixed 20 rows, no vertical scroll. Long lines still scroll
+			// horizontally (wrap=off) so multi-line wrap doesn't shrink the
+			// effective tail. The cleanLogLine pass trims most lines to
+			// "YYYY/MM/DD HH:MM:SS <msg>", which usually fits the box width.
 			E('div', { 'class': 'cbi-section' }, [
 				E('h3', { 'style': 'margin-bottom:0.4em;' }, [ _('Recent activity') ]),
 				E('textarea', {
@@ -145,10 +200,11 @@ return baseclass.extend({
 					'class': 'cbi-input-textarea',
 					'readonly': 'readonly',
 					'wrap': 'off',
-					'style': 'width:100%; height:21em; resize:vertical; ' +
+					'rows': String(TAIL_LINES),
+					'style': 'width:100%; resize:none; overflow-y:hidden; ' +
 					         'font-family:monospace; font-size:0.8em; ' +
 					         'line-height:1.35; background:rgba(128,128,128,0.05);'
-				}, [ logLines ]),
+				}, [ logText ]),
 				E('div', { 'style': 'margin-top:0.5em; display:flex; gap:0.4em;' }, [
 					E('button', {
 						'class': 'btn cbi-button cbi-button-neutral',
@@ -164,7 +220,7 @@ return baseclass.extend({
 			// ── Footer line ────────────────────────────────────────────
 			E('div', {
 				'id': 'prism-status-footer',
-				'style': 'margin:0.5em 0.5em; font-size:0.8em; opacity:0.6;'
+				'style': 'margin:0.8em 0.5em; font-size:0.9em; opacity:0.75;'
 			}, [
 				this._renderFooter(status, mode)
 			])
@@ -172,8 +228,9 @@ return baseclass.extend({
 
 		this._scheduleStatusRefresh();
 		this._scheduleLogRefresh();
-		// Initial scroll-to-end is deferred so the textarea is in the DOM
-		// (and has its scrollHeight) by the time we read it.
+		// Initial scroll-to-bottom for the rare case where lines wrap onto
+		// more rows than the box can show; deferred so the textarea is in
+		// the DOM (and has its scrollHeight) by the time we read it.
 		requestAnimationFrame(function() {
 			var el = document.getElementById('prism-log-tail');
 			if (el) el.scrollTop = el.scrollHeight;
@@ -185,30 +242,21 @@ return baseclass.extend({
 	// ── Renderers ─────────────────────────────────────────────────────────
 
 	_renderBadge: function(running) {
-		return running
-			? E('span', { 'class': 'label-success' }, [ _('● Running') ])
-			: E('span', { 'class': 'label-warning' }, [ _('● Stopped') ]);
+		// Plain colored text rather than a `label-*` pill — pills are sized
+		// for inline form labels and look cramped at the 1.45em status row.
+		var color = running ? '#26a65b' : '#dc3545';
+		return E('span', {
+			'style': 'color:' + color + '; font-weight:bold;'
+		}, [ running ? _('● Running') : _('● Stopped') ]);
 	},
 
 	_renderFooter: function(status, mode) {
-		var version = status.version || _('unknown version');
 		var autostart = status.enabled ? _('on') : _('off');
-		return _('sing-box %s · Autostart: %s · Mode: %s').format(version, autostart, mode);
+		return _('%s · Autostart: %s · Mode: %s').format(
+			shortVersion(status.version), autostart, mode);
 	},
 
 	// ── Status controls + polling ─────────────────────────────────────────
-
-	handleStart: function() {
-		var self = this;
-		return callStart().then(function(res) {
-			if (res && res.ok === false) {
-				ui.addNotification(null, E('p', _('Start failed — check the log below.')), 'error');
-			} else {
-				ui.addNotification(null, E('p', _('Service started.')), 'info');
-			}
-			return self._refreshStatusNow();
-		});
-	},
 
 	handleStop: function() {
 		var self = this;
@@ -271,7 +319,7 @@ return baseclass.extend({
 		return callGetLog(TAIL_LINES).then(L.bind(function(data) {
 			var el = document.getElementById('prism-log-tail');
 			if (!el) return;
-			el.value = (Array.isArray(data.log) ? data.log : []).join('\n');
+			el.value = formatLog(data && data.log);
 			el.scrollTop = el.scrollHeight;
 		}, this));
 	},
@@ -297,7 +345,7 @@ return baseclass.extend({
 			])
 		]);
 		return callGetLog(FULL_LOG_LINES).then(function(data) {
-			var lines = (data && Array.isArray(data.log)) ? data.log.join('\n') : '';
+			var lines = formatLog(data && data.log);
 			var ta = E('textarea', {
 				'class': 'cbi-input-textarea',
 				'readonly': 'readonly',
@@ -334,6 +382,7 @@ return baseclass.extend({
 		return callGetConfig().then(function(data) {
 			data = data || {};
 			var path = data.path || '/var/etc/prism/sing-box.json';
+			var json = data.json || '';
 			var content = [
 				E('div', { 'style': 'display:flex; align-items:center; gap:0.5em; margin-bottom:0.4em; flex-wrap:wrap;' }, [
 					E('span', { 'style': 'font-size:0.85em; opacity:0.7;' }, [ _('Target file:') ]),
@@ -354,8 +403,13 @@ return baseclass.extend({
 				'spellcheck': 'false',
 				'style': 'width:100%; height:60vh; font-family:monospace; ' +
 				         'font-size:0.8em; line-height:1.4; background:rgba(128,128,128,0.05);'
-			}, [ data.json || '' ]));
-			content.push(E('div', { 'class': 'right', 'style': 'margin-top:0.5em;' }, [
+			}, [ json ]));
+			content.push(E('div', { 'style': 'margin-top:0.5em; display:flex; justify-content:space-between; gap:0.4em;' }, [
+				E('button', {
+					'class': 'btn cbi-button cbi-button-neutral',
+					'disabled': json ? null : 'disabled',
+					'click': function() { downloadConfig(json); }
+				}, [ _('Download config') ]),
 				E('button', { 'class': 'btn', 'click': ui.hideModal }, [ _('Close') ])
 			]));
 			ui.showModal(_('Generated configuration'), content);
