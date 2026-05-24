@@ -537,6 +537,11 @@ return baseclass.extend({
 
 		var oOut = s.option(form.ListValue, 'outbound', _('Server'));
 		addServers(oOut);
+		// Render the server choice as an inline dropdown in the grid row so
+		// rebinding a rule to a different server is one click, not a modal
+		// open. The edit stays in-memory until the panel-level Save & Apply,
+		// matching the inline Enabled checkbox above.
+		oOut.editable = true;
 
 		// ── Destination — the condition builder ──────────────────────────
 		var oCond = s.option(ConditionList, '_conditions', _('Conditions'),
