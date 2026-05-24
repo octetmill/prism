@@ -185,6 +185,12 @@ return baseclass.extend({
 					_('Subscriptions: %d').format(subCount),
 					' · ',
 					_('Active rules: %d').format(ruleCount)
+				]),
+				E('div', {
+					'id': 'prism-status-footer',
+					'style': 'margin-top:0.25em;'
+				}, [
+					this._renderFooter(status, mode)
 				])
 			]),
 
@@ -217,13 +223,6 @@ return baseclass.extend({
 				])
 			]),
 
-			// ── Footer line ────────────────────────────────────────────
-			E('div', {
-				'id': 'prism-status-footer',
-				'style': 'margin:0.8em 0.5em;'
-			}, [
-				this._renderFooter(status, mode)
-			])
 		]);
 
 		this._scheduleStatusRefresh();
