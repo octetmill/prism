@@ -12,26 +12,26 @@
 'require dom';
 'require session';
 'require view.prism.status as statusPanel';
-'require view.prism.servers as serversPanel';
+'require view.prism.nodes as nodesPanel';
 'require view.prism.routing as routingPanel';
 'require view.prism.settings as settingsPanel';
 
 var TABS = [
 	{ id: 'status',   label: _('Status'),   panel: statusPanel },
-	{ id: 'servers',  label: _('Servers'),  panel: serversPanel },
+	{ id: 'nodes',    label: _('Nodes'),    panel: nodesPanel },
 	{ id: 'routing',  label: _('Routing'),  panel: routingPanel },
 	{ id: 'settings', label: _('Settings'), panel: settingsPanel }
 ];
 
 // Old tab ids encountered in saved session state, mapped to current top-level
 // ids. Anything else falls through to TABS[0]. The pre-2026-05-22 ids
-// subscriptions/nodes were rolled into outbounds; outbounds is now servers.
+// subscriptions and outbounds were both rolled into one node-list tab.
 var TAB_REDIRECT = {
 	overview:      'status',
 	diagnostics:   'status',
-	outbounds:     'servers',
-	subscriptions: 'servers',
-	nodes:         'servers'
+	outbounds:     'nodes',
+	subscriptions: 'nodes',
+	servers:       'nodes'
 };
 
 return view.extend({
