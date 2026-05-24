@@ -180,7 +180,7 @@ return baseclass.extend({
 					])
 				]),
 				E('div', {
-					'style': 'margin-top:0.5em; font-size:0.9em; opacity:0.75;'
+					'style': 'margin-top:0.5em;'
 				}, [
 					_('Subscriptions: %d').format(subCount),
 					' · ',
@@ -220,7 +220,7 @@ return baseclass.extend({
 			// ── Footer line ────────────────────────────────────────────
 			E('div', {
 				'id': 'prism-status-footer',
-				'style': 'margin:0.8em 0.5em; font-size:0.9em; opacity:0.75;'
+				'style': 'margin:0.8em 0.5em;'
 			}, [
 				this._renderFooter(status, mode)
 			])
