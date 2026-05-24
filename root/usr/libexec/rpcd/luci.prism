@@ -834,6 +834,38 @@ local function write_nodes_file(sub_id, nodes)
 	return os.rename(tmp, path) ~= nil
 end
 
+-- Set of UCI section ids that are currently `subscription` sections. The node
+-- file `<sub_id>.json` is only meaningful when sub_id is in this set; any file
+-- not in it is an orphan from a since-deleted subscription and must not feed
+-- into outbound dropdowns (its tags would silently appear alongside live ones,
+-- with no subscription label to disambiguate them).
+local function valid_sub_ids()
+	local set = {}
+	local c = uci_cursor()
+	c:foreach("prism", "subscription", function(s) set[s[".name"]] = true end)
+	c:close()
+	return set
+end
+
+-- Delete node files on disk whose sub_id no longer corresponds to a UCI
+-- subscription section. Called from the write-path RPCs (sync_one /
+-- sync_all_subscriptions) so the directory is swept whenever a user runs a
+-- sync — manually or via the hourly cron — bounding the lag between deleting
+-- a subscription in the UI and its file being removed to at most one hour.
+local function prune_orphan_nodes()
+	local valid = valid_sub_ids()
+	local f = io.popen("find " .. NODES_DIR .. " -maxdepth 1 -name '*.json' 2>/dev/null")
+	if not f then return end
+	for filepath in f:lines() do
+		local sub_id = filepath:match("/([^/]+)%.json$")
+		if sub_id and not valid[sub_id] then
+			os.remove(filepath)
+			log_prism("info", "sync: pruned orphan nodes file " .. filepath)
+		end
+	end
+	f:close()
+end
+
 -- Return all nodes merged into a single ordered list.
 -- Manual nodes (UCI type="node") come first, sorted by their order field.
 -- Subscription nodes (JSON files) follow, one file per subscription.
@@ -864,12 +896,20 @@ local function list_all_nodes()
 		all[#all + 1] = n
 	end
 
-	-- Subscription nodes from JSON files
+	-- Subscription nodes from JSON files — skip any file whose sub_id is not
+	-- a current UCI subscription section. Such a file is an orphan: a sync
+	-- ran against a subscription that has since been deleted, and there is no
+	-- live UCI row to provide its display name. Loading it would surface its
+	-- tags in dropdowns with no prefix to identify the source, making them
+	-- indistinguishable from manual nodes — and worse, the prefix-less tags
+	-- can collide with valid subscription tags. Read-only here; the explicit
+	-- delete happens in prune_orphan_nodes().
+	local valid = valid_sub_ids()
 	local f = io.popen("find " .. NODES_DIR .. " -maxdepth 1 -name '*.json' 2>/dev/null | sort")
 	if not f then return all end
 	for filepath in f:lines() do
 		local sub_id = filepath:match("/([^/]+)%.json$")
-		if sub_id then
+		if sub_id and valid[sub_id] then
 			for _, n in ipairs(read_nodes_file(sub_id)) do
 				n.subscription = sub_id
 				all[#all + 1] = n
@@ -1233,7 +1273,9 @@ local methods = {
 			if not args.id or args.id == "" then
 				return { error = "id required" }
 			end
-			return sync_one(args.id)
+			local result = sync_one(args.id)
+			prune_orphan_nodes()
+			return result
 		end
 	},
 
@@ -1256,6 +1298,7 @@ local methods = {
 					errors = errors + 1
 				end
 			end
+			prune_orphan_nodes()
 			local reloaded = reload_if_config_changed()
 			return { synced = synced, errors = errors, reloaded = reloaded }
 		end
