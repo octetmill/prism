@@ -840,8 +840,16 @@ local DOMAIN_KINDS = {
 	domain_keyword = true, domain_regex = true
 }
 
+-- Returns (rules, per_outbound) where per_outbound is a set of outbound tags
+-- for which a dedicated `remote-<tag>` DNS server must be emitted so the
+-- lookup exits through the same outbound as the connection. The flag
+-- `rule.dns_via_outbound` (UCI: option dns_via_outbound, default on for any
+-- proxied rule) turns this on per-rule; for unflagged rules and for
+-- direct/block/fakeip the mirror still points at the generic `local` /
+-- `remote` / `fakeip` server.
 local function build_routing_dns_rules(prepared, fakeip_on)
 	local rules = {}
+	local per_outbound = {}
 	for _, pr in ipairs(prepared) do
 		local s = pr.section
 		if s.outbound ~= "block" then
@@ -850,6 +858,9 @@ local function build_routing_dns_rules(prepared, fakeip_on)
 				server = "local"
 			elseif fakeip_on then
 				server = "fakeip"
+			elseif s.dns_via_outbound ~= "0" then
+				server = "remote-" .. s.outbound
+				per_outbound[s.outbound] = true
 			else
 				server = "remote"
 			end
@@ -895,7 +906,7 @@ local function build_routing_dns_rules(prepared, fakeip_on)
 			end
 		end
 	end
-	return rules
+	return rules, per_outbound
 end
 
 local function build_dns(c, prepared)
@@ -990,8 +1001,25 @@ local function build_dns(c, prepared)
 		server        = "local-net"
 	}
 
-	local routing_rules = build_routing_dns_rules(prepared, fakeip_on)
+	local routing_rules, per_outbound = build_routing_dns_rules(prepared, fakeip_on)
 	for _, r in ipairs(routing_rules) do rules[#rules + 1] = r end
+
+	-- Per-outbound DNS servers: one `remote-<tag>` per outbound flagged via
+	-- `rule.dns_via_outbound`, so the DNS lookup for a domain exits through
+	-- the same outbound as the connection. Same upstream as `remote` (so the
+	-- user's chosen resolver is honoured), only the `detour` differs.
+	-- Sorted for deterministic generator output.
+	local outbound_tags = {}
+	for tag in pairs(per_outbound) do
+		outbound_tags[#outbound_tags + 1] = tag
+	end
+	table.sort(outbound_tags)
+	for _, tag in ipairs(outbound_tags) do
+		local extra = parse_dns_url(remote_addr)
+		extra.tag    = "remote-" .. tag
+		extra.detour = tag
+		servers[#servers + 1] = extra
+	end
 
 	-- `final`: unmatched queries resolve where the default outbound sends
 	-- their traffic — `remote` when it is a proxy, `local` otherwise
@@ -1137,6 +1165,19 @@ local function build_route(c, prepared)
 	if c:get("prism", "dns", "managed_dns") ~= "0" then
 		route.rules[#route.rules + 1] = { inbound = "dns-in", action = "hijack-dns" }
 	end
+
+	-- Private destinations bypass the proxy. RFC1918, loopback, link-local,
+	-- multicast and IPv6 ULA all match ip_is_private (sing/common/network
+	-- IsPublicAddr); CGNAT (100.64/10) and the IPv4 fakeip default
+	-- (198.18/15) intentionally do not. In tproxy / tproxy_mixed mode this
+	-- is inert because firewall.sh already filters reserved ranges at
+	-- prerouting; in tun mode it is load-bearing — without it a Default
+	-- server pointing at a proxy would tunnel LAN-to-LAN traffic too.
+	-- Fakeip-mapped destinations are safe: sing-box demaps them to an FQDN
+	-- at the start of matchRule (route/route.go:434), before any rule
+	-- evaluates, so by the time this rule runs metadata.Destination.Addr
+	-- is invalid and ip_is_private short-circuits to false.
+	route.rules[#route.rules + 1] = { ip_is_private = true, outbound = "direct" }
 
 	-- Remote rule-set objects, deduplicated by tag across rules. sing-box
 	-- downloads and refreshes each one itself; download_detour decides
@@ -1345,7 +1386,15 @@ end
 local config = apply_extra(build_config(c))
 c:close()
 
-local json = jsonc.stringify(config, true)  -- pretty-print
+-- Pretty-print, then unescape forward slashes. luci.jsonc wraps json-c, which
+-- escapes `/` as `\/` unconditionally (a legacy guard against `</script>`
+-- breakouts in HTML embeds, irrelevant here) and does not expose the
+-- JSON_C_TO_STRING_NOSLASHESCAPE flag. Replacing `\/` with `/` is
+-- semantics-preserving for any standards-compliant encoder output: a literal
+-- backslash always encodes as `\\`, so the only `\/` byte-pair this gsub can
+-- match is a slash that the encoder escaped — and the same byte-pair decodes
+-- back to `/` either way.
+local json = jsonc.stringify(config, true):gsub("\\/", "/")
 local ok, err = write_atomic(out_path, json)
 if not ok then
 	io.stderr:write("prism build-config: " .. err .. "\n")
