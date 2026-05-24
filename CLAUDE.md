@@ -707,6 +707,8 @@ Declared in `LUCI_DEPENDS` in the Makefile. All packages below must be listed th
 | `rpcd-mod-rpcsys` | Provides `sys.exec` and service control via rpcd |
 | `uclient-fetch` | Used by `sync-subscriptions` to download remote subscription URLs |
 | `ca-bundle` | TLS certificate validation for HTTPS subscription URLs |
+| `lua` | `/usr/bin/lua` 5.1 interpreter — every rpcd handler and helper script (`build-config`, `fetch-catalog`, `luci.prism`) has a `#!/usr/bin/env lua` shebang. Not transitively pulled in by `luci-base` or `luci-lib-jsonc` on apk (those only link `liblua5.1.5`), so it must be declared explicitly. |
+| `libuci-lua` | Lua `uci` binding — `build-config` does `require "uci"` to read prism's UCI config. Also not transitive through `luci-base` on apk. |
 
 ### Assumed present (do not redeclare)
 
