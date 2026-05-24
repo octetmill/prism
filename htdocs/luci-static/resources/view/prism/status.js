@@ -37,6 +37,12 @@ var callGetStatus = rpc.declare({
 	expect: { '': {} }
 });
 
+var callStart = rpc.declare({
+	object: 'luci.prism',
+	method: 'start',
+	expect: { '': {} }
+});
+
 var callStop = rpc.declare({
 	object: 'luci.prism',
 	method: 'stop',
@@ -162,9 +168,12 @@ return baseclass.extend({
 
 			// ── Status row ─────────────────────────────────────────────
 			// One big colored line — large enough that "is it working?" is
-			// answerable from across the room. Restart on a stopped service
-			// just starts it, so no separate Start button — Stop and Restart
-			// cover every transition.
+			// answerable from across the room. The action toolbar is
+			// state-dependent: a stopped instance shows only Start (the
+			// `start` RPC sets `enabled=1` and execs start, which is the
+			// single in-UI path to bring a fresh install up); a running
+			// instance shows Stop + Restart. The toolbar is rebuilt by
+			// _updateStatus on every poll tick so it follows state changes.
 			E('div', { 'class': 'cbi-section' }, [
 				E('div', {
 					'style': 'display:flex; flex-wrap:wrap; align-items:center; ' +
@@ -179,16 +188,10 @@ return baseclass.extend({
 					E('strong', { 'id': 'prism-active-node' }, [
 						active || _('— no default')
 					]),
-					E('span', { 'style': 'margin-left:auto; display:flex; gap:0.3em; font-size:0.7em;' }, [
-						E('button', {
-							'class': 'btn cbi-button cbi-button-remove',
-							'click': ui.createHandlerFn(self, 'handleStop')
-						}, [ _('Stop') ]),
-						E('button', {
-							'class': 'btn cbi-button cbi-button-neutral',
-							'click': ui.createHandlerFn(self, 'handleRestart')
-						}, [ _('Restart') ])
-					])
+					E('span', {
+						'id': 'prism-status-actions',
+						'style': 'margin-left:auto; display:flex; gap:0.3em; font-size:0.7em;'
+					}, this._renderActions(status.running))
 				]),
 				E('div', {
 					'style': 'margin-top:0.5em;'
@@ -280,7 +283,40 @@ return baseclass.extend({
 			shortVersion(status.version), autostart, mode);
 	},
 
+	_renderActions: function(running) {
+		if (!running) {
+			return [
+				E('button', {
+					'class': 'btn cbi-button cbi-button-apply',
+					'click': ui.createHandlerFn(this, 'handleStart')
+				}, [ _('Start') ])
+			];
+		}
+		return [
+			E('button', {
+				'class': 'btn cbi-button cbi-button-remove',
+				'click': ui.createHandlerFn(this, 'handleStop')
+			}, [ _('Stop') ]),
+			E('button', {
+				'class': 'btn cbi-button cbi-button-neutral',
+				'click': ui.createHandlerFn(this, 'handleRestart')
+			}, [ _('Restart') ])
+		];
+	},
+
 	// ── Status controls + polling ─────────────────────────────────────────
+
+	handleStart: function() {
+		var self = this;
+		return callStart().then(function(res) {
+			if (res && res.ok === false) {
+				ui.addNotification(null, E('p', _('Start failed — check the log below.')), 'error');
+			} else {
+				ui.addNotification(null, E('p', _('Service started.')), 'info');
+			}
+			return self._refreshStatusNow();
+		});
+	},
 
 	handleStop: function() {
 		var self = this;
@@ -307,6 +343,13 @@ return baseclass.extend({
 		if (badge) {
 			while (badge.firstChild) badge.removeChild(badge.firstChild);
 			badge.appendChild(this._renderBadge(status.running));
+		}
+		var actions = document.getElementById('prism-status-actions');
+		if (actions) {
+			while (actions.firstChild) actions.removeChild(actions.firstChild);
+			this._renderActions(status.running).forEach(function(b) {
+				actions.appendChild(b);
+			});
 		}
 		var footer = document.getElementById('prism-status-footer');
 		if (footer) {
