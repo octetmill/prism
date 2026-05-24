@@ -278,7 +278,7 @@ return baseclass.extend({
 
 	_renderBadge: function(state) {
 		// Plain colored text rather than a `label-*` pill — pills are sized
-		// for inline form labels and look cramped at the 1.45em status row.
+		// for inline form labels and look cramped at the status row.
 		var spec = {
 			running: { color: '#26a65b', text: _('● Running') },
 			paused:  { color: '#888',    text: _('○ Paused')  },
@@ -361,7 +361,7 @@ return baseclass.extend({
 		return [
 			E('div', {
 				'style': 'display:flex; flex-wrap:wrap; align-items:center; ' +
-				         'gap:0.7em; padding:0.2em 0; font-size:1.45em; line-height:1.3;'
+				         'gap:0.7em; padding:0.2em 0; font-size:1.15em; line-height:1.3;'
 			}, [
 				E('span', { 'id': 'prism-status-badge' }, [
 					this._renderBadge(state)
@@ -374,7 +374,7 @@ return baseclass.extend({
 				]),
 				E('span', {
 					'id': 'prism-status-actions',
-					'style': 'margin-left:auto; display:flex; gap:0.3em; font-size:0.7em;'
+					'style': 'margin-left:auto; display:flex; gap:0.3em; font-size:0.88em;'
 				}, this._renderActions(state))
 			]),
 			E('div', {
