@@ -315,45 +315,31 @@ return baseclass.extend({
 			])
 		]);
 
-		// The toggle is a compact corner control, positioned absolutely in the
-		// top-right of the form. It reads as a "view filter" rather than a
-		// "section header that contains the disclosed content" — which is the
-		// honest semantic, since the advanced rows are interleaved with their
-		// basic siblings throughout the form (tproxy_port under mode, fakeip
-		// ranges under fakeip_enabled, etc.). A custom ::before chevron
-		// rotates on open as the open indicator.
+		// A plain checkbox + label at the top of the form — reads as a "view
+		// filter" the way Gmail's "Show advanced search" does, not as a
+		// section header. Lighter visual weight than the chip/bar styles
+		// because that's all this control needs to do: flip a visibility
+		// flag on the form below.
 		var styleEl = E('style', {}, [
-			'.cbi-map.prism-settings{position:relative}' +
 			'.cbi-map .prism-advanced{display:none}' +
 			'.cbi-map.prism-show-advanced .cbi-value.prism-advanced{display:flex}' +
 			'.cbi-map.prism-show-advanced .cbi-section.prism-advanced{display:block}' +
-			'.prism-adv-toggle{position:absolute;top:0.5em;right:0.5em;z-index:1;' +
-				'padding:0.35em 0.7em;' +
-				'background:rgba(128,128,128,0.08);' +
-				'border:1px solid rgba(128,128,128,0.5);' +
-				'border-radius:4px;cursor:pointer}' +
-			'.prism-adv-toggle:hover{background:rgba(128,128,128,0.15)}' +
-			'.prism-adv-toggle summary{font-size:0.9em;font-weight:normal;' +
-				'outline:none;list-style:none}' +
-			'.prism-adv-toggle summary::-webkit-details-marker{display:none}' +
-			'.prism-adv-toggle summary::before{content:"\\25B8";display:inline-block;' +
-				'margin-right:0.4em;transition:transform 0.15s ease}' +
-			'.prism-adv-toggle[open] summary::before{transform:rotate(90deg)}'
+			'.prism-adv-toggle{display:inline-flex;align-items:center;gap:0.4em;' +
+				'margin:0.4em 0 1em;padding:0.2em 0.4em;cursor:pointer;' +
+				'font-size:0.95em;user-select:none}' +
+			'.prism-adv-toggle input{margin:0;cursor:pointer}'
 		]);
 
-		// Mark the map root so the position:relative anchor catches the
-		// absolutely-positioned toggle below.
-		formNode.classList.add('prism-settings');
-
-		var details = E('details', { 'class': 'prism-adv-toggle' }, [
-			E('summary', {}, [ _('Advanced settings') ])
+		var cb = E('input', { 'type': 'checkbox' });
+		var toggle = E('label', { 'class': 'prism-adv-toggle' }, [
+			cb, E('span', {}, [ _('Show advanced settings') ])
 		]);
-		details.addEventListener('toggle', function() {
-			formNode.classList.toggle('prism-show-advanced', details.open);
+		cb.addEventListener('change', function() {
+			formNode.classList.toggle('prism-show-advanced', cb.checked);
 		});
 
+		formNode.insertBefore(toggle, formNode.firstChild);
 		formNode.appendChild(styleEl);
-		formNode.appendChild(details);
 		formNode.appendChild(extraSection);
 
 		return formNode;
