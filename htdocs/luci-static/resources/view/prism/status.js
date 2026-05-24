@@ -233,7 +233,7 @@ return baseclass.extend({
 					         'font-family:monospace; font-size:0.8em; ' +
 					         'line-height:1.35; background:rgba(128,128,128,0.05);'
 				}, [ singboxText ]),
-				E('div', { 'style': 'margin-top:0.5em; display:flex; gap:0.4em;' }, [
+				E('div', { 'style': 'margin:0.5em 0 2em; display:flex; gap:0.4em;' }, [
 					E('button', {
 						'class': 'btn cbi-button cbi-button-neutral',
 						'click': ui.createHandlerFn(self, '_showFullLog')
