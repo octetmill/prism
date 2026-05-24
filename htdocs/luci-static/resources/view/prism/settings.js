@@ -345,6 +345,12 @@ return baseclass.extend({
 		]);
 		details.addEventListener('toggle', function() {
 			formNode.classList.toggle('prism-show-advanced', details.open);
+			// Most advanced rows are interleaved with their basic siblings
+			// (tproxy_port under mode, fakeip ranges under fakeip_enabled, …),
+			// so opening the expander reveals content *above* the toggle and
+			// the browser's reflow lands the user on an unrelated row. Pin
+			// the toggle back into view so the click result is predictable.
+			details.scrollIntoView({ behavior: 'smooth', block: 'center' });
 		});
 
 		formNode.appendChild(styleEl);
