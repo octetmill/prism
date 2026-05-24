@@ -1,15 +1,31 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 OctetMill
 
-// Status tab: service controls + recent log + generated-config preview.
-// This is a transitional merge of the former Overview and Diagnostics panels —
-// the body is unchanged from those two stacked. A follow-up commit replaces it
-// with the new compact layout (status row, 20-line log tail, modal config).
+// Status tab: the dashboard. Answers "is it working?" at a glance and "why
+// not?" without leaving the page.
+//
+// Layout (top → bottom):
+//   ● Running/Stopped  via  <active-server>   [Start|Stop] [Restart]
+//   Subscriptions: N · Active rules: N
+//   <recent activity — 20-line log tail, auto-refreshed>
+//   [View full log] [View generated config]
+//   sing-box X.Y.Z · Autostart · Mode
+//
+// Two 2s pollers — one for service status (badge + autostart), one for the
+// log tail. Both are torn down on tab switch via _teardown. The full log
+// viewer and the generated-config preview live in on-demand modals (the
+// prior Diagnostics panel rendered them inline; here they would crowd the
+// glance-first layout).
+//
+// The active-server line shows `routing.final_outbound` from UCI — the tag
+// of the default group/server the rule chain falls through to. This commit
+// shows it read-only; a follow-up may turn it into an inline group switcher.
 
 'use strict';
 'require baseclass';
 'require rpc';
 'require ui';
+'require uci';
 
 var callGetStatus = rpc.declare({
 	object: 'luci.prism',
@@ -48,210 +64,139 @@ var callGetConfig = rpc.declare({
 	expect: { '': {} }
 });
 
-var callReload = rpc.declare({
-	object: 'luci.prism',
-	method: 'reload',
-	expect: { '': {} }
-});
-
-var LINE_OPTIONS = [50, 100, 200, 500];
+var TAIL_LINES = 20;
+var POLL_MS    = 2000;
+var FULL_LOG_LINES = 500;
 
 return baseclass.extend({
-	_logTimer:    null,
 	_statusTimer: null,
-	_lines:       200,
+	_logTimer:    null,
 
 	load: function() {
-		// Degrade gracefully — a failed RPC must not blank the whole tab.
+		// All three degrade gracefully — a missing RPC leaves the relevant
+		// row blank rather than blanking the tab.
 		return Promise.all([
 			callGetStatus().catch(function() { return {}; }),
-			callGetLog(this._lines || 200).catch(function() { return {}; }),
-			callGetConfig().catch(function() { return {}; })
+			callGetLog(TAIL_LINES).catch(function() { return {}; }),
+			uci.load('prism').catch(function() { return null; })
 		]);
 	},
 
 	render: function(results) {
-		var status     = (results && results[0]) || {};
-		var logData    = (results && results[1]) || {};
-		var configData = (results && results[2]) || {};
-		var logLines   = (Array.isArray(logData.log) ? logData.log : []).join('\n');
-		var configText = configData.json  || '';
-		var configPath = configData.path  || '/var/etc/prism/sing-box.json';
-		var configHas  = !!configData.exists;
-		var configErr  = configData.error || '';
+		var status   = (results && results[0]) || {};
+		var logData  = (results && results[1]) || {};
+		var logLines = (Array.isArray(logData.log) ? logData.log : []).join('\n');
+
+		var active = uci.get('prism', 'routing', 'final_outbound') || '';
+		var mode   = uci.get('prism', 'inbounds', 'mode') || 'tproxy';
+		var subCount = uci.sections('prism', 'subscription').length;
+		var ruleCount = uci.sections('prism', 'rule').filter(function(r) {
+			return r.enabled !== '0';
+		}).length;
 
 		var self = this;
 
-		var lineSel = E('select', {
-			'id': 'prism-log-lines',
-			'class': 'cbi-input-select',
-			'style': 'padding:0.25em 0.4em; border:1px solid rgba(128,128,128,0.4); border-radius:3px;',
-			'change': L.bind(function(ev) {
-				this._lines = Number(ev.target.value) || 200;
-				this._refreshLog();
-			}, this)
-		}, LINE_OPTIONS.map(function(n) {
-			return E('option', { 'value': String(n), 'selected': n === 200 ? 'selected' : null }, [ String(n) ]);
-		}));
-
 		var node = E('div', { 'class': 'cbi-map' }, [
 
-			// --- Service controls (was overview.js) -------------------------
+			// ── Status row ─────────────────────────────────────────────
 			E('div', { 'class': 'cbi-section' }, [
-				E('div', { 'class': 'cbi-section-descr' }, [
-					_('sing-box proxy engine status and controls.')
-				]),
-				E('div', { 'class': 'cbi-value' }, [
-					E('label', { 'class': 'cbi-value-title' }, [ _('Status') ]),
-					E('div', { 'class': 'cbi-value-field' }, [
-						E('span', { 'id': 'prism-status-badge' }, [
-							self._renderBadge(status.running)
-						]),
-						E('span', { 'style': 'margin-left:1em;' }, [
-							E('button', {
-								'class': 'btn cbi-button cbi-button-apply',
-								'style': 'margin-right:0.3em;',
-								'click': ui.createHandlerFn(self, 'handleStart')
-							}, [ _('Start') ]),
-							E('button', {
-								'class': 'btn cbi-button cbi-button-remove',
-								'style': 'margin-right:0.3em;',
-								'click': ui.createHandlerFn(self, 'handleStop')
-							}, [ _('Stop') ]),
-							E('button', {
-								'class': 'btn cbi-button cbi-button-neutral',
-								'click': ui.createHandlerFn(self, 'handleRestart')
-							}, [ _('Restart') ])
+				E('div', {
+					'style': 'display:flex; flex-wrap:wrap; align-items:center; ' +
+					         'gap:0.9em; padding:0.2em 0;'
+				}, [
+					E('span', { 'id': 'prism-status-badge', 'style': 'font-size:1.05em;' }, [
+						this._renderBadge(status.running)
+					]),
+					E('span', { 'style': 'font-size:0.95em;' }, [
+						_('via') + ' ',
+						E('strong', { 'id': 'prism-active-server' }, [
+							active || _('— no default')
 						])
+					]),
+					E('span', { 'style': 'margin-left:auto; display:flex; gap:0.3em;' }, [
+						E('button', {
+							'class': 'btn cbi-button cbi-button-apply',
+							'click': ui.createHandlerFn(self, 'handleStart')
+						}, [ _('Start') ]),
+						E('button', {
+							'class': 'btn cbi-button cbi-button-remove',
+							'click': ui.createHandlerFn(self, 'handleStop')
+						}, [ _('Stop') ]),
+						E('button', {
+							'class': 'btn cbi-button cbi-button-neutral',
+							'click': ui.createHandlerFn(self, 'handleRestart')
+						}, [ _('Restart') ])
 					])
 				]),
-				E('div', { 'class': 'cbi-value' }, [
-					E('label', { 'class': 'cbi-value-title' }, [ _('Autostart at boot') ]),
-					E('div', { 'class': 'cbi-value-field', 'id': 'prism-autostart-field' }, [
-						status.enabled ? _('Yes') : _('No')
-					])
-				]),
-				E('div', { 'class': 'cbi-value' }, [
-					E('label', { 'class': 'cbi-value-title' }, [ _('Version') ]),
-					E('div', { 'class': 'cbi-value-field' }, [
-						status.version || _('Unknown')
-					])
+				E('div', {
+					'style': 'margin-top:0.5em; font-size:0.85em; opacity:0.75;'
+				}, [
+					_('Subscriptions: %d').format(subCount),
+					' · ',
+					_('Active rules: %d').format(ruleCount)
 				])
 			]),
 
-			// --- Log section (was diagnostics.js) ---------------------------
-			E('div', { 'class': 'cbi-section', 'id': 'prism-log-section' }, [
-				E('h3', {}, [ _('Log') ]),
-				E('div', { 'class': 'cbi-section-descr' }, [
-					_('Tail of the sing-box service log. Refreshes automatically every 3 seconds.')
-				]),
-				E('div', { 'class': 'cbi-value' }, [
-					E('div', { 'class': 'cbi-value-field' }, [
-						E('button', {
-							'class': 'btn cbi-button cbi-button-neutral',
-							'click': ui.createHandlerFn(this, this._refreshLog)
-						}, [ _('Refresh') ]),
-						' \xA0 ',
-						E('label', {}, [
-							E('input', {
-								'type': 'checkbox',
-								'id': 'prism-log-autorefresh',
-								'checked': 'checked',
-								'style': 'margin-right:0.3em',
-								'change': L.bind(function(ev) {
-									if (ev.target.checked) this._scheduleLogRefresh();
-									else if (this._logTimer) {
-										clearTimeout(this._logTimer);
-										this._logTimer = null;
-									}
-								}, this)
-							}),
-							_('Auto-refresh')
-						]),
-						' \xA0 ',
-						E('label', {}, [
-							E('input', {
-								'type': 'checkbox',
-								'id': 'prism-log-autoscroll',
-								'checked': 'checked',
-								'style': 'margin-right:0.3em'
-							}),
-							_('Auto-scroll')
-						]),
-						' \xA0 ',
-						_('Lines:'), ' ',
-						lineSel
-					])
-				]),
+			// ── Recent activity ────────────────────────────────────────
+			E('div', { 'class': 'cbi-section' }, [
+				E('h3', { 'style': 'margin-bottom:0.4em;' }, [ _('Recent activity') ]),
 				E('textarea', {
-					'id': 'prism-log-output',
+					'id': 'prism-log-tail',
 					'class': 'cbi-input-textarea',
-					'style': 'width:100%; min-height:400px; font-family:monospace; font-size:0.82em; line-height:1.35;',
 					'readonly': 'readonly',
-					'wrap': 'off'
-				}, [ logLines ])
+					'wrap': 'off',
+					'style': 'width:100%; height:21em; resize:vertical; ' +
+					         'font-family:monospace; font-size:0.8em; ' +
+					         'line-height:1.35; background:rgba(128,128,128,0.05);'
+				}, [ logLines ]),
+				E('div', { 'style': 'margin-top:0.5em; display:flex; gap:0.4em;' }, [
+					E('button', {
+						'class': 'btn cbi-button cbi-button-neutral',
+						'click': ui.createHandlerFn(self, '_showFullLog')
+					}, [ _('View full log') ]),
+					E('button', {
+						'class': 'btn cbi-button cbi-button-neutral',
+						'click': ui.createHandlerFn(self, '_showConfig')
+					}, [ _('View generated config') ])
+				])
 			]),
 
-			// --- Generated config preview (was diagnostics.js) --------------
-			E('div', { 'class': 'cbi-section', 'id': 'prism-cfg-section' }, [
-				E('h3', {}, [ _('Generated Configuration') ]),
-				E('div', { 'class': 'cbi-section-descr' }, [
-					_('Live preview of the JSON Prism would feed to sing-box based on your current saved settings. Built fresh each time this tab loads — click Reload service to push it to the running daemon.')
-				]),
-				E('div', { 'style': 'display:flex; align-items:center; gap:0.5em; margin-bottom:0.5em; flex-wrap:wrap;' }, [
-					E('span', { 'style': 'font-size:0.85em; color:#666;' }, [ _('Target file:') ]),
-					E('code', { 'id': 'prism-cfg-path', 'style': 'font-size:0.85em;' }, [ configPath ]),
-					configHas
-						? E('span', { 'class': 'label-success', 'style': 'padding:1px 7px; border-radius:3px;' }, [ _('running file present') ])
-						: E('span', { 'class': 'label-warning', 'style': 'padding:1px 7px; border-radius:3px;' }, [ _('preview only — not yet applied') ])
-				]),
-				configErr
-					? E('div', { 'class': 'alert-message warning', 'style': 'margin-bottom:0.5em; font-size:0.85em;' }, [
-						E('strong', {}, [ _('Generator error:') ]),
-						' ',
-						E('code', {}, [ configErr ])
-					])
-					: '',
-				E('textarea', {
-					'id': 'prism-cfg-text',
-					'class': 'cbi-input-textarea',
-					'style': 'width:100%; min-height:320px; font-family:monospace; font-size:0.82em; line-height:1.4; background:rgba(128,128,128,0.05);',
-					'spellcheck': 'false',
-					'readonly': 'readonly'
-				}, [ configText ])
-			]),
-
-			E('div', { 'class': 'cbi-page-actions' }, [
-				E('button', {
-					'class': 'btn cbi-button cbi-button-neutral',
-					'style': 'margin-right:0.5em;',
-					'id': 'prism-cfg-regen-btn',
-					'click': ui.createHandlerFn(this, this._refreshPreview)
-				}, [ '↻ ' + _('Refresh preview') ]),
-				E('button', {
-					'class': 'btn cbi-button cbi-button-apply',
-					'click': ui.createHandlerFn(this, this._handleReloadService)
-				}, [ '⟳ ' + _('Reload service') ])
+			// ── Footer line ────────────────────────────────────────────
+			E('div', {
+				'id': 'prism-status-footer',
+				'style': 'margin:0.5em 0.5em; font-size:0.8em; opacity:0.6;'
+			}, [
+				this._renderFooter(status, mode)
 			])
 		]);
 
 		this._scheduleStatusRefresh();
 		this._scheduleLogRefresh();
+		// Initial scroll-to-end is deferred so the textarea is in the DOM
+		// (and has its scrollHeight) by the time we read it.
 		requestAnimationFrame(function() {
-			var el = document.getElementById('prism-log-output');
+			var el = document.getElementById('prism-log-tail');
 			if (el) el.scrollTop = el.scrollHeight;
 		});
 
 		return node;
 	},
 
-	// ── Service controls ──────────────────────────────────────────────────
+	// ── Renderers ─────────────────────────────────────────────────────────
 
 	_renderBadge: function(running) {
 		return running
-			? E('span', { 'class': 'label-success' }, [ _('Running') ])
-			: E('span', { 'class': 'label-warning' }, [ _('Stopped') ]);
+			? E('span', { 'class': 'label-success' }, [ _('● Running') ])
+			: E('span', { 'class': 'label-warning' }, [ _('● Stopped') ]);
 	},
+
+	_renderFooter: function(status, mode) {
+		var version = status.version || _('unknown version');
+		var autostart = status.enabled ? _('on') : _('off');
+		return _('sing-box %s · Autostart: %s · Mode: %s').format(version, autostart, mode);
+	},
+
+	// ── Status controls + polling ─────────────────────────────────────────
 
 	handleStart: function() {
 		var self = this;
@@ -285,88 +230,142 @@ return baseclass.extend({
 		});
 	},
 
-	updateStatus: function(status) {
-		var el = document.getElementById('prism-status-badge');
-		if (!el) return;
-		while (el.firstChild) el.removeChild(el.firstChild);
-		el.appendChild(this._renderBadge(status.running));
-		// The Start/Stop RPCs flip the autostart flag too, so keep that row
-		// in sync rather than letting it go stale until the tab is reopened.
-		var as = document.getElementById('prism-autostart-field');
-		if (as) as.textContent = status.enabled ? _('Yes') : _('No');
-		this._scheduleStatusRefresh();
+	_updateStatus: function(status) {
+		var badge = document.getElementById('prism-status-badge');
+		if (badge) {
+			while (badge.firstChild) badge.removeChild(badge.firstChild);
+			badge.appendChild(this._renderBadge(status.running));
+		}
+		var footer = document.getElementById('prism-status-footer');
+		if (footer) {
+			var mode = uci.get('prism', 'inbounds', 'mode') || 'tproxy';
+			footer.textContent = this._renderFooter(status, mode);
+		}
 	},
 
 	_refreshStatusNow: function() {
-		return callGetStatus().then(L.bind(this.updateStatus, this));
+		var self = this;
+		return callGetStatus().then(function(s) {
+			self._updateStatus(s || {});
+			self._scheduleStatusRefresh();
+		});
 	},
 
 	_scheduleStatusRefresh: function() {
-		// Bail if the panel's DOM is gone (tab switched away) so a failed
-		// in-flight poll cannot resurrect the timer after _teardown.
+		// Bail if the tab's DOM is gone (switched away) so a stray in-flight
+		// poll cannot resurrect the timer after _teardown.
 		if (!document.getElementById('prism-status-badge'))
 			return;
 		if (this._statusTimer)
 			clearTimeout(this._statusTimer);
 		this._statusTimer = setTimeout(L.bind(function() {
-			callGetStatus().then(L.bind(this.updateStatus, this)).catch(L.bind(function() {
-				// reschedule even on RPC failure so the loop survives transient errors
-				this._scheduleStatusRefresh();
-			}, this));
-		}, this), 5000);
+			callGetStatus().then(L.bind(this._updateStatus, this))
+				.catch(function() {})
+				.finally(L.bind(this._scheduleStatusRefresh, this));
+		}, this), POLL_MS);
 	},
 
-	// ── Log + config preview ──────────────────────────────────────────────
+	// ── Log tail polling ──────────────────────────────────────────────────
 
-	_refreshLog: function() {
-		return callGetLog(this._lines || 200).then(L.bind(function(data) {
-			var el = document.getElementById('prism-log-output');
+	_refreshLogTail: function() {
+		return callGetLog(TAIL_LINES).then(L.bind(function(data) {
+			var el = document.getElementById('prism-log-tail');
 			if (!el) return;
 			el.value = (Array.isArray(data.log) ? data.log : []).join('\n');
-			var cb = document.getElementById('prism-log-autoscroll');
-			if (cb && cb.checked) el.scrollTop = el.scrollHeight;
-			this._scheduleLogRefresh();
-		}, this)).catch(L.bind(function() {
-			this._scheduleLogRefresh();
+			el.scrollTop = el.scrollHeight;
 		}, this));
 	},
 
 	_scheduleLogRefresh: function() {
-		if (this._logTimer) {
+		if (this._logTimer)
 			clearTimeout(this._logTimer);
-			this._logTimer = null;
-		}
-		var cb = document.getElementById('prism-log-autorefresh');
-		if (cb && !cb.checked) return;
-		if (!document.getElementById('prism-log-output')) return;
-		this._logTimer = setTimeout(L.bind(this._refreshLog, this), 3000);
+		if (!document.getElementById('prism-log-tail')) return;
+		this._logTimer = setTimeout(L.bind(function() {
+			this._refreshLogTail()
+				.catch(function() {})
+				.finally(L.bind(this._scheduleLogRefresh, this));
+		}, this), POLL_MS);
 	},
 
-	_refreshPreview: function() {
-		var btn = document.getElementById('prism-cfg-regen-btn');
-		if (btn) btn.disabled = true;
-		return callGetConfig().then(function(data) {
-			data = data || {};
-			var ta   = document.getElementById('prism-cfg-text');
-			var path = document.getElementById('prism-cfg-path');
-			if (ta)   ta.value = data.json || '';
-			if (path) path.textContent = data.path || '/var/etc/prism/sing-box.json';
-			if (data.error)
-				ui.addNotification(null, E('p', _('Generator error: ') + data.error), 'error');
+	// ── Modals ────────────────────────────────────────────────────────────
+
+	_showFullLog: function() {
+		ui.showModal(_('Service log'), [
+			E('div', { 'class': 'spinning' }, [ _('Loading…') ]),
+			E('div', { 'class': 'right' }, [
+				E('button', { 'class': 'btn', 'click': ui.hideModal }, [ _('Close') ])
+			])
+		]);
+		return callGetLog(FULL_LOG_LINES).then(function(data) {
+			var lines = (data && Array.isArray(data.log)) ? data.log.join('\n') : '';
+			var ta = E('textarea', {
+				'class': 'cbi-input-textarea',
+				'readonly': 'readonly',
+				'wrap': 'off',
+				'style': 'width:100%; height:60vh; font-family:monospace; ' +
+				         'font-size:0.8em; line-height:1.35;'
+			}, [ lines ]);
+			ui.showModal(_('Service log (last %d lines)').format(FULL_LOG_LINES), [
+				ta,
+				E('div', { 'class': 'right', 'style': 'margin-top:0.5em;' }, [
+					E('button', { 'class': 'btn', 'click': ui.hideModal }, [ _('Close') ])
+				])
+			]);
+			// Defer scroll until the modal is mounted; without this the
+			// scrollHeight is read before layout completes.
+			requestAnimationFrame(function() { ta.scrollTop = ta.scrollHeight; });
 		}).catch(function() {
-			ui.addNotification(null, E('p', _('Failed to refresh preview.')), 'error');
-		}).finally(function() {
-			if (btn) btn.disabled = false;
+			ui.showModal(_('Service log'), [
+				E('p', {}, [ _('Failed to load the log.') ]),
+				E('div', { 'class': 'right' }, [
+					E('button', { 'class': 'btn', 'click': ui.hideModal }, [ _('Close') ])
+				])
+			]);
 		});
 	},
 
-	_handleReloadService: function() {
-		var self = this;
-		return callReload().then(function() {
-			ui.addNotification(null, E('p', _('Reload signalled.')), 'info');
-			return self._refreshPreview();
+	_showConfig: function() {
+		ui.showModal(_('Generated configuration'), [
+			E('div', { 'class': 'spinning' }, [ _('Loading…') ]),
+			E('div', { 'class': 'right' }, [
+				E('button', { 'class': 'btn', 'click': ui.hideModal }, [ _('Close') ])
+			])
+		]);
+		return callGetConfig().then(function(data) {
+			data = data || {};
+			var path = data.path || '/var/etc/prism/sing-box.json';
+			var content = [
+				E('div', { 'style': 'display:flex; align-items:center; gap:0.5em; margin-bottom:0.4em; flex-wrap:wrap;' }, [
+					E('span', { 'style': 'font-size:0.85em; opacity:0.7;' }, [ _('Target file:') ]),
+					E('code', { 'style': 'font-size:0.85em;' }, [ path ]),
+					data.exists
+						? E('span', { 'class': 'label-success', 'style': 'padding:1px 7px; border-radius:3px;' }, [ _('running file present') ])
+						: E('span', { 'class': 'label-warning', 'style': 'padding:1px 7px; border-radius:3px;' }, [ _('preview only — not yet applied') ])
+				])
+			];
+			if (data.error)
+				content.push(E('div', { 'class': 'alert-message warning', 'style': 'margin-bottom:0.4em; font-size:0.85em;' }, [
+					E('strong', {}, [ _('Generator error:') ]), ' ',
+					E('code', {}, [ data.error ])
+				]));
+			content.push(E('textarea', {
+				'class': 'cbi-input-textarea',
+				'readonly': 'readonly',
+				'spellcheck': 'false',
+				'style': 'width:100%; height:60vh; font-family:monospace; ' +
+				         'font-size:0.8em; line-height:1.4; background:rgba(128,128,128,0.05);'
+			}, [ data.json || '' ]));
+			content.push(E('div', { 'class': 'right', 'style': 'margin-top:0.5em;' }, [
+				E('button', { 'class': 'btn', 'click': ui.hideModal }, [ _('Close') ])
+			]));
+			ui.showModal(_('Generated configuration'), content);
 		}).catch(function() {
-			ui.addNotification(null, E('p', _('Reload failed.')), 'error');
+			ui.showModal(_('Generated configuration'), [
+				E('p', {}, [ _('Failed to load the generated config.') ]),
+				E('div', { 'class': 'right' }, [
+					E('button', { 'class': 'btn', 'click': ui.hideModal }, [ _('Close') ])
+				])
+			]);
 		});
 	},
 
