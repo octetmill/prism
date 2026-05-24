@@ -659,7 +659,7 @@ return baseclass.extend({
 			var heading = _('Rule-set sources');
 			node.querySelectorAll('h3').forEach(function(h) {
 				if (h.textContent === heading)
-					h.style.marginTop = '4em';
+					h.style.marginTop = '2em';
 			});
 			return node;
 		});
