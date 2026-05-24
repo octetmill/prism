@@ -255,14 +255,13 @@ return baseclass.extend({
 		oFakeipV6.datatype = 'cidr6';
 		oFakeipV6.depends('fakeip_enabled', '1');
 
-		// ── General (rule-sets + logging) ────────────────────────────────
-		// Rule-set fetching plus log-verbosity knobs live together at the
-		// bottom of the page — they are set-once / diagnostic, not part of
-		// the daily proxy-and-DNS configuration above. One NamedSection per
-		// UCI section is a hard rule (multiple sections binding the same
-		// UCI section name collide on the generated DOM id), so rule-sets
-		// and logging share this single "General" section.
-		var sGen = m.section(form.NamedSection, 'global', 'prism', _('General'));
+		// ── Rule-sets + Logging ──────────────────────────────────────────
+		// Two visual groups bottom of the page. One NamedSection per UCI
+		// section is a hard rule (multiple sections binding the same UCI
+		// section name collide on the generated DOM id), so the section is
+		// titled "Rule-sets" and a "Logging" subheader is injected in
+		// _postRender before the first log-level option.
+		var sGen = m.section(form.NamedSection, 'global', 'prism', _('Rule-sets'));
 		sGen.addremove = false;
 
 		var oDelivery = sGen.option(form.ListValue, 'ruleset_delivery',
@@ -285,6 +284,7 @@ return baseclass.extend({
 		var oLog = advance(sGen.option(form.ListValue, 'log_level',
 			_('sing-box log level'),
 			_('Verbosity of the sing-box service log. Info logs every connection; warning is recommended for normal use.')));
+		oLog._prismSubheader = _('Logging');
 		oLog.value('error', _('Error'));
 		oLog.value('warn',  _('Warning'));
 		oLog.value('info',  _('Info'));
@@ -323,7 +323,17 @@ return baseclass.extend({
 			var input = formNode.querySelector(sel);
 			if (!input) return;
 			var row = input.closest('.cbi-value');
-			if (row) row.classList.add('prism-advanced');
+			if (!row) return;
+			row.classList.add('prism-advanced');
+			// Inject a sub-section header before this row when marked. The
+			// header inherits the Advanced visibility class so an all-advanced
+			// subgroup (Logging) hides cleanly when the toggle is off.
+			if (opt._prismSubheader) {
+				var hdr = E('h3', {
+					'class': 'prism-subheader prism-advanced'
+				}, [ opt._prismSubheader ]);
+				row.parentNode.insertBefore(hdr, row);
+			}
 		});
 
 		// Extra-overrides panel — same class so it hides with the rest.
@@ -364,6 +374,8 @@ return baseclass.extend({
 			'.cbi-map .prism-advanced{display:none}' +
 			'.cbi-map.prism-show-advanced .cbi-value.prism-advanced{display:flex}' +
 			'.cbi-map.prism-show-advanced .cbi-section.prism-advanced{display:block}' +
+			'.cbi-map.prism-show-advanced .prism-subheader.prism-advanced{display:block}' +
+			'.prism-subheader{margin:1.5em 0 0.75em}' +
 			'.prism-adv-toggle{display:inline-flex;align-items:center;gap:0.4em;' +
 				'margin:0.4em 0 1em;padding:0.2em 0.4em;cursor:pointer;' +
 				'font-size:0.95em;user-select:none}' +
