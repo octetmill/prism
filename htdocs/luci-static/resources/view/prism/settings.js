@@ -315,31 +315,36 @@ return baseclass.extend({
 			])
 		]);
 
-		// One inline <style> block scoped by the prism-show-advanced class.
-		// The toggle is styled as a prominent section header so the user
-		// notices it; a custom ::before chevron rotates on open as the open
-		// indicator (the default <summary> marker is a tiny dim triangle).
+		// The toggle is a compact corner control, positioned absolutely in the
+		// top-right of the form. It reads as a "view filter" rather than a
+		// "section header that contains the disclosed content" — which is the
+		// honest semantic, since the advanced rows are interleaved with their
+		// basic siblings throughout the form (tproxy_port under mode, fakeip
+		// ranges under fakeip_enabled, etc.). A custom ::before chevron
+		// rotates on open as the open indicator.
 		var styleEl = E('style', {}, [
+			'.cbi-map.prism-settings{position:relative}' +
 			'.cbi-map .prism-advanced{display:none}' +
 			'.cbi-map.prism-show-advanced .cbi-value.prism-advanced{display:flex}' +
 			'.cbi-map.prism-show-advanced .cbi-section.prism-advanced{display:block}' +
-			'.prism-adv-toggle{margin:0.5em 0 1em;padding:0.75em 1em;' +
+			'.prism-adv-toggle{position:absolute;top:0.5em;right:0.5em;z-index:1;' +
+				'padding:0.35em 0.7em;' +
 				'background:rgba(128,128,128,0.08);' +
 				'border:1px solid rgba(128,128,128,0.5);' +
 				'border-radius:4px;cursor:pointer}' +
 			'.prism-adv-toggle:hover{background:rgba(128,128,128,0.15)}' +
-			'.prism-adv-toggle summary{font-weight:bold;font-size:1.05em;' +
+			'.prism-adv-toggle summary{font-size:0.9em;font-weight:normal;' +
 				'outline:none;list-style:none}' +
 			'.prism-adv-toggle summary::-webkit-details-marker{display:none}' +
 			'.prism-adv-toggle summary::before{content:"\\25B8";display:inline-block;' +
-				'margin-right:0.5em;transition:transform 0.15s ease}' +
+				'margin-right:0.4em;transition:transform 0.15s ease}' +
 			'.prism-adv-toggle[open] summary::before{transform:rotate(90deg)}'
 		]);
 
-		// <details> is the disclosure trigger — its open state drives the
-		// CSS class on the map root. No body inside the details: the advanced
-		// rows live in their original sections (hidden by default), so the
-		// expander only flips a class, it doesn't move DOM.
+		// Mark the map root so the position:relative anchor catches the
+		// absolutely-positioned toggle below.
+		formNode.classList.add('prism-settings');
+
 		var details = E('details', { 'class': 'prism-adv-toggle' }, [
 			E('summary', {}, [ _('Advanced settings') ])
 		]);
@@ -347,16 +352,8 @@ return baseclass.extend({
 			formNode.classList.toggle('prism-show-advanced', details.open);
 		});
 
-		// The toggle goes at the TOP of the form, not at the bottom — the
-		// advanced rows are interleaved with their basic siblings throughout
-		// the form (tproxy_port under mode, fakeip ranges under fakeip_enabled,
-		// etc.), so a bottom-of-page disclosure widget broke both the
-		// "content lives inside <details>" mental model and the scroll
-		// position on toggle. A top-of-page filter reads more honestly as
-		// "show advanced rows wherever they live below" and keeps the user's
-		// scroll anchored when the page reflows underneath.
-		formNode.insertBefore(details, formNode.firstChild);
 		formNode.appendChild(styleEl);
+		formNode.appendChild(details);
 		formNode.appendChild(extraSection);
 
 		return formNode;
