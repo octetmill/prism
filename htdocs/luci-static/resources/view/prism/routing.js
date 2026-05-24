@@ -466,6 +466,10 @@ return baseclass.extend({
 			return Infinity;
 		}
 
+		// Returns the list of proxy (non-builtin) outbound tags in the same
+		// order they were added to the widget. Callers that need to wire
+		// `depends()` on "outbound is a proxy" use this to OR a clause for
+		// each tag — LuCI has no "not equals" depends.
 		function addServers(o) {
 			o.value('direct', _('direct (no proxy)'));
 			o.value('block',  _('block (drop)'));
@@ -484,9 +488,12 @@ return baseclass.extend({
 				if (a.group !== b.group) return a.group - b.group;
 				return a.idx - b.idx;
 			});
+			var tags = [];
 			entries.forEach(function(e) {
 				o.value(e.tag, e.label);
+				tags.push(e.tag);
 			});
+			return tags;
 		}
 
 		var m = new form.Map('prism');
@@ -543,12 +550,29 @@ return baseclass.extend({
 		};
 
 		var oOut = s.option(form.ListValue, 'outbound', _('Server'));
-		addServers(oOut);
+		var proxyTags = addServers(oOut);
 		// Render the server choice as an inline dropdown in the grid row so
 		// rebinding a rule to a different server is one click, not a modal
 		// open. The edit stays in-memory until the panel-level Save & Apply,
 		// matching the inline Enabled checkbox above.
 		oOut.editable = true;
+
+		// Resolve this rule's domain matches through the same outbound the
+		// connection takes — keeps the DNS lookup geo-consistent with the
+		// traffic (matters for region-pinned CDNs like Netflix). build-config
+		// emits a `remote-<outbound>` DNS server per flagged outbound. Only
+		// shown when the picked server is an actual proxy; `direct` resolves
+		// via `local` and `block` produces no DNS rule, so the flag is moot
+		// for both. Default on.
+		var oDns = s.option(form.Flag, 'dns_via_outbound',
+			_('Resolve DNS via this server'),
+			_('When on, domain matchers in this rule resolve through the same ' +
+			  'outbound the connection uses, so CDN responses match the proxy ' +
+			  'exit. Turn off to keep the lookup on the global Remote DNS.'));
+		oDns['default'] = '1';
+		oDns.rmempty = false;
+		oDns.modalonly = true;
+		proxyTags.forEach(function(t) { oDns.depends('outbound', t); });
 
 		// ── Destination — the condition builder ──────────────────────────
 		var oCond = s.option(ConditionList, '_conditions', _('Conditions'),

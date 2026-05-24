@@ -840,8 +840,16 @@ local DOMAIN_KINDS = {
 	domain_keyword = true, domain_regex = true
 }
 
+-- Returns (rules, per_outbound) where per_outbound is a set of outbound tags
+-- for which a dedicated `remote-<tag>` DNS server must be emitted so the
+-- lookup exits through the same outbound as the connection. The flag
+-- `rule.dns_via_outbound` (UCI: option dns_via_outbound, default on for any
+-- proxied rule) turns this on per-rule; for unflagged rules and for
+-- direct/block/fakeip the mirror still points at the generic `local` /
+-- `remote` / `fakeip` server.
 local function build_routing_dns_rules(prepared, fakeip_on)
 	local rules = {}
+	local per_outbound = {}
 	for _, pr in ipairs(prepared) do
 		local s = pr.section
 		if s.outbound ~= "block" then
@@ -850,6 +858,9 @@ local function build_routing_dns_rules(prepared, fakeip_on)
 				server = "local"
 			elseif fakeip_on then
 				server = "fakeip"
+			elseif s.dns_via_outbound ~= "0" then
+				server = "remote-" .. s.outbound
+				per_outbound[s.outbound] = true
 			else
 				server = "remote"
 			end
@@ -895,7 +906,7 @@ local function build_routing_dns_rules(prepared, fakeip_on)
 			end
 		end
 	end
-	return rules
+	return rules, per_outbound
 end
 
 local function build_dns(c, prepared)
@@ -990,8 +1001,25 @@ local function build_dns(c, prepared)
 		server        = "local-net"
 	}
 
-	local routing_rules = build_routing_dns_rules(prepared, fakeip_on)
+	local routing_rules, per_outbound = build_routing_dns_rules(prepared, fakeip_on)
 	for _, r in ipairs(routing_rules) do rules[#rules + 1] = r end
+
+	-- Per-outbound DNS servers: one `remote-<tag>` per outbound flagged via
+	-- `rule.dns_via_outbound`, so the DNS lookup for a domain exits through
+	-- the same outbound as the connection. Same upstream as `remote` (so the
+	-- user's chosen resolver is honoured), only the `detour` differs.
+	-- Sorted for deterministic generator output.
+	local outbound_tags = {}
+	for tag in pairs(per_outbound) do
+		outbound_tags[#outbound_tags + 1] = tag
+	end
+	table.sort(outbound_tags)
+	for _, tag in ipairs(outbound_tags) do
+		local extra = parse_dns_url(remote_addr)
+		extra.tag    = "remote-" .. tag
+		extra.detour = tag
+		servers[#servers + 1] = extra
+	end
 
 	-- `final`: unmatched queries resolve where the default outbound sends
 	-- their traffic — `remote` when it is a proxy, `local` otherwise
