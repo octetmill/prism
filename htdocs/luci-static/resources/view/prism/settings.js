@@ -202,10 +202,11 @@ return baseclass.extend({
 			  'Remote DNS. Local and reserved domains always use the on-router resolver.'));
 		sDns.addremove = false;
 
-		var oManaged = sDns.option(form.Flag, 'managed_dns', _('Managed DNS'),
+		var oManaged = advance(sDns.option(form.Flag, 'managed_dns', _('Managed DNS'),
 			_('Point dnsmasq at sing-box so all LAN clients are resolved ' +
 			  'through it. When off, only clients with a hardcoded public ' +
-			  'resolver are intercepted.'));
+			  'resolver are intercepted. Leave on unless you know you need ' +
+			  'dnsmasq to keep resolving directly.')));
 		oManaged.rmempty = false;
 		oManaged.default = '1';
 
