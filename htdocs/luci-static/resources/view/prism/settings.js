@@ -389,8 +389,13 @@ return baseclass.extend({
 		// because that's all this control needs to do: flip a visibility
 		// flag on the form below.
 		var styleEl = E('style', {}, [
+			// `:not(.hidden)` so a row whose depends() condition is unmet
+			// (LuCI tags it with the `hidden` class — form.js line ~2095)
+			// stays hidden even while Advanced is on. Without this, the
+			// Show-Advanced override out-specifics `.hidden{display:none}`
+			// and TUN-only / TProxy-only rows leak across modes.
 			'.cbi-map .prism-advanced{display:none}' +
-			'.cbi-map.prism-show-advanced .cbi-value.prism-advanced{display:flex}' +
+			'.cbi-map.prism-show-advanced .cbi-value.prism-advanced:not(.hidden){display:flex}' +
 			'.cbi-map.prism-show-advanced .cbi-section.prism-advanced{display:block}' +
 			'.prism-adv-toggle{display:inline-flex;align-items:center;gap:0.4em;' +
 				'margin:0.4em 0 1em;padding:0.2em 0.4em;cursor:pointer;' +
