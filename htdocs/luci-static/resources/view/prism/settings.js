@@ -275,12 +275,12 @@ return baseclass.extend({
 
 		var oDetour = advance(sRulesets.option(form.ListValue, 'ruleset_download_detour',
 			_('Rule-set download via'),
-			_('How sing-box fetches rule-sets: straight out the WAN, or ' +
-			  'through the default outbound (the proxy) when the WAN cannot ' +
-			  'reach the rule-set host.')));
-		oDetour.value('direct',  _('Direct (WAN)'));
+			_('How sing-box fetches rule-sets: through the default outbound ' +
+			  '(the proxy) so the fetch follows the user\'s routing choice, ' +
+			  'or straight out the WAN when the proxy is unreachable.')));
 		oDetour.value('default', _('Default outbound (proxy)'));
-		oDetour['default'] = 'direct';
+		oDetour.value('direct',  _('Direct (WAN)'));
+		oDetour['default'] = 'default';
 
 		// ── Logging ──────────────────────────────────────────────────────
 		// Entire section is Advanced — its wrapper div gets the
