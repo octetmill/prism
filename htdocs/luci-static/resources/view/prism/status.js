@@ -5,7 +5,7 @@
 // not?" without leaving the page.
 //
 // Layout (top → bottom):
-//   ● Running/Stopped  via  <active-server>   [Stop] [Restart]
+//   ● Running/Stopped  via  <active-node>   [Stop] [Restart]
 //   Subscriptions: N · Active rules: N
 //   <recent activity — 20-line log tail, auto-refreshed>
 //   [View full log] [View generated config]
@@ -20,9 +20,10 @@
 // prior Diagnostics panel rendered them inline; here they would crowd the
 // glance-first layout).
 //
-// The active-server line shows `routing.final_outbound` from UCI — the tag
-// of the default group/server the rule chain falls through to. This commit
-// shows it read-only; a follow-up may turn it into an inline group switcher.
+// The active-node line shows `routing.final_outbound` from UCI — the tag
+// of the default node the rule chain falls through to (a group counts as a
+// node here). This commit shows it read-only; a follow-up may turn it into
+// an inline group switcher.
 
 'use strict';
 'require baseclass';
@@ -175,7 +176,7 @@ return baseclass.extend({
 					E('span', { 'style': 'opacity:0.6; font-weight:normal;' }, [
 						_('via')
 					]),
-					E('strong', { 'id': 'prism-active-server' }, [
+					E('strong', { 'id': 'prism-active-node' }, [
 						active || _('— no default')
 					]),
 					E('span', { 'style': 'margin-left:auto; display:flex; gap:0.3em; font-size:0.7em;' }, [

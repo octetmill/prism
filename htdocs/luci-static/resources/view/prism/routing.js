@@ -498,19 +498,19 @@ return baseclass.extend({
 
 		var m = new form.Map('prism');
 
-		// ── default server ──────────────────────────────────────────────
-		var ds = m.section(form.NamedSection, 'routing', 'routing', _('Default server'),
-			_('Server for traffic not matched by any rule below.'));
+		// ── default node ────────────────────────────────────────────────
+		var ds = m.section(form.NamedSection, 'routing', 'routing', _('Default node'),
+			_('Node for traffic not matched by any rule below.'));
 		ds.addremove = false;
 
-		var oFinal = ds.option(form.ListValue, 'final_outbound', _('Default server'));
+		var oFinal = ds.option(form.ListValue, 'final_outbound', _('Default node'));
 		addServers(oFinal);
 
 		// ── rules ───────────────────────────────────────────────────────
 		var s = m.section(form.GridSection, 'rule', _('Rules'),
 			_('Evaluated top-to-bottom; first match wins. Each rule matches a ' +
 			  'destination built from one or more conditions joined with ' +
-			  'AND / OR, and sends matching traffic to a server. Changes ' +
+			  'AND / OR, and sends matching traffic to a node. Changes ' +
 			  'are staged until Save; Save & Apply also reloads the service.'));
 		s.addremove = true;
 		s.sortable  = true;
@@ -549,10 +549,10 @@ return baseclass.extend({
 			return ruleSummary(section_id);
 		};
 
-		var oOut = s.option(form.ListValue, 'outbound', _('Server'));
+		var oOut = s.option(form.ListValue, 'outbound', _('Node'));
 		var proxyTags = addServers(oOut);
-		// Render the server choice as an inline dropdown in the grid row so
-		// rebinding a rule to a different server is one click, not a modal
+		// Render the node choice as an inline dropdown in the grid row so
+		// rebinding a rule to a different node is one click, not a modal
 		// open. The edit stays in-memory until the panel-level Save & Apply,
 		// matching the inline Enabled checkbox above.
 		oOut.editable = true;
@@ -561,11 +561,11 @@ return baseclass.extend({
 		// connection takes — keeps the DNS lookup geo-consistent with the
 		// traffic (matters for region-pinned CDNs like Netflix). build-config
 		// emits a `remote-<outbound>` DNS server per flagged outbound. Only
-		// shown when the picked server is an actual proxy; `direct` resolves
+		// shown when the picked node is an actual proxy; `direct` resolves
 		// via `local` and `block` produces no DNS rule, so the flag is moot
 		// for both. Default on.
 		var oDns = s.option(form.Flag, 'dns_via_outbound',
-			_('Resolve DNS via this server'),
+			_('Resolve DNS via this node'),
 			_('When on, domain matchers in this rule resolve through the same ' +
 			  'outbound the connection uses, so CDN responses match the proxy ' +
 			  'exit. Turn off to keep the lookup on the global Remote DNS.'));

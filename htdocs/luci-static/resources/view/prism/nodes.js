@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 OctetMill
 
-// Servers tab: subscriptions on top, manually-configured proxies below.
-// "Server" is the user-facing noun for what sing-box calls an outbound — the
+// Nodes tab: subscriptions on top, manually-configured nodes below.
+// "Node" is the user-facing noun for what sing-box calls an outbound — it
+// covers both individual servers and group outbounds (urltest/selector). The
 // UCI section names (`node`, `subscription`) and the RPC method names
 // (list_outbounds) keep the historic spelling.
 // Both sections share one form.Map('prism') so a single Save & Apply commits
@@ -113,7 +114,7 @@ return baseclass.extend({
 		var self = this;
 
 		var s = m.section(form.GridSection, 'subscription', _('Subscriptions'),
-			_('Server subscriptions.'));
+			_('Node subscriptions.'));
 		s.addremove = true;
 		s.sortable  = true;
 		s.anonymous = true;
@@ -131,7 +132,7 @@ return baseclass.extend({
 
 		// RPC-populated read-only fields shown in the grid row only —
 		// modalonly=false excludes them from the per-row edit modal.
-		var oCount = s.option(form.DummyValue, 'node_count', _('Servers'));
+		var oCount = s.option(form.DummyValue, 'node_count', _('Nodes'));
 		oCount.modalonly = false;
 
 		var oView = s.option(form.Button, '_view', _('View'));
@@ -187,7 +188,7 @@ return baseclass.extend({
 				return callReloadIfChanged().then(function(r) {
 					if (r && r.reloaded)
 						ui.addNotification(null,
-							E('p', _('Active server changed — sing-box reloaded.')), 'info');
+							E('p', _('Active node changed — sing-box reloaded.')), 'info');
 					// Close the edit modal first if the sync was triggered
 					// from inside it — remountActive() would orphan it.
 					ui.hideModal();
@@ -270,13 +271,13 @@ return baseclass.extend({
 			return a.label < b.label ? -1 : a.label > b.label ? 1 : 0;
 		});
 
-		var s = m.section(form.GridSection, 'node', _('Servers'),
-			_('Manually configured proxy servers.'));
+		var s = m.section(form.GridSection, 'node', _('Nodes'),
+			_('Manually configured proxy nodes.'));
 		s.addremove = true;
 		s.sortable  = true;
 		s.anonymous = true;
 		s.addbtntitle = _('Add');
-		s.modaltitle = function() { return _('Server'); };
+		s.modaltitle = function() { return _('Node'); };
 
 		s.tab('general',   _('General'));
 		s.tab('transport', _('Transport'));
@@ -740,7 +741,7 @@ return baseclass.extend({
 				(res.errors || 0) > 0 ? 'warning' : 'info');
 			if (res && res.reloaded)
 				ui.addNotification(null,
-					E('p', _('Active server changed — sing-box reloaded.')), 'info');
+					E('p', _('Active node changed — sing-box reloaded.')), 'info');
 			uci.unload('prism');
 			return uci.load('prism').then(function() {
 				return self._prismHost.remountActive();
