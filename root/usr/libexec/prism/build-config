@@ -1386,7 +1386,15 @@ end
 local config = apply_extra(build_config(c))
 c:close()
 
-local json = jsonc.stringify(config, true)  -- pretty-print
+-- Pretty-print, then unescape forward slashes. luci.jsonc wraps json-c, which
+-- escapes `/` as `\/` unconditionally (a legacy guard against `</script>`
+-- breakouts in HTML embeds, irrelevant here) and does not expose the
+-- JSON_C_TO_STRING_NOSLASHESCAPE flag. Replacing `\/` with `/` is
+-- semantics-preserving for any standards-compliant encoder output: a literal
+-- backslash always encodes as `\\`, so the only `\/` byte-pair this gsub can
+-- match is a slash that the encoder escaped — and the same byte-pair decodes
+-- back to `/` either way.
+local json = jsonc.stringify(config, true):gsub("\\/", "/")
 local ok, err = write_atomic(out_path, json)
 if not ok then
 	io.stderr:write("prism build-config: " .. err .. "\n")
