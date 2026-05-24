@@ -1138,6 +1138,55 @@ local methods = {
 		end
 	},
 
+	-- Same syslog source as get_log, but split into separate prism and
+	-- sing-box arrays so the Status page can render them in two boxes. Prism
+	-- lines are filtered by the `prism_log_level` UCI threshold (display-only
+	-- — the syslog still accumulates everything; the level only hides lines
+	-- below the threshold when the UI asks for them). sing-box's own log
+	-- level controls what *it* emits, so no filtering happens here for it.
+	get_logs = {
+		args = { lines = 20 },
+		call = function(args)
+			local n = tonumber(args.lines) or 20
+			if n > 500 then n = 500 end
+
+			local SEV = {
+				emerg = 0, alert = 1, crit = 2, err = 3,
+				warning = 4, notice = 5, info = 6, debug = 7
+			}
+			local c = uci_cursor()
+			local threshold = SEV[c:get("prism", "global", "prism_log_level") or "info"] or 6
+			c:close()
+
+			local prism, singbox = {}, {}
+			local f = io.popen("logread 2>/dev/null")
+			if f then
+				for line in f:lines() do
+					if line:find(" prism: ", 1, true) then
+						local sev = line:match("daemon%.(%w+) ")
+						if not sev or (SEV[sev] or 6) <= threshold then
+							prism[#prism + 1] = line
+						end
+					elseif line:find("sing-box[", 1, true) or
+					       line:find(" sing-box: ", 1, true) then
+						singbox[#singbox + 1] = line
+					end
+				end
+				f:close()
+			end
+
+			-- Trim each list to its last n entries.
+			local function tail(t)
+				local len = #t
+				if len <= n then return t end
+				local out = {}
+				for i = len - n + 1, len do out[#out + 1] = t[i] end
+				return out
+			end
+			return { prism = tail(prism), singbox = tail(singbox) }
+		end
+	},
+
 	reload = {
 		call = function()
 			os.execute("/etc/init.d/prism reload >/dev/null 2>&1")

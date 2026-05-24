@@ -55,14 +55,22 @@ var callGetLog = rpc.declare({
 	expect: { '': {} }
 });
 
+var callGetLogs = rpc.declare({
+	object: 'luci.prism',
+	method: 'get_logs',
+	params: ['lines'],
+	expect: { '': {} }
+});
+
 var callGetConfig = rpc.declare({
 	object: 'luci.prism',
 	method: 'get_config',
 	expect: { '': {} }
 });
 
-var TAIL_LINES = 20;
-var POLL_MS    = 2000;
+var TAIL_LINES   = 20;
+var PRISM_TAIL_LINES = 10;
+var POLL_MS      = 2000;
 var FULL_LOG_LINES = 500;
 
 // Strip the syslog wrapper, sing-box's redundant inner UTC timestamp, and the
@@ -125,18 +133,21 @@ return baseclass.extend({
 
 	load: function() {
 		// All three degrade gracefully — a missing RPC leaves the relevant
-		// row blank rather than blanking the tab.
+		// row blank rather than blanking the tab. get_logs returns
+		// { prism: [...], singbox: [...] }; ask for the larger of the two
+		// caps so both boxes can fill independently.
 		return Promise.all([
 			callGetStatus().catch(function() { return {}; }),
-			callGetLog(TAIL_LINES).catch(function() { return {}; }),
+			callGetLogs(TAIL_LINES).catch(function() { return {}; }),
 			uci.load('prism').catch(function() { return null; })
 		]);
 	},
 
 	render: function(results) {
-		var status   = (results && results[0]) || {};
-		var logData  = (results && results[1]) || {};
-		var logText  = formatLog(logData.log);
+		var status     = (results && results[0]) || {};
+		var logsData   = (results && results[1]) || {};
+		var prismText  = formatLog(logsData.prism);
+		var singboxText = formatLog(logsData.singbox);
 
 		var active = uci.get('prism', 'routing', 'final_outbound') || '';
 		var mode   = uci.get('prism', 'inbounds', 'mode') || 'tproxy';
@@ -195,14 +206,26 @@ return baseclass.extend({
 			]),
 
 			// ── Recent activity ────────────────────────────────────────
-			// Fixed 20 rows, no vertical scroll. Long lines still scroll
-			// horizontally (wrap=off) so multi-line wrap doesn't shrink the
-			// effective tail. The cleanLogLine pass trims most lines to
-			// "YYYY/MM/DD HH:MM:SS <msg>", which usually fits the box width.
+			// Two stacked boxes — Prism control-plane events (sparse) and
+			// sing-box service log (verbose). Each is a fixed-row textarea,
+			// no vertical scroll; long lines still scroll horizontally. The
+			// cleanLogLine pass trims each line to "YYYY/MM/DD HH:MM:SS <msg>"
+			// so the visible width fits comfortably.
 			E('div', { 'class': 'cbi-section' }, [
-				E('h3', { 'style': 'margin-bottom:0.4em;' }, [ _('Recent activity') ]),
+				E('h4', { 'style': 'margin:0.4em 0 0.3em;' }, [ _('Prism log') ]),
 				E('textarea', {
-					'id': 'prism-log-tail',
+					'id': 'prism-log-prism',
+					'class': 'cbi-input-textarea',
+					'readonly': 'readonly',
+					'wrap': 'off',
+					'rows': String(PRISM_TAIL_LINES),
+					'style': 'width:100%; resize:none; overflow-y:hidden; ' +
+					         'font-family:monospace; font-size:0.8em; ' +
+					         'line-height:1.35; background:rgba(128,128,128,0.05);'
+				}, [ prismText ]),
+				E('h4', { 'style': 'margin:1em 0 0.3em;' }, [ _('sing-box log') ]),
+				E('textarea', {
+					'id': 'prism-log-singbox',
 					'class': 'cbi-input-textarea',
 					'readonly': 'readonly',
 					'wrap': 'off',
@@ -210,7 +233,7 @@ return baseclass.extend({
 					'style': 'width:100%; resize:none; overflow-y:hidden; ' +
 					         'font-family:monospace; font-size:0.8em; ' +
 					         'line-height:1.35; background:rgba(128,128,128,0.05);'
-				}, [ logText ]),
+				}, [ singboxText ]),
 				E('div', { 'style': 'margin-top:0.5em; display:flex; gap:0.4em;' }, [
 					E('button', {
 						'class': 'btn cbi-button cbi-button-neutral',
@@ -228,11 +251,13 @@ return baseclass.extend({
 		this._scheduleStatusRefresh();
 		this._scheduleLogRefresh();
 		// Initial scroll-to-bottom for the rare case where lines wrap onto
-		// more rows than the box can show; deferred so the textarea is in
-		// the DOM (and has its scrollHeight) by the time we read it.
+		// more rows than the box can show; deferred so the textareas are in
+		// the DOM (and have their scrollHeight) by the time we read them.
 		requestAnimationFrame(function() {
-			var el = document.getElementById('prism-log-tail');
-			if (el) el.scrollTop = el.scrollHeight;
+			['prism-log-prism', 'prism-log-singbox'].forEach(function(id) {
+				var el = document.getElementById(id);
+				if (el) el.scrollTop = el.scrollHeight;
+			});
 		});
 
 		return node;
@@ -315,18 +340,22 @@ return baseclass.extend({
 	// ── Log tail polling ──────────────────────────────────────────────────
 
 	_refreshLogTail: function() {
-		return callGetLog(TAIL_LINES).then(L.bind(function(data) {
-			var el = document.getElementById('prism-log-tail');
-			if (!el) return;
-			el.value = formatLog(data && data.log);
-			el.scrollTop = el.scrollHeight;
-		}, this));
+		return callGetLogs(TAIL_LINES).then(function(data) {
+			data = data || {};
+			[['prism-log-prism', data.prism],
+			 ['prism-log-singbox', data.singbox]].forEach(function(pair) {
+				var el = document.getElementById(pair[0]);
+				if (!el) return;
+				el.value = formatLog(pair[1]);
+				el.scrollTop = el.scrollHeight;
+			});
+		});
 	},
 
 	_scheduleLogRefresh: function() {
 		if (this._logTimer)
 			clearTimeout(this._logTimer);
-		if (!document.getElementById('prism-log-tail')) return;
+		if (!document.getElementById('prism-log-singbox')) return;
 		this._logTimer = setTimeout(L.bind(function() {
 			this._refreshLogTail()
 				.catch(function() {})

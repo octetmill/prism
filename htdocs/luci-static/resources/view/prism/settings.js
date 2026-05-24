@@ -130,13 +130,23 @@ return baseclass.extend({
 		sGen.addremove = false;
 
 		var oLog = sGen.option(form.ListValue, 'log_level',
-			_('Log level'),
+			_('sing-box log level'),
 			_('Verbosity of the sing-box service log. Info logs every connection; warning is recommended for normal use.'));
 		oLog.value('error', _('Error'));
 		oLog.value('warn',  _('Warning'));
 		oLog.value('info',  _('Info'));
 		oLog.value('debug', _('Debug'));
 		oLog.default = 'warn';
+
+		var oPLog = sGen.option(form.ListValue, 'prism_log_level',
+			_('Prism log level'),
+			_('Which Prism control-plane events (service / config / firewall / DNS / sync) appear in the Prism log on the Status page. Filters display only — syslog still accumulates everything.'));
+		oPLog.value('error',  _('Error'));
+		oPLog.value('warning', _('Warning'));
+		oPLog.value('notice', _('Notice'));
+		oPLog.value('info',   _('Info'));
+		oPLog.value('debug',  _('Debug'));
+		oPLog.default = 'info';
 
 		// ── Network ──────────────────────────────────────────────────────
 		var sNet = m.section(form.NamedSection, 'inbounds', 'prism', _('Network'));

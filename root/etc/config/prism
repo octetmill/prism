@@ -2,6 +2,7 @@ config prism 'global'
 	option enabled '0'
 	option config_path '/var/etc/prism/sing-box.json'
 	option log_level 'warn'
+	option prism_log_level 'info'
 	option ruleset_delivery 'github'
 	option ruleset_download_detour 'direct'
 
