@@ -51,8 +51,8 @@ local uci_list_or_string = lib.uci_list
 -- refreshes each .srs itself, so build-config only constructs the download
 -- URL. A `ruleset` token is either "provider/name" (provider ∈ sagernet,
 -- loyalsoldier, metacubex) or a bare custom label resolved against the
--- `customrs` registry. Country codes expand to <country_provider>/geoip-<cc>
--- and, when the catalog confirms one exists, /geosite-<cc>.
+-- `customrs` registry. For a country, the user adds two ruleset conditions
+-- explicitly (e.g. sagernet/geoip-cn OR sagernet/geosite-cn).
 
 -- Construct the .srs download URL for a provider rule-set name. delivery
 -- picks GitHub raw or the jsDelivr CDN (for GitHub-blocked regions).
@@ -86,13 +86,13 @@ local function provider_url(provider, delivery, name)
 		or  "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/" .. name .. ".srs"
 end
 
--- Resolve one routing `condition` UCI section. A ruleset/country condition's
--- tokens become rule-set tags paired with a download URL; every other kind
--- just carries its value list. Returns:
+-- Resolve one routing `condition` UCI section. A ruleset condition's tokens
+-- become rule-set tags paired with a download URL; every other kind just
+-- carries its value list. Returns:
 --   kind, op       — condition type, and the operator linking it to the
 --                    previous condition ("and" | "or"; ignored on the first)
 --   values         — the condition's value list
---   tags           — rule-set tags (ruleset/country only)
+--   tags           — rule-set tags (ruleset only)
 --   geosite_tags   — subset of tags that carry domains (for DNS derivation)
 --   rs_meta        — { tag → { url, format } } for emitting remote rule_sets
 local function resolve_condition(cond, ctx)
@@ -106,12 +106,10 @@ local function resolve_condition(cond, ctx)
 		rs_meta      = {}
 	}
 
-	if r.kind ~= "ruleset" and r.kind ~= "country" then
+	if r.kind ~= "ruleset" then
 		return r
 	end
 
-	-- A tag may be named twice (a ruleset token and a country both yielding
-	-- geosite-cn); emit it only once.
 	local seen = {}
 	local function add_tag(tag, url, fmt, is_geosite)
 		-- The tag is the rule-set's sing-box identifier; reject one that
@@ -129,38 +127,20 @@ local function resolve_condition(cond, ctx)
 		end
 	end
 
-	if r.kind == "ruleset" then
-		for _, tok in ipairs(r.values) do
-			if tok ~= "" then
-				local provider, name = lib.split_provider_token(tok)
-				if provider then
-					add_tag(provider .. "-" .. name,
-						provider_url(provider, ctx.delivery, name),
-						"binary", name:find("geosite") ~= nil)
+	for _, tok in ipairs(r.values) do
+		if tok ~= "" then
+			local provider, name = lib.split_provider_token(tok)
+			if provider then
+				add_tag(provider .. "-" .. name,
+					provider_url(provider, ctx.delivery, name),
+					"binary", name:find("geosite") ~= nil)
+			else
+				local cr = ctx.custom[tok]
+				if cr then
+					add_tag("custom-" .. tok, cr.url, cr.format, false)
 				else
-					local cr = ctx.custom[tok]
-					if cr then
-						add_tag("custom-" .. tok, cr.url, cr.format, false)
-					else
-						io.stderr:write("prism build-config: custom rule-set '" ..
-							tok .. "' has no registry URL; skipping\n")
-					end
-				end
-			end
-		end
-	else  -- country
-		local cp = ctx.country_provider
-		for _, cc in ipairs(r.values) do
-			if cc ~= "" then
-				add_tag(cp .. "-geoip-" .. cc,
-					provider_url(cp, ctx.delivery, "geoip-" .. cc), "binary", false)
-				-- geosite-<cc> exists only for some countries; emit it only
-				-- when the catalog confirms it, so a country without one does
-				-- not yield a remote rule-set whose URL just 404s.
-				if ctx.catalog_has(cp, "geosite-" .. cc) then
-					add_tag(cp .. "-geosite-" .. cc,
-						provider_url(cp, ctx.delivery, "geosite-" .. cc),
-						"binary", true)
+					io.stderr:write("prism build-config: custom rule-set '" ..
+						tok .. "' has no registry URL; skipping\n")
 				end
 			end
 		end
@@ -184,41 +164,14 @@ local function load_custom_rulesets(c)
 	return m
 end
 
--- Load the rule-set name catalog (refreshed by fetch-catalog for the UI) into
--- a { provider → { name → true } } lookup. Used only to gate the country
--- geosite bonus; an absent or stale catalog just means that bonus is skipped.
-local function load_catalog()
-	local raw = read_file("/etc/prism/rulesets-cache.json")
-	if not raw then return {} end
-	local ok, obj = pcall(jsonc.parse, raw)
-	if not ok or type(obj) ~= "table" or type(obj.names) ~= "table" then
-		return {}
-	end
-	local idx = {}
-	for provider, list in pairs(obj.names) do
-		if type(list) == "table" then
-			local set = {}
-			for _, n in ipairs(list) do set[n] = true end
-			idx[provider] = set
-		end
-	end
-	return idx
-end
-
 -- Collect the enabled routing rules once, sorted by `order`, each paired with
 -- its ordered, resolved list of `condition` sections. build_route and
 -- build_dns both consume this list, so the rule/condition foreach passes, the
 -- sorts and the per-condition resolution run a single time per build.
 local function prepare_rules(c)
-	local catalog = load_catalog()
 	local ctx = {
-		country_provider = c:get("prism", "global", "country_provider") or "sagernet",
-		delivery         = c:get("prism", "global", "ruleset_delivery") or "github",
-		custom           = load_custom_rulesets(c),
-		catalog_has      = function(provider, name)
-			local set = catalog[provider]
-			return set ~= nil and set[name] == true
-		end
+		delivery = c:get("prism", "global", "ruleset_delivery") or "github",
+		custom   = load_custom_rulesets(c)
 	}
 
 	local rows = {}
@@ -1079,9 +1032,9 @@ end
 -- single rule (the sing-box default-rule AND-trap) — no inline rule-set is
 -- needed. A condition flagged `invert` carries sing-box's `invert: true`,
 -- negating just that node's match. Returns nil when the condition resolves
--- to nothing: an empty value list, or a ruleset/country whose every token
--- failed to resolve. The `emit_ruleset` callback registers the route-level
--- remote rule_set objects.
+-- to nothing: an empty value list, or a ruleset whose every token failed to
+-- resolve. The `emit_ruleset` callback registers the route-level remote
+-- rule_set objects.
 local function compile_condition(r, emit_ruleset)
 	local k = r.kind
 	local node
@@ -1099,7 +1052,7 @@ local function compile_condition(r, emit_ruleset)
 			if #ports  > 0 then node.port       = ports  end
 			if #ranges > 0 then node.port_range = ranges end
 		end
-	elseif k == "ruleset" or k == "country" then
+	elseif k == "ruleset" then
 		if #r.tags > 0 then
 			for _, tag in ipairs(r.tags) do
 				emit_ruleset(tag, r.rs_meta[tag])

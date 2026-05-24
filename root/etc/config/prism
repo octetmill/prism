@@ -4,7 +4,6 @@ config prism 'global'
 	option log_level 'warn'
 	option ruleset_delivery 'github'
 	option ruleset_download_detour 'direct'
-	option country_provider 'sagernet'
 
 config prism 'inbounds'
 	option mode 'tproxy'

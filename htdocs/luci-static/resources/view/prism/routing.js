@@ -30,27 +30,9 @@ var PROTOCOLS = [
 	'bittorrent', 'dtls', 'ssh', 'rdp', 'ntp'
 ];
 
-var COUNTRIES = [
-	['cn', 'China (cn)'],          ['us', 'United States (us)'],
-	['gb', 'United Kingdom (gb)'], ['de', 'Germany (de)'],
-	['fr', 'France (fr)'],         ['ru', 'Russia (ru)'],
-	['jp', 'Japan (jp)'],          ['kr', 'South Korea (kr)'],
-	['hk', 'Hong Kong (hk)'],      ['tw', 'Taiwan (tw)'],
-	['sg', 'Singapore (sg)'],      ['in', 'India (in)'],
-	['ir', 'Iran (ir)'],           ['br', 'Brazil (br)'],
-	['au', 'Australia (au)'],      ['ca', 'Canada (ca)'],
-	['it', 'Italy (it)'],          ['es', 'Spain (es)'],
-	['nl', 'Netherlands (nl)'],    ['se', 'Sweden (se)'],
-	['ch', 'Switzerland (ch)'],    ['tr', 'Turkey (tr)'],
-	['ua', 'Ukraine (ua)'],        ['pl', 'Poland (pl)'],
-	['vn', 'Vietnam (vn)'],        ['th', 'Thailand (th)'],
-	['id', 'Indonesia (id)'],      ['ph', 'Philippines (ph)'],
-	['ae', 'UAE (ae)'],            ['sa', 'Saudi Arabia (sa)']
-];
-
 // A routing rule's destination is an ordered list of conditions, each of one
 // of these kinds. domain* / ip_cidr / protocol / port are native sing-box
-// matchers; ruleset / country resolve to rule-set references.
+// matchers; ruleset resolves to a rule-set reference.
 var KINDS = [
 	[ 'domain',         _('Domain (exact)') ],
 	[ 'domain_suffix',  _('Domain suffix')  ],
@@ -58,7 +40,6 @@ var KINDS = [
 	[ 'domain_regex',   _('Domain regex')   ],
 	[ 'ip_cidr',        _('IP / CIDR')      ],
 	[ 'ruleset',        _('Rule-set')       ],
-	[ 'country',        _('Country')        ],
 	[ 'protocol',       _('Protocol')       ],
 	[ 'port',           _('Port')           ]
 ];
@@ -70,7 +51,6 @@ var KIND_SHORT = {
 	domain_regex:   _('regex'),
 	ip_cidr:        _('IP'),
 	ruleset:        _('rule-set'),
-	country:        _('country'),
 	protocol:       _('protocol'),
 	port:           _('port')
 };
@@ -82,7 +62,6 @@ var PLACEHOLDERS = {
 	domain_regex:   '.*\\.example\\.com$',
 	ip_cidr:        '192.0.2.0/24',
 	ruleset:        'sagernet/geosite-cn',
-	country:        'cn',
 	protocol:       'tls',
 	port:           '80, 443, 8000-8100'
 };
@@ -139,18 +118,16 @@ function ruleSummary(rule_name) {
 // backed by child `condition` UCI sections rather than a field on the rule,
 // so `cfgvalue` reads them and `parse` reconciles them. form.DummyValue is
 // the base — it carries no input/validation machinery to clash with the
-// fully custom `parse`. The suggestion sets (rsSuggest / countrySuggest /
-// protoSuggest) are assigned per-instance in render(), once the rule-set
-// catalog has loaded.
+// fully custom `parse`. The suggestion sets (rsSuggest / protoSuggest) are
+// assigned per-instance in render(), once the rule-set catalog has loaded.
 var ConditionList = form.DummyValue.extend({
 	cfgvalue: function(section_id) {
 		return readConditions(section_id);
 	},
 
 	renderWidget: function(section_id) {
-		var rsSuggest      = this.rsSuggest      || null;
-		var countrySuggest = this.countrySuggest || null;
-		var protoSuggest   = this.protoSuggest   || null;
+		var rsSuggest    = this.rsSuggest    || null;
+		var protoSuggest = this.protoSuggest || null;
 
 		var rowsEl  = E('div', {});
 		var preview = E('div', {
@@ -159,7 +136,6 @@ var ConditionList = form.DummyValue.extend({
 
 		function suggestionsFor(kind) {
 			if (kind === 'ruleset')  return rsSuggest;
-			if (kind === 'country')  return countrySuggest;
 			if (kind === 'protocol') return protoSuggest;
 			return null;
 		}
@@ -571,15 +547,14 @@ return baseclass.extend({
 			  'A rule with no conditions does nothing and is skipped — the ' +
 			  'default server already handles otherwise-unmatched traffic.'));
 		oCond.modalonly = true;
-		oCond.rsSuggest      = rsTokens;
-		oCond.countrySuggest = COUNTRIES;
-		oCond.protoSuggest   = PROTOCOLS.slice().sort();
+		oCond.rsSuggest    = rsTokens;
+		oCond.protoSuggest = PROTOCOLS.slice().sort();
 
 		// ── rule-set sources ────────────────────────────────────────────
 		// Folded in from the former Settings → Rule-sets sub-tab. These
-		// fields belong with Routing because a rule's `ruleset` /  `country`
-		// conditions reference them — co-locating avoids tab-hopping when
-		// adding a new rule that needs a custom rule-set.
+		// fields belong with Routing because a rule's `ruleset` conditions
+		// reference them — co-locating avoids tab-hopping when adding a
+		// new rule that needs a custom rule-set.
 		var rsSrc = m.section(form.NamedSection, 'global', 'prism', _('Rule-set sources'),
 			_('Where sing-box fetches the rule-sets referenced by your rules.'));
 		rsSrc.addremove = false;
@@ -597,13 +572,6 @@ return baseclass.extend({
 		oDetour.value('direct',  _('Direct (WAN)'));
 		oDetour.value('default', _('Default outbound (proxy)'));
 		oDetour['default'] = 'direct';
-
-		var oCountry = rsSrc.option(form.ListValue, 'country_provider', _('Country provider'),
-			_('Source for the geoip / geosite rule-sets that a routing rule\'s ' +
-			  'Countries field expands to.'));
-		oCountry.value('sagernet',  'SagerNet');
-		oCountry.value('metacubex', 'MetaCubeX');
-		oCountry['default'] = 'sagernet';
 
 		// ── custom rule-sets ────────────────────────────────────────────
 		var cs = m.section(form.GridSection, 'customrs', _('Custom rule-sets'),
