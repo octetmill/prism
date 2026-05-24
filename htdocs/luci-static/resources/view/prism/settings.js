@@ -148,6 +148,27 @@ return baseclass.extend({
 		oPLog.value('debug',  _('Debug'));
 		oPLog.default = 'info';
 
+		// Rule-set fetching config — moved here from the Routing tab. These
+		// are global set-once knobs (which CDN, and whether to fetch via WAN
+		// or through the proxy); they have no day-to-day interplay with rules
+		// themselves, so they don't earn space on the Routing page.
+		var oDelivery = sGen.option(form.ListValue, 'ruleset_delivery',
+			_('Rule-set delivery'),
+			_('Where sing-box fetches the rule-sets referenced by routing rules. ' +
+			  'GitHub raw, or the jsDelivr CDN for GitHub-blocked regions.'));
+		oDelivery.value('github',   _('GitHub (raw)'));
+		oDelivery.value('jsdelivr', _('jsDelivr CDN'));
+		oDelivery['default'] = 'github';
+
+		var oDetour = sGen.option(form.ListValue, 'ruleset_download_detour',
+			_('Rule-set download via'),
+			_('How sing-box fetches rule-sets: straight out the WAN, or ' +
+			  'through the default outbound (the proxy) when the WAN cannot ' +
+			  'reach the rule-set host.'));
+		oDetour.value('direct',  _('Direct (WAN)'));
+		oDetour.value('default', _('Default outbound (proxy)'));
+		oDetour['default'] = 'direct';
+
 		// ── Network ──────────────────────────────────────────────────────
 		var sNet = m.section(form.NamedSection, 'inbounds', 'prism', _('Network'));
 		sNet.addremove = false;

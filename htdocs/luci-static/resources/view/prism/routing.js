@@ -562,6 +562,37 @@ return baseclass.extend({
 		oCond.rsSuggest    = rsTokens;
 		oCond.protoSuggest = PROTOCOLS.slice().sort();
 
+		// ── custom rule-sets ────────────────────────────────────────────
+		// Lives in Routing because routing rules reference these by label;
+		// the global delivery / download-detour knobs that used to sit next
+		// to this section moved to Settings — they're set-once-and-forgotten
+		// config, not something the user tweaks while editing rules.
+		var cs = m.section(form.GridSection, 'customrs', _('Custom rule-sets'),
+			_('Rule-sets fetched from an explicit URL. Reference one in a ' +
+			  'routing rule by its label.'));
+		cs.addremove = true;
+		cs.anonymous = true;
+		cs.addbtntitle = _('Add');
+
+		var oLabel = cs.option(form.Value, 'label', _('Label'));
+		oLabel.rmempty = false;
+		oLabel.validate = function(section_id, value) {
+			if (!value)
+				return _('A label is required.');
+			if (value.indexOf('/') >= 0)
+				return _('The label must not contain "/".');
+			return true;
+		};
+
+		var oUrl = cs.option(form.Value, 'url', _('URL'));
+		oUrl.rmempty = false;
+		oUrl.placeholder = 'https://…/rules.srs';
+
+		var oFmt = cs.option(form.ListValue, 'format', _('Format'));
+		oFmt.value('binary', _('Binary (.srs)'));
+		oFmt.value('source', _('Source (.json)'));
+		oFmt['default'] = 'binary';
+
 		// ── bypass ──────────────────────────────────────────────────────
 		// LAN clients listed here skip the proxy entirely — applied via
 		// nftables `accept` rules at the head of the prerouting chain
@@ -697,56 +728,6 @@ return baseclass.extend({
 			return '';
 		};
 
-		// ── rule-set sources ────────────────────────────────────────────
-		// Folded in from the former Settings → Rule-sets sub-tab. These
-		// fields belong with Routing because a rule's `ruleset` conditions
-		// reference them — co-locating avoids tab-hopping when adding a
-		// new rule that needs a custom rule-set.
-		var rsSrc = m.section(form.NamedSection, 'global', 'prism', _('Rule-set sources'),
-			_('Where sing-box fetches the rule-sets referenced by your rules.'));
-		rsSrc.addremove = false;
-
-		var oDelivery = rsSrc.option(form.ListValue, 'ruleset_delivery', _('Delivery'),
-			_('GitHub raw, or the jsDelivr CDN for GitHub-blocked regions.'));
-		oDelivery.value('github',   _('GitHub (raw)'));
-		oDelivery.value('jsdelivr', _('jsDelivr CDN'));
-		oDelivery['default'] = 'github';
-
-		var oDetour = rsSrc.option(form.ListValue, 'ruleset_download_detour', _('Download via'),
-			_('How sing-box fetches rule-sets: straight out the WAN, or ' +
-			  'through the default outbound (the proxy) when the WAN cannot ' +
-			  'reach the rule-set host.'));
-		oDetour.value('direct',  _('Direct (WAN)'));
-		oDetour.value('default', _('Default outbound (proxy)'));
-		oDetour['default'] = 'direct';
-
-		// ── custom rule-sets ────────────────────────────────────────────
-		var cs = m.section(form.GridSection, 'customrs', _('Custom rule-sets'),
-			_('Rule-sets fetched from an explicit URL. Reference one in a ' +
-			  'routing rule by its label.'));
-		cs.addremove = true;
-		cs.anonymous = true;
-		cs.addbtntitle = _('Add');
-
-		var oLabel = cs.option(form.Value, 'label', _('Label'));
-		oLabel.rmempty = false;
-		oLabel.validate = function(section_id, value) {
-			if (!value)
-				return _('A label is required.');
-			if (value.indexOf('/') >= 0)
-				return _('The label must not contain "/".');
-			return true;
-		};
-
-		var oUrl = cs.option(form.Value, 'url', _('URL'));
-		oUrl.rmempty = false;
-		oUrl.placeholder = 'https://…/rules.srs';
-
-		var oFmt = cs.option(form.ListValue, 'format', _('Format'));
-		oFmt.value('binary', _('Binary (.srs)'));
-		oFmt.value('source', _('Source (.json)'));
-		oFmt['default'] = 'binary';
-
 		this.map = m;
 		// Renumber rule `order` from section position, ensure the routing
 		// NamedSection exists, and sweep `condition` sections orphaned by a
@@ -773,9 +754,8 @@ return baseclass.extend({
 			// visual block down.
 			var gaps = { };
 			gaps[_('Rules')]            = '2em';
-			gaps[_('Bypass')]           = '2em';
-			gaps[_('Rule-set sources')] = '2em';
 			gaps[_('Custom rule-sets')] = '2em';
+			gaps[_('Bypass')]           = '2em';
 			node.querySelectorAll('h3').forEach(function(h) {
 				var g = gaps[h.textContent];
 				if (g) h.style.marginTop = g;
