@@ -126,15 +126,6 @@ function relTime(ts) {
 	return Math.floor(diff / 86400) + _('d ago');
 }
 
-// CSS.escape isn't available in older browsers — DIY for the attribute
-// selectors we use to find a row's latency cell by tag. Tags are arbitrary
-// user strings (spaces, slashes, Unicode, emoji), so the escape has to be
-// thorough enough to survive any of those.
-function cssEsc(s) {
-	return String(s).replace(/[^a-zA-Z0-9_-]/g, function(c) {
-		return '\\' + c.charCodeAt(0).toString(16) + ' ';
-	});
-}
 
 // Types with a server endpoint. `direct` is excluded — a direct outbound has
 // no server field (build-config drops it); it is just an optional override.
@@ -173,6 +164,15 @@ return baseclass.extend({
 		// _refreshLatencyCells writes into it after each probe. Stored on
 		// `this` so the per-row Test handlers can mutate it.
 		this._latency = ((data && data[2] && data[2].results) || {});
+
+		// tag → [ live <span> elements that should reflect this tag's
+		// latency ]. Built up as cells render, drained when stale (DOM
+		// disconnected). Used instead of a querySelectorAll on a
+		// data-attribute, because tag values include emoji (🇭🇰, 🇯🇵, …) and
+		// CSS attribute selector escapes for surrogate-pair characters are
+		// not portable across browsers — the old code threw a SyntaxError
+		// on the first emoji tag and broke the whole batch promise.
+		this._latencyCells = {};
 
 		this._renderSubscriptions(m);
 		this._renderNodes(m, data);
@@ -427,14 +427,14 @@ return baseclass.extend({
 			oLatency.editable  = true;
 			// cfgvalue gets the section_id of the row — look up its tag in
 			// UCI, then the cached probe result for that tag. The cell is
-			// tagged with data-prism-tag so _refreshLatencyCell can find it
-			// later without re-rendering the whole grid.
+			// registered with _registerLatencyCell so _refreshLatencyCell
+			// can update it later without re-rendering the whole grid.
 			oLatency.cfgvalue = function(section_id) {
 				var tag = uci.get('prism', section_id, 'tag') || '';
-				return E('span', {
-					'class': 'prism-latency-cell',
-					'data-prism-tag': tag
-				}, [ formatLatency(self._latency[tag]) ]);
+				var span = E('span', { 'class': 'prism-latency-cell' },
+					[ formatLatency(self._latency[tag]) ]);
+				self._registerLatencyCell(tag, span);
+				return span;
 			};
 
 			var oTest = s.taboption('general', form.Button, '_test',
@@ -835,12 +835,10 @@ return baseclass.extend({
 					];
 					if (clashOn) {
 						var tag = n.tag || '';
-						cells.push(E('td', { 'class': 'td' }, [
-							E('span', {
-								'class': 'prism-latency-cell',
-								'data-prism-tag': tag
-							}, [ formatLatency(self._latency[tag]) ])
-						]));
+						var span = E('span', { 'class': 'prism-latency-cell' },
+							[ formatLatency(self._latency[tag]) ]);
+						self._registerLatencyCell(tag, span);
+						cells.push(E('td', { 'class': 'td' }, [ span ]));
 						cells.push(E('td', { 'class': 'td cbi-section-actions' }, [
 							E('button', {
 								'class': 'btn cbi-button cbi-button-neutral',
@@ -893,18 +891,35 @@ return baseclass.extend({
 		});
 	},
 
-	// Update every rendered .prism-latency-cell whose data-prism-tag matches.
-	// Multiple cells can share a tag (the same tag may appear in the manual
-	// grid AND in an open subscription modal); refreshing both is harmless
-	// and lets the user keep both visible while batch tests run.
+	// Register a freshly-rendered latency cell so _refreshLatencyCell can
+	// find it later by tag. We use a plain object map instead of a CSS
+	// attribute selector because tags include emoji (🇭🇰, 🇯🇵, …) whose
+	// surrogate-pair escaping in CSS selectors isn't portable — browsers
+	// vary in whether they accept '\d83c\dded' as a single character. A
+	// JS string key sidesteps the issue entirely.
+	_registerLatencyCell: function(tag, element) {
+		if (!tag) return;
+		var arr = this._latencyCells[tag];
+		if (!arr) { arr = []; this._latencyCells[tag] = arr; }
+		arr.push(element);
+	},
+
+	// Update every live cell registered for this tag. Drops references to
+	// elements no longer in the DOM (e.g. closed subscription modals) so
+	// the map can't grow unbounded across a long-running session.
 	_refreshLatencyCell: function(tag) {
-		var sel = '.prism-latency-cell[data-prism-tag="' + cssEsc(tag) + '"]';
-		var cells = document.querySelectorAll(sel);
+		var arr = this._latencyCells[tag];
+		if (!arr || arr.length === 0) return;
 		var result = this._latency[tag];
-		cells.forEach(function(cell) {
-			while (cell.firstChild) cell.removeChild(cell.firstChild);
-			cell.appendChild(formatLatency(result));
-		});
+		var live = [];
+		for (var i = 0; i < arr.length; i++) {
+			var el = arr[i];
+			if (!el || !el.isConnected) continue;
+			while (el.firstChild) el.removeChild(el.firstChild);
+			el.appendChild(formatLatency(result));
+			live.push(el);
+		}
+		this._latencyCells[tag] = live;
 	},
 
 	// Single-node probe. `btn` is the row's Test button; spin it in place
