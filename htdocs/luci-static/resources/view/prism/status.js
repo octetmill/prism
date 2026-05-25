@@ -110,6 +110,19 @@ var callGetActiveGroups = rpc.declare({
 	expect: { '': {} }
 });
 
+// Live throughput, cumulative session totals, open-connection count, and
+// (when sing-box exposes it) clash-runtime memory. Same daemon-snapshot
+// pattern as get_active_groups — the daemon GETs /connections every 10s,
+// diffs the cumulative byte counters to derive bytes/sec, and writes a
+// small summary file we read here. Returns { error: "clash API disabled" }
+// when the feature flag is off, otherwise an object with zeroed fields
+// before the daemon has primed.
+var callGetClashStats = rpc.declare({
+	object: 'luci.prism',
+	method: 'get_clash_stats',
+	expect: { '': {} }
+});
+
 var TAIL_LINES   = 10;
 var POLL_MS      = 2000;
 var FULL_LOG_LINES = 500;
@@ -149,6 +162,32 @@ function formatLog(lines) {
 function shortVersion(v) {
 	if (!v) return _('unknown version');
 	return String(v).replace(/^sing-box version\s+/, 'sing-box ');
+}
+
+// Compact byte formatting for cumulative totals — binary units (1024)
+// because the clash counters are byte counts and the rest of the OpenWrt
+// UI uses binary too (status overview, interface stats). Picks the unit
+// that fits in three significant digits.
+function formatBytes(n) {
+	n = Number(n) || 0;
+	if (n < 1024) return n + ' B';
+	var units = [ 'KiB', 'MiB', 'GiB', 'TiB' ];
+	var v = n / 1024;
+	for (var i = 0; i < units.length; i++) {
+		if (v < 1024 || i === units.length - 1) {
+			return (v < 10 ? v.toFixed(2) : v < 100 ? v.toFixed(1) : Math.round(v))
+				+ ' ' + units[i];
+		}
+		v /= 1024;
+	}
+}
+
+// Same shape as formatBytes but with a /s suffix. The daemon writes
+// integer bytes/sec so we round to whole units in the smallest band.
+function formatRate(bps) {
+	bps = Number(bps) || 0;
+	if (bps <= 0) return '0 B/s';
+	return formatBytes(bps) + '/s';
 }
 
 // Format the active-outbound tag for display: "<subscription>/<tag>" for a
@@ -205,6 +244,7 @@ return baseclass.extend({
 			callGetLogs(TAIL_LINES).catch(function() { return {}; }),
 			callListOutbounds().catch(function() { return {}; }),
 			callGetActiveGroups().catch(function() { return { groups: [] }; }),
+			callGetClashStats().catch(function() { return {}; }),
 			uci.load('prism').catch(function() { return null; })
 		]);
 	},
@@ -214,6 +254,7 @@ return baseclass.extend({
 		var logsData   = (results && results[1]) || {};
 		var outbounds  = ((results && results[2]) || {}).outbounds || [];
 		var groupsData = (results && results[3]) || { groups: [] };
+		var statsData  = (results && results[4]) || {};
 		var prismText  = formatLog(logsData.prism);
 		var singboxText = formatLog(logsData.singbox);
 		// Cache the outbound list for _updateStatus to reuse when the
@@ -221,6 +262,7 @@ return baseclass.extend({
 		// rarely changes mid-session, so a snapshot at load time is fine;
 		// the user has to leave the tab to add a node anyway.
 		this._outbounds = outbounds;
+		this._running   = !!status.running;
 
 		var active = formatActiveNode(
 			uci.get('prism', 'routing', 'final_outbound') || '', outbounds);
@@ -258,6 +300,19 @@ return baseclass.extend({
 				'class': 'cbi-section',
 				'style': status.enabled ? '' : 'display:none;'
 			}, this._renderRuntime(status, active, subCount, ruleCount, mode)),
+
+			// ── Traffic ────────────────────────────────────────────────
+			// One-row digest of /connections from the daemon snapshot:
+			// instantaneous bytes/sec each way (10s-averaged), open
+			// connection count, and cumulative totals since sing-box
+			// started. Hidden when clash API is off; container is always
+			// present so _updateClashStats can flip it back on without a
+			// page re-render.
+			E('div', {
+				'id': 'prism-traffic-section',
+				'class': 'cbi-section',
+				'style': (status.running && statsData && !statsData.error) ? '' : 'display:none;'
+			}, this._renderTraffic(statsData)),
 
 			// ── Active groups ──────────────────────────────────────────
 			// One row per urltest/selector group, showing the currently
@@ -454,6 +509,50 @@ return baseclass.extend({
 		return g.type || '';
 	},
 
+	// One-line traffic digest. Four columns rendered as inline pieces, not
+	// a table — they're a *single* reading at a moment in time, not a
+	// growing list. Each piece is id'd so _updateClashStats can refresh
+	// the values in place without rebuilding the row (avoids a layout
+	// flicker every 2s).
+	_renderTraffic: function(stats) {
+		stats = stats || {};
+		var hasMem = (typeof stats.mem_inuse === 'number' && stats.mem_inuse > 0);
+		var pieces = [
+			E('span', {}, [
+				E('span', { 'style': 'opacity:0.6;' }, [ '↓ ' ]),
+				E('strong', { 'id': 'prism-traffic-down' }, [ formatRate(stats.down_bps) ])
+			]),
+			E('span', {}, [
+				E('span', { 'style': 'opacity:0.6;' }, [ '↑ ' ]),
+				E('strong', { 'id': 'prism-traffic-up' }, [ formatRate(stats.up_bps) ])
+			]),
+			E('span', { 'style': 'opacity:0.7;' }, [
+				E('span', { 'id': 'prism-traffic-conns' }, [ String(stats.conn_count || 0) ]),
+				' ', _('connections')
+			]),
+			E('span', { 'style': 'opacity:0.7;' }, [
+				_('session:'), ' ',
+				E('span', { 'id': 'prism-traffic-total-down' }, [ formatBytes(stats.total_down) ]),
+				' ↓ / ',
+				E('span', { 'id': 'prism-traffic-total-up' }, [ formatBytes(stats.total_up) ]),
+				' ↑'
+			])
+		];
+		if (hasMem) {
+			pieces.push(E('span', { 'style': 'opacity:0.7;' }, [
+				_('memory:'), ' ',
+				E('span', { 'id': 'prism-traffic-mem' }, [ formatBytes(stats.mem_inuse) ])
+			]));
+		}
+		return [
+			E('h4', { 'style': 'margin:0.2em 0 0.4em;' }, [ _('Traffic') ]),
+			E('div', {
+				'style': 'display:flex; flex-wrap:wrap; gap:1.2em; ' +
+				         'align-items:baseline; font-size:0.95em;'
+			}, pieces)
+		];
+	},
+
 	// Render every group as one row of a compact section table. The empty
 	// case (no groups, clash API off, daemon hasn't primed the snapshot
 	// yet) returns a single message row so the panel never collapses to
@@ -603,6 +702,11 @@ return baseclass.extend({
 	},
 
 	_updateStatus: function(status) {
+		// Cached for _updateClashStats so the Traffic row stays hidden
+		// whenever sing-box isn't actually running — the daemon snapshot
+		// is a tmpfs file that doesn't clear when the service stops.
+		this._running = !!status.running;
+
 		// Reflect any out-of-band change to `enabled` (a CLI `uci set`, a
 		// concurrent admin) into the checkbox state. Don't fire the click
 		// handler — that would loop back into set_enabled.
@@ -683,14 +787,55 @@ return baseclass.extend({
 		});
 	},
 
+	// In-place refresh of the four (or five, with memory) traffic spans.
+	// Re-renders the whole row only when the memory pill needs to appear
+	// or disappear — adding/removing a sibling mid-row would otherwise
+	// shift the others, and gating just that one span by display:none on
+	// every tick is cheap. Hides the whole section when clash API was
+	// disabled at runtime (Settings flipped while we were watching).
+	_updateClashStats: function(stats) {
+		var section = document.getElementById('prism-traffic-section');
+		if (!section) return;
+		stats = stats || {};
+		// Show only when the clash API is on AND sing-box is currently
+		// up — a stale snapshot from a stopped sing-box is worse than
+		// silence. `_running` is set by _updateStatus on each tick;
+		// undefined on the first call (load() already gated the initial
+		// render).
+		if (stats.error || this._running === false) {
+			section.style.display = 'none';
+			return;
+		}
+		section.style.display = '';
+		var memEl  = document.getElementById('prism-traffic-mem');
+		var wantMem = (typeof stats.mem_inuse === 'number' && stats.mem_inuse > 0);
+		if (wantMem !== !!memEl) {
+			while (section.firstChild) section.removeChild(section.firstChild);
+			this._renderTraffic(stats).forEach(function(n) { section.appendChild(n); });
+			return;
+		}
+		var set = function(id, text) {
+			var el = document.getElementById(id);
+			if (el) el.textContent = text;
+		};
+		set('prism-traffic-down',       formatRate(stats.down_bps));
+		set('prism-traffic-up',         formatRate(stats.up_bps));
+		set('prism-traffic-conns',      String(stats.conn_count || 0));
+		set('prism-traffic-total-down', formatBytes(stats.total_down));
+		set('prism-traffic-total-up',   formatBytes(stats.total_up));
+		if (wantMem) set('prism-traffic-mem', formatBytes(stats.mem_inuse));
+	},
+
 	_refreshStatusNow: function() {
 		var self = this;
 		return Promise.all([
 			callGetStatus().catch(function() { return {}; }),
-			callGetActiveGroups().catch(function() { return { groups: [] }; })
+			callGetActiveGroups().catch(function() { return { groups: [] }; }),
+			callGetClashStats().catch(function() { return {}; })
 		]).then(function(r) {
 			self._updateStatus(r[0] || {});
 			self._updateGroups(r[1] || { groups: [] });
+			self._updateClashStats(r[2] || {});
 			self._scheduleStatusRefresh();
 		});
 	},
@@ -709,10 +854,12 @@ return baseclass.extend({
 			// extra round trip is negligible.
 			Promise.all([
 				callGetStatus().catch(function() { return {}; }),
-				callGetActiveGroups().catch(function() { return { groups: [] }; })
+				callGetActiveGroups().catch(function() { return { groups: [] }; }),
+				callGetClashStats().catch(function() { return {}; })
 			]).then(L.bind(function(r) {
 				this._updateStatus(r[0] || {});
 				this._updateGroups(r[1] || { groups: [] });
+				this._updateClashStats(r[2] || {});
 			}, this))
 				.catch(function() {})
 				.finally(L.bind(this._scheduleStatusRefresh, this));
