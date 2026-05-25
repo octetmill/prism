@@ -752,6 +752,9 @@ local function build_outbounds(c)
 	-- need to be referenced because emitting them without their member
 	-- expansion (step 3) would land an unresolved group in sing-box.
 	local include_all = c:get("prism", "global", "include_all_nodes") == "1"
+	-- Collected for the hidden _prism_test_all batch-test group below: every
+	-- concrete-endpoint tag that ends up in `outbounds`, in emission order.
+	local testable_tags = {}
 	for _, ob in ipairs(all_ordered) do
 		local is_group = (ob.type == "urltest" or ob.type == "selector")
 		if referenced[ob.tag] or (include_all and not is_group) then
@@ -764,6 +767,7 @@ local function build_outbounds(c)
 				-- Prism-built WireGuard node → top-level endpoints array.
 				ob._is_endpoint = nil
 				endpoints[#endpoints + 1] = ob
+				testable_tags[#testable_tags + 1] = ob.tag
 			elseif ob.type == "wireguard" then
 				-- A WireGuard node from a subscription is still in the legacy
 				-- outbound schema. Leave it in outbounds (it works on 1.12)
@@ -772,6 +776,7 @@ local function build_outbounds(c)
 					.. tostring(ob.tag) .. "' uses the legacy outbound schema; "
 					.. "it will not work on sing-box 1.13\n")
 				outbounds[#outbounds + 1] = ob
+				testable_tags[#testable_tags + 1] = ob.tag
 			else
 				if (ob.type == "urltest" or ob.type == "selector")
 				   and (type(ob.outbounds) ~= "table" or #ob.outbounds == 0) then
@@ -780,8 +785,32 @@ local function build_outbounds(c)
 						"' has no usable members; sing-box will reject the config\n")
 				end
 				outbounds[#outbounds + 1] = ob
+				if not is_group then
+					testable_tags[#testable_tags + 1] = ob.tag
+				end
 			end
 		end
+	end
+
+	-- Hidden selector group containing every concrete node that ended up in
+	-- the running config. The Nodes panel's "Test all" calls the clash API
+	-- /group/_prism_test_all/delay endpoint to probe every member in parallel
+	-- inside sing-box itself — one HTTP call, one rpcd worker, no fork-storm.
+	-- We use `selector` (not `urltest`) so sing-box doesn't auto-probe these
+	-- members at startup or on its own schedule — we only want probes when
+	-- the user clicks. Default is the first member, which sing-box requires
+	-- for selectors. The leading underscore in the tag avoids collision with
+	-- user-named nodes; the routing dropdown's "Default server" picker still
+	-- shows this tag, which is mildly ugly but harmless — see the matching
+	-- skip in routing.js / nodes.js if cosmetic exclusion is added later.
+	if c:get("prism", "global", "clash_api_enabled") == "1"
+	   and #testable_tags > 0 then
+		outbounds[#outbounds + 1] = {
+			type      = "selector",
+			tag       = "_prism_test_all",
+			outbounds = testable_tags,
+			default   = testable_tags[1]
+		}
 	end
 
 	return outbounds, endpoints
