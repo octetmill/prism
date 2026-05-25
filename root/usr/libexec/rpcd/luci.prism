@@ -734,6 +734,15 @@ local function log_prism(level, msg)
 	os.execute("logger -p daemon." .. level .. " -t prism '" .. safe .. "' 2>/dev/null")
 end
 
+-- Shared helpers, loaded via dofile() with an absolute path (cwd-independent).
+-- prismlib.lua ships in this package alongside this handler, so unlike the
+-- optional luci.jsonc it is always present when the handler is. Declared up
+-- here so the clash-API helpers below (probe_node, read_latency_cache, …) can
+-- use read_file — they ran before this binding existed in an earlier draft and
+-- crashed with "attempt to call global 'read_file' (a nil value)".
+local lib = dofile("/usr/libexec/prism/prismlib.lua")
+local read_file = lib.read_file
+
 -- ─── Node latency probe via sing-box clash API ────────────────────────────
 -- Loopback-only API surface configured by build-config when the user enables
 -- `prism.global.clash_api_enabled` from Settings. Tests are on-demand: the UI
@@ -900,12 +909,6 @@ end
 local function ensure_nodes_dir()
 	os.execute("mkdir -p " .. NODES_DIR .. " 2>/dev/null")
 end
-
--- Shared helpers, loaded via dofile() with an absolute path (cwd-independent).
--- prismlib.lua ships in this package alongside this handler, so unlike the
--- optional luci.jsonc it is always present when the handler is.
-local lib = dofile("/usr/libexec/prism/prismlib.lua")
-local read_file = lib.read_file
 
 -- True when procd reports a running instance of the prism service. This is
 -- authoritative (procd's own view) and scoped to our service, unlike a pgrep
