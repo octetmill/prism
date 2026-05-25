@@ -1037,7 +1037,20 @@ return baseclass.extend({
 		// up to ~5 s before timing out. The RPC clamps to 5 min anyway.
 		var GROUP_TIMEOUT_MS = 60000;
 
-		return callTestGroupDelay('_prism_test_all', '', GROUP_TIMEOUT_MS)
+		// LuCI's XHR-side RPC timeout defaults to 20 s (L.env.rpctimeout),
+		// which is well under our 60 s budget — without overriding, the
+		// browser aborts the XHR before sing-box has finished and the .catch
+		// below fires even though the server-side probe completed cleanly.
+		// L.env.rpctimeout is read at the moment the request is dispatched
+		// (rpc.js → handleCallReply → Request.post), so we set, call (the
+		// XHR is now configured), and restore right after — no need for the
+		// override to live past the synchronous dispatch.
+		var origRpcTimeout = L.env.rpctimeout;
+		L.env.rpctimeout = 120;
+		var p = callTestGroupDelay('_prism_test_all', '', GROUP_TIMEOUT_MS);
+		L.env.rpctimeout = origRpcTimeout;
+
+		return p
 			.then(function(res) {
 				self._testAllRunning = false;
 				if (banner && banner.parentNode)
