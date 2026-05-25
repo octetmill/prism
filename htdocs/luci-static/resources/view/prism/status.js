@@ -100,6 +100,16 @@ var callListOutbounds = rpc.declare({
 	expect: { '': {} }
 });
 
+// Pulls each urltest/selector group's currently-active member (clash `now`)
+// from the snapshot the active-watch daemon writes every 10s — the same
+// view that backs the syslog change-log. Returns { groups: [...] } or
+// { error: "clash API disabled", groups: [] } when the feature is off.
+var callGetActiveGroups = rpc.declare({
+	object: 'luci.prism',
+	method: 'get_active_groups',
+	expect: { '': {} }
+});
+
 var TAIL_LINES   = 10;
 var POLL_MS      = 2000;
 var FULL_LOG_LINES = 500;
@@ -186,7 +196,7 @@ return baseclass.extend({
 	_logTimer:    null,
 
 	load: function() {
-		// All three degrade gracefully — a missing RPC leaves the relevant
+		// All RPCs degrade gracefully — a missing one leaves the relevant
 		// row blank rather than blanking the tab. get_logs returns
 		// { prism: [...], singbox: [...] }; ask for the larger of the two
 		// caps so both boxes can fill independently.
@@ -194,6 +204,7 @@ return baseclass.extend({
 			callGetStatus().catch(function() { return {}; }),
 			callGetLogs(TAIL_LINES).catch(function() { return {}; }),
 			callListOutbounds().catch(function() { return {}; }),
+			callGetActiveGroups().catch(function() { return { groups: [] }; }),
 			uci.load('prism').catch(function() { return null; })
 		]);
 	},
@@ -202,6 +213,7 @@ return baseclass.extend({
 		var status     = (results && results[0]) || {};
 		var logsData   = (results && results[1]) || {};
 		var outbounds  = ((results && results[2]) || {}).outbounds || [];
+		var groupsData = (results && results[3]) || { groups: [] };
 		var prismText  = formatLog(logsData.prism);
 		var singboxText = formatLog(logsData.singbox);
 		// Cache the outbound list for _updateStatus to reuse when the
@@ -246,6 +258,20 @@ return baseclass.extend({
 				'class': 'cbi-section',
 				'style': status.enabled ? '' : 'display:none;'
 			}, this._renderRuntime(status, active, subCount, ruleCount, mode)),
+
+			// ── Active groups ──────────────────────────────────────────
+			// One row per urltest/selector group, showing the currently
+			// active member (clash `now`), its last-known latency, and
+			// the group's own tuning (interval/tolerance for urltest,
+			// "selector" for manual). Hidden when clash API is off, when
+			// the daemon has nothing yet, or when there are no groups —
+			// the container is always present so _updateGroups can flip
+			// visibility without re-rendering the page.
+			E('div', {
+				'id': 'prism-groups-section',
+				'class': 'cbi-section',
+				'style': (Array.isArray(groupsData.groups) && groupsData.groups.length) ? '' : 'display:none;'
+			}, this._renderGroups(groupsData)),
 
 			// ── Recent activity ────────────────────────────────────────
 			// Two stacked boxes — Prism control-plane events (sparse) and
@@ -388,6 +414,93 @@ return baseclass.extend({
 				enabled
 					? _('— sing-box runs and autostarts at boot')
 					: _('— installed but dormant; no service, no autostart')
+			])
+		];
+	},
+
+	// Compact latency badge, mirroring the nodes panel's colour bands
+	// (the constants there are private to that module; the bands are
+	// repeated here verbatim because shipping a shared utils module just
+	// for one function isn't worth a new require for the status page).
+	_renderLatency: function(ms) {
+		if (typeof ms !== 'number' || ms <= 0)
+			return E('span', { 'style': 'opacity:0.5;' }, [ '—' ]);
+		var cls = 'label-success';
+		if (ms >= 800)      cls = 'label-danger';
+		else if (ms >= 300) cls = 'label-warning';
+		return E('span', {
+			'class': cls,
+			'style': 'padding:1px 6px; border-radius:3px; font-size:0.85em;'
+		}, [ ms + 'ms' ]);
+	},
+
+	// "urltest · every 1m0s · ±50ms" / "selector → default: HK-01" / "selector"
+	// — surfaces the configured tuning right next to the evidence of it
+	// churning, so the user can read both at once without leaving the page.
+	_renderGroupMeta: function(g) {
+		if (g.type === 'urltest') {
+			var parts = [ _('urltest') ];
+			if (g.interval && g.interval !== '')
+				parts.push(_('every %s').format(g.interval));
+			if (g.tolerance && g.tolerance !== '')
+				parts.push('±' + g.tolerance + 'ms');
+			return parts.join(' · ');
+		}
+		if (g.type === 'selector') {
+			if (g.default && g.default !== '')
+				return _('selector · default: %s').format(g.default);
+			return _('selector');
+		}
+		return g.type || '';
+	},
+
+	// Render every group as one row of a compact section table. The empty
+	// case (no groups, clash API off, daemon hasn't primed the snapshot
+	// yet) returns a single message row so the panel never collapses to
+	// nothing once it's been shown — the caller hides the whole section
+	// when there are no groups, so this branch is only seen mid-flip.
+	_renderGroups: function(data) {
+		// luci.jsonc can't tell empty arrays from empty objects at the Lua
+		// boundary — an empty `out = {}` in get_active_groups serializes
+		// as `{}`, which arrives here as an object, not an array. The
+		// section is hidden in that case anyway, but _renderGroups is
+		// still invoked to build the contents; coerce defensively so the
+		// `.forEach` below doesn't blow up the whole tab.
+		var groups = (data && Array.isArray(data.groups)) ? data.groups : [];
+		var rows = [];
+		var self = this;
+		groups.forEach(function(g) {
+			rows.push(E('tr', { 'class': 'tr cbi-section-table-row' }, [
+				E('td', { 'class': 'td', 'style': 'font-weight:bold;' }, [ g.tag ]),
+				E('td', { 'class': 'td', 'style': 'opacity:0.6;' }, [ '→' ]),
+				E('td', { 'class': 'td' }, [ g.now || E('span', { 'style': 'opacity:0.5;' }, [ '—' ]) ]),
+				E('td', { 'class': 'td' }, [ self._renderLatency(g.delay_ms) ]),
+				E('td', {
+					'class': 'td',
+					'style': 'font-size:0.85em; opacity:0.7;'
+				}, [ self._renderGroupMeta(g) ])
+			]));
+		});
+		if (rows.length === 0) {
+			rows.push(E('tr', { 'class': 'tr cbi-section-table-row' }, [
+				E('td', {
+					'class': 'td',
+					'colspan': '5',
+					'style': 'opacity:0.6; font-style:italic;'
+				}, [
+					(data && data.error)
+						? _('Active-node tracking is disabled — enable the clash API in Settings to see this.')
+						: _('No groups configured yet, or daemon still priming.')
+				])
+			]));
+		}
+		return [
+			E('h4', { 'style': 'margin:0.2em 0 0.4em;' }, [ _('Groups') ]),
+			E('table', {
+				'class': 'table cbi-section-table',
+				'id': 'prism-groups-table'
+			}, [
+				E('tbody', {}, rows)
 			])
 		];
 	},
@@ -554,10 +667,30 @@ return baseclass.extend({
 		}
 	},
 
+	// Replace the Groups section's rows with the new snapshot. Hides the
+	// whole section when the snapshot is empty so the page collapses
+	// quietly back to the no-groups layout if the user deletes their last
+	// group (or turns clash API off) without reloading the tab.
+	_updateGroups: function(data) {
+		var section = document.getElementById('prism-groups-section');
+		if (!section) return;
+		var groups = (data && Array.isArray(data.groups)) ? data.groups : [];
+		section.style.display = (groups.length > 0) ? '' : 'none';
+		if (groups.length === 0) return;
+		while (section.firstChild) section.removeChild(section.firstChild);
+		this._renderGroups(data).forEach(function(n) {
+			section.appendChild(n);
+		});
+	},
+
 	_refreshStatusNow: function() {
 		var self = this;
-		return callGetStatus().then(function(s) {
-			self._updateStatus(s || {});
+		return Promise.all([
+			callGetStatus().catch(function() { return {}; }),
+			callGetActiveGroups().catch(function() { return { groups: [] }; })
+		]).then(function(r) {
+			self._updateStatus(r[0] || {});
+			self._updateGroups(r[1] || { groups: [] });
 			self._scheduleStatusRefresh();
 		});
 	},
@@ -570,7 +703,17 @@ return baseclass.extend({
 		if (this._statusTimer)
 			clearTimeout(this._statusTimer);
 		this._statusTimer = setTimeout(L.bind(function() {
-			callGetStatus().then(L.bind(this._updateStatus, this))
+			// Fan out both reads in parallel so the tick still fits the
+			// 2s budget even when one side stalls. The active-groups read
+			// is a cheap file read on the daemon's tmpfs snapshot, so the
+			// extra round trip is negligible.
+			Promise.all([
+				callGetStatus().catch(function() { return {}; }),
+				callGetActiveGroups().catch(function() { return { groups: [] }; })
+			]).then(L.bind(function(r) {
+				this._updateStatus(r[0] || {});
+				this._updateGroups(r[1] || { groups: [] });
+			}, this))
 				.catch(function() {})
 				.finally(L.bind(this._scheduleStatusRefresh, this));
 		}, this), POLL_MS);

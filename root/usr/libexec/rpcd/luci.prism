@@ -930,16 +930,27 @@ local function ensure_nodes_dir()
 	os.execute("mkdir -p " .. NODES_DIR .. " 2>/dev/null")
 end
 
--- True when procd reports a running instance of the prism service. This is
--- authoritative (procd's own view) and scoped to our service, unlike a pgrep
--- that would also match a sing-box started outside Prism. Note this is the
--- live runtime state, distinct from the UCI `enabled` autostart-at-boot flag.
+-- True when procd reports the named `singbox` procd instance is running.
+-- Must walk the parsed JSON to that specific instance: the prism service
+-- may also carry an `active_watch` instance when clash API is enabled,
+-- and a substring grep for `"running":true` would happily match either
+-- one — exactly the LAN-blackhole defeat from the code review. We can't
+-- rely on ubus's `instance` parameter to scope the response either: on
+-- some procd versions (observed on OpenWrt 24.10 builds) the parameter
+-- is accepted but ignored, and the reply still carries every instance.
+-- Authoritative (procd's own view), distinct from the UCI `enabled` flag.
 local function service_running()
 	local f = io.popen("ubus call service list '{\"name\":\"prism\"}' 2>/dev/null")
 	if not f then return false end
 	local out = f:read("*a") or ""
 	f:close()
-	return out:find('"running":%s*true') ~= nil
+	if out == "" or not _jsonc_ok then return false end
+	local ok, parsed = pcall(_jsonc.parse, out)
+	if not ok or type(parsed) ~= "table" then return false end
+	local svc = parsed.prism
+	if type(svc) ~= "table" or type(svc.instances) ~= "table" then return false end
+	local inst = svc.instances.singbox
+	return type(inst) == "table" and inst.running == true
 end
 
 -- Detect whether the active outbound set changed since sing-box was last
@@ -1603,6 +1614,79 @@ local methods = {
 				}
 			end
 			return { nodes = out }
+		end
+	},
+
+	-- Return the live state of every urltest/selector group: the currently
+	-- active member (the clash `now` field) plus its last-known latency.
+	-- Source is the snapshot file the active-watch daemon writes every 10s,
+	-- not a fresh /proxies GET — keeps the RPC cheap (no extra HTTP round
+	-- trip on every Status-page tick), and ties the UI to the same view the
+	-- daemon logs against, so what the Prism log says flipped matches what
+	-- the Groups panel shows is active.
+	--
+	-- Joins UCI on the group tag to surface `interval` / `tolerance` /
+	-- `default` so the user can read each group's tuning right next to the
+	-- evidence of it churning. UCI is open as a cursor only once for the
+	-- whole list — group counts are small (a handful).
+	--
+	-- Reports the same `error = "clash API disabled"` as test_node when the
+	-- feature flag is off, so the UI can render a consistent hint.
+	get_active_groups = {
+		call = function()
+			local c = uci_cursor()
+			local enabled = c:get("prism", "global", "clash_api_enabled")
+			if enabled ~= "1" then
+				c:close()
+				return { error = "clash API disabled", groups = {} }
+			end
+
+			-- Index UCI group sections (type=node with urltest/selector
+			-- type) by their tag, so the snapshot tag maps back to the
+			-- user's configured interval/tolerance/default.
+			local uci_groups = {}
+			c:foreach("prism", "node", function(s)
+				if s.type == "urltest" or s.type == "selector" then
+					if s.tag and s.tag ~= "" then
+						uci_groups[s.tag] = {
+							type      = s.type,
+							interval  = s.urltest_interval or "",
+							tolerance = s.urltest_tolerance or "",
+							default   = s.selector_default or ""
+						}
+					end
+				end
+			end)
+			c:close()
+
+			local snap = read_file("/var/etc/prism/.active-nodes.json")
+			if not snap or snap == "" or not _jsonc_ok then
+				return { groups = {}, updated_at = 0 }
+			end
+			local ok, parsed = pcall(_jsonc.parse, snap)
+			if not ok or type(parsed) ~= "table" or type(parsed.groups) ~= "table" then
+				return { groups = {}, updated_at = 0 }
+			end
+
+			local out = {}
+			for tag, entry in pairs(parsed.groups) do
+				local u = uci_groups[tag] or {}
+				out[#out + 1] = {
+					tag       = tag,
+					type      = (entry.type == "URLTest") and "urltest"
+					            or (entry.type == "Selector") and "selector"
+					            or string.lower(tostring(entry.type or "")),
+					now       = entry.now or "",
+					delay_ms  = entry.delay_ms,
+					interval  = u.interval or "",
+					tolerance = u.tolerance or "",
+					default   = u.default or ""
+				}
+			end
+			-- Stable order so the UI rows don't jump on each refresh —
+			-- pairs() over the snapshot is unordered. Sort by tag.
+			table.sort(out, function(a, b) return a.tag < b.tag end)
+			return { groups = out, updated_at = tonumber(parsed.updated_at) or 0 }
 		end
 	},
 

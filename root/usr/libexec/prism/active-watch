@@ -1,0 +1,310 @@
+#!/usr/bin/env lua
+-- SPDX-License-Identifier: GPL-3.0-only
+-- Copyright (C) 2026 OctetMill
+--
+-- Active-node watcher — long-running daemon that polls sing-box's clash API
+-- at /proxies every POLL_S seconds and logs to syslog whenever the currently
+-- active member (the `now` field) of any urltest or selector group changes.
+-- Provides the diagnostic trail a user needs to decide whether their urltest
+-- `tolerance` / `interval` are tuned too aggressively for their network.
+--
+-- Lifecycle: a procd instance declared by /etc/init.d/prism alongside the
+-- sing-box instance, gated on UCI prism.global.clash_api_enabled. Stops and
+-- starts with the service; respawned by procd if it crashes.
+--
+-- Snapshot at /var/etc/prism/.active-nodes.json (tmpfs — cleared on reboot,
+-- which is fine: the first tick after boot primes the snapshot without
+-- emitting a change line). The same file backs the Status page's Groups
+-- panel via the get_active_groups RPC, so the UI sees the same view this
+-- watcher logs against.
+
+local jsonc = require "luci.jsonc"
+local lib   = dofile("/usr/libexec/prism/prismlib.lua")
+local read_file = lib.read_file
+
+local CLASH_HOST = "127.0.0.1:9090"
+local SNAPSHOT   = "/var/etc/prism/.active-nodes.json"
+local POLL_S     = 10
+
+local function logmsg(level, msg)
+	-- Tag names ultimately come from URL-decoded subscription content, so a
+	-- node tag may legitimately contain any byte including newlines, NULs
+	-- and other control chars (an attacker subscription could also craft
+	-- one deliberately). Scrub control chars to spaces BEFORE shell-quoting
+	-- so a literal `\n` in the message can't fan a single logger call out
+	-- into multiple syslog lines — which the Status page log split would
+	-- then mis-attribute as additional `prism`-tagged events.
+	local safe = msg:gsub("[%c]", " "):gsub("'", "'\\''")
+	os.execute("logger -p daemon." .. level .. " -t prism '" .. safe .. "' 2>/dev/null")
+end
+
+-- One GET to the loopback clash API. Returns the parsed response object,
+-- or nil on any failure (port not listening yet, malformed body, etc.).
+-- Transient failures are silent: the daemon retries on the next tick.
+local function fetch_proxies()
+	local f = io.popen("uclient-fetch --timeout=5 -qO- 'http://"
+		.. CLASH_HOST .. "/proxies' 2>/dev/null")
+	if not f then return nil end
+	local body = f:read("*a") or ""
+	f:close()
+	if body == "" then return nil end
+	local ok, parsed = pcall(jsonc.parse, body)
+	if not ok or type(parsed) ~= "table" then return nil end
+	return parsed
+end
+
+-- Ask procd for sing-box's current pid. Returns the pid (a positive
+-- number) on success, or nil when procd reports the instance as
+-- stopped / missing / unparseable. Pid changes are our authoritative
+-- signal that sing-box restarted between ticks — a fetch_proxies gap
+-- only catches restarts slow enough to fail at least one 10s poll, and
+-- a config-save-driven restart commonly completes inside that window.
+local function singbox_pid()
+	local f = io.popen("ubus call service list '{\"name\":\"prism\",\"instance\":\"singbox\"}' 2>/dev/null")
+	if not f then return nil end
+	local out = f:read("*a") or ""
+	f:close()
+	if out == "" then return nil end
+	local ok, parsed = pcall(jsonc.parse, out)
+	if not ok or type(parsed) ~= "table" then return nil end
+	local svc = parsed.prism
+	if type(svc) ~= "table" or type(svc.instances) ~= "table" then return nil end
+	local inst = svc.instances.singbox
+	if type(inst) ~= "table" then return nil end
+	return tonumber(inst.pid)
+end
+
+-- Extract the relevant slice of the /proxies response: one entry per
+-- urltest/selector group, carrying the active member tag and (when
+-- available) its most recent latency. Internal helper groups (tag starts
+-- with "_", e.g. _prism_test_all) are filtered out — they're our own
+-- machinery, not something the user configured or wants to see flip.
+local function group_state(parsed)
+	local out = {}
+	if type(parsed.proxies) ~= "table" then return out end
+	for tag, p in pairs(parsed.proxies) do
+		if type(p) == "table"
+			and (p.type == "URLTest" or p.type == "Selector")
+			and type(p.now) == "string" and p.now ~= ""
+			and tag:sub(1, 1) ~= "_"
+		then
+			local entry = { now = p.now, type = p.type }
+			-- Latency lives on the member proxy's history, not the group's.
+			local member = parsed.proxies[p.now]
+			if type(member) == "table" and type(member.history) == "table" then
+				local last = member.history[#member.history]
+				if last and type(last.delay) == "number" and last.delay > 0 then
+					entry.delay_ms = last.delay
+				end
+			end
+			out[tag] = entry
+		end
+	end
+	return out
+end
+
+local function save_snapshot(state)
+	os.execute("mkdir -p /var/etc/prism 2>/dev/null")
+	local tmp = SNAPSHOT .. ".tmp"
+	local f = io.open(tmp, "w")
+	if not f then return end
+	f:write(jsonc.stringify({ groups = state, updated_at = os.time() }))
+	f:close()
+	os.rename(tmp, SNAPSHOT)
+end
+
+local function load_snapshot()
+	local raw = read_file(SNAPSHOT)
+	if not raw or raw == "" then return {} end
+	local ok, parsed = pcall(jsonc.parse, raw)
+	if not ok or type(parsed) ~= "table" then return {} end
+	return (type(parsed.groups) == "table") and parsed.groups or {}
+end
+
+-- previous: the last tick's state, used to detect changes.
+-- primed:  true once we've seen at least one successful poll. On a fresh
+-- boot (snapshot empty) we still take a poll and stash it, but we don't
+-- emit "changed" / "added" lines for groups going from nothing to their
+-- first reading — that isn't a flip, it's the initial inventory.
+-- fail_streak: count of consecutive fetch failures, so we can surface a
+-- single warning after a meaningful run of failures (sing-box restart,
+-- crash, clash port wedged) instead of silently going stale. Resets on
+-- the next success, logging a recovery line so the gap is bracketed in
+-- the syslog timeline.
+local FAIL_WARN_AFTER = 6  -- ~one minute of failures at 10s ticks
+local POST_EVENT_WINDOW_S = 60  -- relabel-late-arrivals horizon, see below
+
+local previous = load_snapshot()
+local primed   = next(previous) ~= nil
+local fail_streak = 0
+-- Captured at daemon start so the first iteration doesn't mis-detect a
+-- restart against nil. If procd is briefly unreachable, last_pid stays
+-- at its last known value through the gap — we only treat a true
+-- transition (last and new are both numbers and they differ) as a
+-- restart, so a pid lookup failure can't synthesise a fake one.
+local last_pid = singbox_pid()
+
+-- Post-event relabel window. When an event (prime / sing-box restart /
+-- outage recovery) fires, sing-box's urltest hasn't necessarily settled
+-- the first probe of every member yet — groups with no `now` are
+-- filtered out by group_state() and arrive in /proxies one or two ticks
+-- later. Without this, those late arrivals get logged as `now tracked`
+-- (the "brand new group" branch in the diff loop), which is misleading:
+-- the group existed before the restart, it was just slow to probe. We
+-- snapshot the known tag set at each event and, for POST_EVENT_WINDOW_S
+-- afterwards, relabel any late-arriving pre-event tag with the same
+-- event context so the syslog reads consistently.
+local known_pre_event   = {}
+local event_context     = "starting"
+local post_event_until  = 0
+
+-- Emit one "active node is X" line per group. Used in two situations
+-- that both mean "the user just lost track of the live selection":
+--   - prime: daemon's first successful poll — they need to know what
+--     state we're attaching to, not just future flips.
+--   - recovery: clash API was unreachable for >=1 tick (sing-box
+--     likely restarted; procd needs a beat to stop the old process
+--     and start the new one, which fails at least one 10s poll).
+--     The selections may have changed across the restart; announce
+--     the current ones so the syslog has them on the record without
+--     the user having to dig into the Status page.
+-- Sorted by tag for stable output across runs.
+local function log_initial(current, context)
+	local tags = {}
+	for tag in pairs(current) do tags[#tags + 1] = tag end
+	table.sort(tags)
+	for _, tag in ipairs(tags) do
+		local entry = current[tag]
+		local msg = string.format(
+			"group '%s': %s with active node %s",
+			tag, context, entry.now)
+		if entry.delay_ms then
+			msg = msg .. string.format(" (%dms)", entry.delay_ms)
+		end
+		logmsg("info", msg)
+	end
+end
+
+while true do
+	local parsed = fetch_proxies()
+	if parsed then
+		if fail_streak >= FAIL_WARN_AFTER then
+			logmsg("info", string.format(
+				"clash API reachable again after %d failed polls",
+				fail_streak))
+		end
+		local had_outage = (fail_streak > 0)
+		fail_streak = 0
+
+		-- pid check after a successful fetch so we don't burn an ubus
+		-- call when we already know things are degraded. A pid change
+		-- here means: between our last successful tick and this one,
+		-- procd restarted sing-box — which is the primary case we want
+		-- to catch even when the restart is faster than our 10s poll.
+		local pid = singbox_pid()
+		local pid_changed = (last_pid and pid and pid ~= last_pid)
+		if pid then last_pid = pid end
+
+		local current = group_state(parsed)
+
+		if (not primed) or had_outage or pid_changed then
+			-- Cold prime, post-outage recovery, or sing-box pid changed
+			-- under us — in each case the previous snapshot is either
+			-- empty or no longer authoritative about the new sing-box's
+			-- selections. Re-announce every group so the user sees which
+			-- node each urltest/selector landed on after the event, not
+			-- just future flips. Diff loop skipped this tick; next
+			-- tick's diff runs against the snapshot we save below.
+			event_context = (not primed) and "starting"
+				or pid_changed and "after sing-box restart"
+				or "resuming"
+			-- Snapshot the union of last-known and currently-visible
+			-- tags for late-arrival relabeling. Two cases this covers:
+			-- (a) tags in `previous` not in `current` — group existed
+			--     before the event but its post-event probe hasn't
+			--     settled yet (sing-box's `now` is empty, filtered out);
+			-- (b) tags in `current` not in `previous` — group was
+			--     announced THIS tick, so future ticks shouldn't treat
+			--     it as a brand-new arrival either.
+			known_pre_event = {}
+			for tag in pairs(previous) do known_pre_event[tag] = true end
+			for tag in pairs(current)  do known_pre_event[tag] = true end
+			post_event_until = os.time() + POST_EVENT_WINDOW_S
+			log_initial(current, event_context)
+		elseif primed then
+			local in_window = (os.time() < post_event_until)
+			-- Member changed within a still-existing group: the central
+			-- diagnostic — this is the "is my urltest flipping too
+			-- often" signal the user is hunting.
+			for tag, entry in pairs(current) do
+				local old = previous[tag]
+				if old and old.now and old.now ~= entry.now then
+					local msg = string.format(
+						"group '%s': active node %s -> %s",
+						tag, old.now, entry.now)
+					if entry.delay_ms then
+						msg = msg .. string.format(" (%dms)", entry.delay_ms)
+					end
+					logmsg("info", msg)
+				elseif not old then
+					-- Tag not in last tick's snapshot. Two cases that
+					-- need distinct labels:
+					if in_window and known_pre_event[tag] then
+						-- (1) The group existed before the most recent
+						-- event but its probe is only now reporting a
+						-- `now`. Relabel with the same context the
+						-- event was logged under so the syslog reads
+						-- consistently — the user sees one event line
+						-- per group regardless of whether sing-box's
+						-- internal probe order put it on tick N or N+1.
+						local msg = string.format(
+							"group '%s': %s with active node %s",
+							tag, event_context, entry.now)
+						if entry.delay_ms then
+							msg = msg .. string.format(" (%dms)", entry.delay_ms)
+						end
+						logmsg("info", msg)
+					else
+						-- (2) Genuinely new group: appeared in /proxies
+						-- since the last event (user added it, or a
+						-- reload pulled it into the running config).
+						logmsg("info", string.format(
+							"group '%s': now tracked, active node %s",
+							tag, entry.now))
+					end
+				end
+			end
+			-- Group disappeared between ticks. Suppress the line during
+			-- the post-event window for tags that were in the pre-event
+			-- set — they're more likely still mid-probe than truly gone,
+			-- and a transient "no longer present" / "now tracked" pair
+			-- on every restart would be pure noise. Genuine removals
+			-- (tag wasn't in pre-event set) and removals that persist
+			-- past the window are still logged.
+			for tag, _ in pairs(previous) do
+				if not current[tag] then
+					if not (in_window and known_pre_event[tag]) then
+						logmsg("info", string.format(
+							"group '%s': no longer present", tag))
+					end
+				end
+			end
+		end
+
+		save_snapshot(current)
+		previous = current
+		primed   = true
+	else
+		fail_streak = fail_streak + 1
+		-- One warning at the threshold, not one per failed tick — the
+		-- syslog tail on the Status page is finite and the user needs
+		-- one clear signal, not a flood. Subsequent failures stay
+		-- silent until the streak breaks (which logs the recovery).
+		if fail_streak == FAIL_WARN_AFTER then
+			logmsg("warning", string.format(
+				"clash API unreachable for %d consecutive polls (~%ds) — sing-box may be down or the clash listener not bound",
+				fail_streak, fail_streak * POLL_S))
+		end
+	end
+	os.execute("sleep " .. tostring(POLL_S))
+end
