@@ -100,7 +100,7 @@ var callListOutbounds = rpc.declare({
 	expect: { '': {} }
 });
 
-var TAIL_LINES   = 20;
+var TAIL_LINES   = 10;
 var POLL_MS      = 2000;
 var FULL_LOG_LINES = 500;
 
