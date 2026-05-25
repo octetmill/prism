@@ -52,6 +52,89 @@ var callListOutbounds = rpc.declare({
 	expect: { '': {} }
 });
 
+var callTestNode = rpc.declare({
+	object: 'luci.prism',
+	method: 'test_node',
+	params: ['tag', 'timeout_ms'],
+	expect: { '': {} }
+});
+
+var callGetLastLatency = rpc.declare({
+	object: 'luci.prism',
+	method: 'get_last_latency',
+	expect: { '': {} }
+});
+
+// Background-runner RPCs for "Test all": test_all_start forks the runner
+// and returns immediately (no XHR-timeout issue — the heavy lifting is
+// fire-and-forget on the device); test_all_status reads the runner's
+// tiny progress file. UI polls the status while refreshing cells from
+// get_last_latency between ticks, so results appear as the runner
+// writes them.
+var callTestAllStart = rpc.declare({
+	object: 'luci.prism',
+	method: 'test_all_start',
+	params: ['tags'],
+	expect: { '': {} }
+});
+
+var callTestAllStatus = rpc.declare({
+	object: 'luci.prism',
+	method: 'test_all_status',
+	expect: { '': {} }
+});
+
+// Per-probe timeout passed to the clash API's delay endpoint. 3 s is a
+// balance — a working proxy answers gstatic.com/generate_204 in well under
+// a second, and a node that needs longer is unlikely to be a useful pick.
+// The dominant time in a batch is the per-unreachable-node timeout, so
+// shorter values here directly shorten the batch.
+var TEST_TIMEOUT_MS = 3000;
+
+
+// Color-coded latency badge. Maps a probe result `{ delay_ms?, error? }` to a
+// span styled with the same label-* classes the rest of Prism uses.
+//  green   < 150 ms   (close / direct path)
+//  yellow  < 500 ms   (workable but slow)
+//  red     ≥ 500 ms   or any error
+function formatLatency(result) {
+	if (!result)
+		return E('span', { 'style': 'opacity:0.45;' }, [ '—' ]);
+	if (typeof result.delay_ms === 'number') {
+		var ms = result.delay_ms;
+		var cls = (ms < 150) ? 'label-success'
+		        : (ms < 500) ? 'label-warning'
+		        :              'label-danger';
+		return E('span', {
+			'class': cls,
+			'style': 'padding:1px 6px; border-radius:3px;',
+			'title': result.tested_at ? _('Tested %s').format(relTime(result.tested_at)) : ''
+		}, [ ms + ' ms' ]);
+	}
+	// Probe failed: the cached `error` string is sing-box's own message
+	// (mapped via probe_node), e.g. "unreachable", "proxy not in running
+	// config". Show it on hover so the cell doesn't grow to the longest
+	// error length.
+	var msg = result.error || _('error');
+	return E('span', {
+		'class': 'label-danger',
+		'style': 'padding:1px 6px; border-radius:3px; cursor:help;',
+		'title': msg + (result.tested_at ? '\n' + _('Tested %s').format(relTime(result.tested_at)) : '')
+	}, [ msg.length > 14 ? msg.substring(0, 13) + '…' : msg ]);
+}
+
+// "2m ago" / "1h ago" / "3d ago" style relative timestamp from a unix epoch.
+function relTime(ts) {
+	if (!ts) return '';
+	var diff = Math.floor(Date.now() / 1000 - ts);
+	if (diff < 5)       return _('just now');
+	if (diff < 60)      return diff + _('s ago');
+	if (diff < 3600)    return Math.floor(diff / 60)    + _('m ago');
+	if (diff < 86400)   return Math.floor(diff / 3600)  + _('h ago');
+	return Math.floor(diff / 86400) + _('d ago');
+}
+
+
 // Types with a server endpoint. `direct` is excluded — a direct outbound has
 // no server field (build-config drops it); it is just an optional override.
 var SERVER_TYPES    = ['vless','vmess','trojan','shadowsocks','hysteria2','tuic','anytls','wireguard','socks'];
@@ -71,17 +154,33 @@ function depAny(o, field, values, extra) {
 
 return baseclass.extend({
 	load: function() {
-		// A failed list_outbounds must not kill the tab — degrade to an
-		// empty outbound list instead.
+		// A failed list_outbounds or get_last_latency must not kill the tab
+		// — degrade to an empty list / empty cache instead.
 		return Promise.all([
 			uci.load('prism'),
-			callListOutbounds().catch(function() { return {}; })
+			callListOutbounds().catch(function() { return {}; }),
+			callGetLastLatency().catch(function() { return { results: {} }; })
 		]);
 	},
 
 	render: function(data) {
 		var self = this;
 		var m = new form.Map('prism');
+
+		// Latency cache: { tag → { delay_ms?, error?, tested_at } }. The
+		// formatLatency helper reads from here on every grid render and
+		// _refreshLatencyCells writes into it after each probe. Stored on
+		// `this` so the per-row Test handlers can mutate it.
+		this._latency = ((data && data[2] && data[2].results) || {});
+
+		// tag → [ live <span> elements that should reflect this tag's
+		// latency ]. Built up as cells render, drained when stale (DOM
+		// disconnected). Used instead of a querySelectorAll on a
+		// data-attribute, because tag values include emoji (🇭🇰, 🇯🇵, …) and
+		// CSS attribute selector escapes for surrogate-pair characters are
+		// not portable across browsers — the old code threw a SyntaxError
+		// on the first emoji tag and broke the whole batch promise.
+		this._latencyCells = {};
 
 		this._renderSubscriptions(m);
 		this._renderNodes(m, data);
@@ -91,16 +190,26 @@ return baseclass.extend({
 		ordersave.install(m, 'node');
 
 		return m.render().then(function(node) {
-			// "Sync all now" sits next to the Add button of the
-			// subscriptions section — the first .cbi-section-create in
-			// document order, since subscriptions render before nodes.
-			var create = node.querySelector('.cbi-section-create');
-			if (create)
-				create.appendChild(E('button', {
+			// Both batch actions ("Sync all now" + "Test all") sit next to
+			// the Subscriptions section's Add button so they're visible
+			// without scrolling past a long node list. The first
+			// .cbi-section-create in document order is the subscriptions
+			// one since that section renders first.
+			var clashOn = (uci.get('prism', 'global', 'clash_api_enabled') === '1');
+			var subsCreate = node.querySelector('.cbi-section-create');
+			if (subsCreate) {
+				subsCreate.appendChild(E('button', {
 					'class': 'btn cbi-button cbi-button-neutral',
 					'style': 'margin-left:0.4em',
 					'click': ui.createHandlerFn(self, '_syncAll')
 				}, [ _('Sync all now') ]));
+				if (clashOn)
+					subsCreate.appendChild(E('button', {
+						'class': 'btn cbi-button cbi-button-neutral',
+						'style': 'margin-left:0.4em',
+						'click': ui.createHandlerFn(self, '_testAll')
+					}, [ _('Test all') ]));
+			}
 			// Breathing room between the two GridSections — matches the
 			// gap between sibling sections on the stock DHCP page.
 			var nodeSection = node.querySelector('#cbi-prism-node');
@@ -211,8 +320,12 @@ return baseclass.extend({
 	},
 
 	_renderNodes: function(m, data) {
+		var self = this;
 		var outbounds = (data && data[1] && Array.isArray(data[1].outbounds))
 			? data[1].outbounds : [];
+		// Used by _collectAllTags to drive "Test all" — same data the row
+		// renderer already consumes, just kept available across handlers.
+		this._outbounds = outbounds;
 
 		// Map sub_id → human-readable name and display order. Two subscriptions
 		// can carry nodes with identical tags; the label shown in the dropdown
@@ -303,6 +416,42 @@ return baseclass.extend({
 		 ['direct','Direct']].forEach(function(t) {
 			oType.value(t[0], t[1]);
 		});
+
+		// ── Latency + Test (grid-only) ───────────────────────────────────
+		// Both columns appear only when clash_api is enabled; otherwise the
+		// Test button would just emit a "clash API disabled" notification on
+		// every click. Reading the UCI flag from the loaded prism config
+		// (load() already pulled it in) keeps this synchronous.
+		var clashOn = (uci.get('prism', 'global', 'clash_api_enabled') === '1');
+		if (clashOn) {
+			var oLatency = s.taboption('general', form.DummyValue, '_latency',
+				_('Latency'));
+			oLatency.modalonly = false;
+			oLatency.editable  = true;
+			// cfgvalue gets the section_id of the row — look up its tag in
+			// UCI, then the cached probe result for that tag. The cell is
+			// registered with _registerLatencyCell so _refreshLatencyCell
+			// can update it later without re-rendering the whole grid.
+			oLatency.cfgvalue = function(section_id) {
+				var tag = uci.get('prism', section_id, 'tag') || '';
+				var span = E('span', { 'class': 'prism-latency-cell' },
+					[ formatLatency(self._latency[tag]) ]);
+				self._registerLatencyCell(tag, span);
+				return span;
+			};
+
+			var oTest = s.taboption('general', form.Button, '_test',
+				_('Test'));
+			oTest.modalonly  = false;
+			oTest.editable   = true;
+			oTest.inputtitle = _('Test');
+			oTest.inputstyle = 'neutral';
+			oTest.onclick    = function(ev, section_id) {
+				var tag = uci.get('prism', section_id, 'tag') || '';
+				if (!tag) return;
+				return self._testOne(ev.currentTarget, tag);
+			};
+		}
 
 		o = s.taboption('general', form.Value, 'server', _('Server'));
 		o.modalonly = true;
@@ -647,7 +796,9 @@ return baseclass.extend({
 	},
 
 	_showNodes: function(section_id) {
+		var self = this;
 		var name = uci.get('prism', section_id, 'name') || section_id;
+		var clashOn = (uci.get('prism', 'global', 'clash_api_enabled') === '1');
 		ui.showModal(_('Nodes — %s').format(name), [
 			E('p', { 'class': 'spinning' }, [ _('Loading…') ]),
 			E('div', { 'class': 'right' }, [
@@ -665,37 +816,87 @@ return baseclass.extend({
 					_('No nodes. Sync this subscription to populate the list.')
 				]);
 			} else {
-				var rows = [
-					E('tr', { 'class': 'tr cbi-section-table-titles' }, [
-						E('th', { 'class': 'th cbi-section-table-cell' }, [ _('Name') ]),
-						E('th', { 'class': 'th cbi-section-table-cell' }, [ _('Type') ]),
-						E('th', { 'class': 'th cbi-section-table-cell' }, [ _('Server') ])
-					])
+				var headerCells = [
+					E('th', { 'class': 'th cbi-section-table-cell' }, [ _('Name') ]),
+					E('th', { 'class': 'th cbi-section-table-cell' }, [ _('Type') ]),
+					E('th', { 'class': 'th cbi-section-table-cell' }, [ _('Server') ])
 				];
+				if (clashOn) {
+					headerCells.push(E('th', { 'class': 'th cbi-section-table-cell' }, [ _('Latency') ]));
+					headerCells.push(E('th', { 'class': 'th cbi-section-table-cell cbi-section-actions' }, []));
+				}
+				var rows = [ E('tr', { 'class': 'tr cbi-section-table-titles' }, headerCells) ];
 				for (var i = 0; i < nodes.length; i++) {
 					var n = nodes[i];
 					var srv = n.server || '';
 					if (srv !== '' && n.server_port)
 						srv += ':' + n.server_port;
-					rows.push(E('tr', { 'class': 'tr cbi-section-table-row' }, [
+					var cells = [
 						E('td', { 'class': 'td' }, [ n.tag || '' ]),
 						E('td', { 'class': 'td' }, [ n.type || '' ]),
 						E('td', { 'class': 'td' }, [ srv ])
-					]));
+					];
+					if (clashOn) {
+						var tag = n.tag || '';
+						var span = E('span', { 'class': 'prism-latency-cell' },
+							[ formatLatency(self._latency[tag]) ]);
+						self._registerLatencyCell(tag, span);
+						cells.push(E('td', { 'class': 'td' }, [ span ]));
+						cells.push(E('td', { 'class': 'td cbi-section-actions' }, [
+							E('button', {
+								'class': 'btn cbi-button cbi-button-neutral',
+								'click': (function(t) {
+									return function(ev) { self._testOne(ev.currentTarget, t); };
+								})(tag)
+							}, [ _('Test') ])
+						]));
+					}
+					rows.push(E('tr', { 'class': 'tr cbi-section-table-row' }, cells));
 				}
-				content = E('div', { 'style': 'max-height:60vh; overflow:auto' }, [
+				content = E('div', {
+					'style': 'max-height:75vh; overflow:auto;'
+				}, [
 					E('table', { 'class': 'table cbi-section-table' }, rows)
 				]);
 			}
+			var footer = [
+				E('button', {
+					'class': 'btn',
+					'click': ui.hideModal
+				}, [ _('Close') ])
+			];
+			if (clashOn && nodes.length > 0) {
+				footer.unshift(' ');
+				footer.unshift(E('button', {
+					'class': 'btn cbi-button cbi-button-neutral',
+					'click': function() {
+						var tags = [];
+						nodes.forEach(function(n) {
+							if (n.tag && n.type !== 'urltest' && n.type !== 'selector')
+								tags.push(n.tag);
+						});
+						// Same code path as the global Test all — the
+						// background runner accepts an optional tag list
+						// to scope the run. Avoids the per-tag RPC pool
+						// (which was 18× slower than the runner due to
+						// rpcd dispatch overhead on every call).
+						self._doTestAll(tags);
+					}
+				}, [ _('Test all in this subscription') ]));
+			}
 			ui.showModal(_('Nodes — %s (%d)').format(name, nodes.length), [
 				content,
-				E('div', { 'class': 'right' }, [
-					E('button', {
-						'class': 'btn',
-						'click': ui.hideModal
-					}, [ _('Close') ])
-				])
+				E('div', { 'class': 'right' }, footer)
 			]);
+			// LuCI's stock .modal class clamps the modal at a narrow
+			// max-width — fine for a confirm dialog, too tight for a
+			// 5-column node list. Widen the modal container itself
+			// (overriding only max-width keeps LuCI's own centering
+			// and inner padding intact); the inner table then expands
+			// to fill, instead of overflowing into the page underneath.
+			var modal = document.querySelector('#modal_overlay > .modal') ||
+			            document.querySelector('.modal');
+			if (modal) modal.style.maxWidth = 'min(80vw, 850px)';
 		}).catch(function() {
 			ui.showModal(_('Nodes — %s').format(name), [
 				E('p', {}, [ _('Failed to load nodes.') ]),
@@ -706,6 +907,226 @@ return baseclass.extend({
 					}, [ _('Close') ])
 				])
 			]);
+		});
+	},
+
+	// Register a freshly-rendered latency cell so _refreshLatencyCell can
+	// find it later by tag. We use a plain object map instead of a CSS
+	// attribute selector because tags include emoji (🇭🇰, 🇯🇵, …) whose
+	// surrogate-pair escaping in CSS selectors isn't portable — browsers
+	// vary in whether they accept '\d83c\dded' as a single character. A
+	// JS string key sidesteps the issue entirely.
+	_registerLatencyCell: function(tag, element) {
+		if (!tag) return;
+		var arr = this._latencyCells[tag];
+		if (!arr) { arr = []; this._latencyCells[tag] = arr; }
+		arr.push(element);
+	},
+
+	// Update every live cell registered for this tag. Drops references to
+	// elements no longer in the DOM (e.g. closed subscription modals) so
+	// the map can't grow unbounded across a long-running session.
+	_refreshLatencyCell: function(tag) {
+		var arr = this._latencyCells[tag];
+		if (!arr || arr.length === 0) return;
+		var result = this._latency[tag];
+		var live = [];
+		for (var i = 0; i < arr.length; i++) {
+			var el = arr[i];
+			if (!el || !el.isConnected) continue;
+			while (el.firstChild) el.removeChild(el.firstChild);
+			el.appendChild(formatLatency(result));
+			live.push(el);
+		}
+		this._latencyCells[tag] = live;
+	},
+
+	// Single-node probe. `btn` is the row's Test button; spin it in place
+	// (preserves width/height so the row doesn't jump) until the RPC settles.
+	_testOne: function(btn, tag) {
+		var self = this;
+		var label = btn.textContent;
+		var w = btn.offsetWidth, h = btn.offsetHeight;
+		btn.classList.add('spinning');
+		btn.style.width  = w + 'px';
+		btn.style.height = h + 'px';
+		btn.textContent  = '';
+		return callTestNode(tag, TEST_TIMEOUT_MS).then(function(r) {
+			self._latency[tag] = r || {};
+			self._refreshLatencyCell(tag);
+		}).catch(function() {
+			ui.addNotification(null,
+				E('p', _('Test failed — check the Prism log on the Status page.')),
+				'error');
+		}).finally(function() {
+			btn.style.width  = '';
+			btn.style.height = '';
+			btn.classList.remove('spinning');
+			btn.textContent  = label;
+		});
+	},
+
+	// Gather every concrete-endpoint tag known to Prism: manual nodes from
+	// UCI (skipping group types) plus subscription nodes from the cached
+	// outbound list. Dedup by tag — first-seen wins, matching build-config's
+	// manual-overrides-subscription policy.
+	_collectAllTags: function() {
+		var tags = [], seen = {};
+		uci.sections('prism', 'node').forEach(function(n) {
+			var t = n.tag, ty = n.type;
+			if (t && ty !== 'urltest' && ty !== 'selector' && !seen[t]) {
+				seen[t] = true;
+				tags.push(t);
+			}
+		});
+		(this._outbounds || []).forEach(function(ob) {
+			if (ob.tag && ob.subscription
+			    && ob.type !== 'urltest' && ob.type !== 'selector'
+			    && !seen[ob.tag]) {
+				seen[ob.tag] = true;
+				tags.push(ob.tag);
+			}
+		});
+		return tags;
+	},
+
+	// Section "Test all" handler — confirms then dispatches.
+	_testAll: function() {
+		var tags = this._collectAllTags();
+		if (tags.length === 0) {
+			ui.addNotification(null, E('p', _('No nodes to test.')), 'info');
+			return;
+		}
+		var self = this;
+		ui.showModal(_('Test all nodes'), [
+			E('p', {}, [
+				_('Probe latency for %d nodes? A background runner probes ' +
+				  'them in parallel and cells update as results arrive. A ' +
+				  'node that isn\'t in the running config — see Settings → ' +
+				  'Latency testing → "Include all nodes" — will report ' +
+				  '"proxy not in running config".')
+					.format(tags.length)
+			]),
+			E('div', { 'class': 'right' }, [
+				E('button', { 'class': 'btn', 'click': ui.hideModal }, [ _('Cancel') ]),
+				' ',
+				E('button', {
+					'class': 'btn cbi-button cbi-button-positive',
+					'click': function() { self._doTestAll(tags); }
+				}, [ _('Test all') ])
+			])
+		]);
+	},
+
+	// "Test all": fork the background runner on the device and poll for
+	// completion. The runner probes each tag via /proxies/<tag>/delay in
+	// parallel shell-forked batches and writes results into
+	// /var/etc/prism/latency.json; we refresh cells from that cache between
+	// polls so results land progressively. No long-running RPC, so LuCI's
+	// XHR timeout is a non-issue.
+	//
+	// `tags` is optional: pass a list to scope the run to a subset (the
+	// per-subscription "Test all in this subscription" button does this);
+	// omit/empty to probe every node in the hidden _prism_test_all group.
+	_doTestAll: function(tags) {
+		if (this._testAllRunning) {
+			ui.addNotification(null,
+				E('p', _('A latency test run is already in progress.')),
+				'warning');
+			return Promise.resolve();
+		}
+		this._testAllRunning = true;
+
+		var self = this;
+		ui.hideModal();
+
+		var elapsedEl = E('span', {}, [ _('Starting…') ]);
+		var banner = ui.addNotification(_('Latency tests running'), [
+			E('p', {}, [ elapsedEl ]),
+			E('p', { 'style': 'opacity:0.7; font-size:0.9em; margin:0;' }, [
+				_('Probes run in parallel on the device. ' +
+				  'You can switch tabs — results land as they arrive.')
+			])
+		], 'info');
+
+		return callTestAllStart(Array.isArray(tags) ? tags : []).then(function(res) {
+			if (res && res.error) {
+				throw new Error(res.error);
+			}
+			return self._pollTestAll(elapsedEl, banner);
+		}).catch(function(err) {
+			self._testAllRunning = false;
+			if (banner && banner.parentNode)
+				banner.parentNode.removeChild(banner);
+			var detail = err && (err.message || String(err)) || _('unknown error');
+			ui.addNotification(null,
+				E('p', [ _('Test all failed: '), detail ]),
+				'error');
+		});
+	},
+
+	// Drive the poll loop while the background runner does its work.
+	// Each tick: ask for status, refresh cells from the cache, update
+	// the banner's elapsed counter. Stops when status.running flips off.
+	_pollTestAll: function(elapsedEl, banner) {
+		var self = this;
+		var startMs = Date.now();
+		var POLL_INTERVAL = 1500;
+		// Safety cap: if the runner crashes without clearing the status
+		// (e.g. SIGKILL), we still want the UI to stop polling. 3 min is
+		// generous — the runner's own clash timeout is 60 s.
+		var MAX_ELAPSED_MS = 3 * 60 * 1000;
+
+		return new Promise(function(resolve, reject) {
+			function refreshCells() {
+				return callGetLastLatency().then(function(c) {
+					var results = (c && c.results) || {};
+					for (var tag in results) {
+						self._latency[tag] = results[tag];
+						self._refreshLatencyCell(tag);
+					}
+				}).catch(function() { /* transient — try again next tick */ });
+			}
+
+			function tick() {
+				if (Date.now() - startMs > MAX_ELAPSED_MS) {
+					reject(new Error(_('runner timed out (status file never cleared)')));
+					return;
+				}
+				var elapsed = Math.floor((Date.now() - startMs) / 1000);
+				if (elapsedEl.parentNode)
+					elapsedEl.textContent = _('Probing… %ds elapsed').format(elapsed);
+
+				callTestAllStatus().then(function(status) {
+					return refreshCells().then(function() { return status; });
+				}).then(function(status) {
+					if (status && !status.running) {
+						resolve(status);
+					} else {
+						setTimeout(tick, POLL_INTERVAL);
+					}
+				}).catch(function() {
+					setTimeout(tick, POLL_INTERVAL);
+				});
+			}
+			setTimeout(tick, POLL_INTERVAL);
+		}).then(function(status) {
+			self._testAllRunning = false;
+			if (banner && banner.parentNode)
+				banner.parentNode.removeChild(banner);
+			if (status && status.error) {
+				ui.addNotification(null,
+					E('p', _('Test all failed: %s').format(status.error)),
+					'error');
+				return;
+			}
+			var tested = (status && status.tested) || 0;
+			var errors = (status && status.errors) || 0;
+			ui.addNotification(null, E('p',
+				errors > 0
+					? _('Tested %d nodes — %d unreachable.').format(tested + errors, errors)
+					: _('Tested %d nodes.').format(tested)),
+				'info');
 		});
 	},
 

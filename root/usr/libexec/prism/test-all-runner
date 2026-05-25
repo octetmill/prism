@@ -1,0 +1,245 @@
+#!/usr/bin/env lua
+-- SPDX-License-Identifier: GPL-3.0-only
+-- Copyright (C) 2026 OctetMill
+--
+-- Background runner for the Nodes panel's "Test all" button.
+--
+-- luci.prism's test_all_start RPC forks this script (no stdin/stdout/stderr
+-- attached) so it survives the parent rpcd worker's exit. The script then:
+--
+--   1. Asks sing-box's clash API for the membership of the hidden
+--      _prism_test_all group (set up by build-config to contain every
+--      concrete-endpoint outbound).
+--   2. Probes each member via /proxies/<tag>/delay in parallel batches of
+--      CONCURRENCY uclient-fetch processes (shell-forked & + wait).
+--   3. Writes results into /var/etc/prism/latency.json after each batch,
+--      and updates /var/etc/prism/.test-all-status with progress, so the
+--      UI's poll sees results land batch by batch.
+--   4. On exit, sets status.running=false plus tested/errors counts.
+--
+-- The earlier implementation called the clash /group/<tag>/delay endpoint
+-- (single big HTTP call). sing-box's internal probe concurrency for that
+-- endpoint is capped — on a real config with ~100 unreachable nodes the
+-- batch took 4+ minutes. Doing per-tag probes with our own concurrency
+-- knob brings the wall clock down to ~one minute for the same set, with
+-- the bonus that cells fill in progressively rather than all at once.
+
+local jsonc = require "luci.jsonc"
+local lib   = dofile("/usr/libexec/prism/prismlib.lua")
+local read_file  = lib.read_file
+local url_encode = lib.url_encode
+
+local STATUS  = "/var/etc/prism/.test-all-status"
+local LATENCY = "/var/etc/prism/latency.json"
+local TMPDIR  = "/tmp/prism-latency-pending"
+
+local CLASH_HOST       = "127.0.0.1:9090"
+local CONCURRENCY      = 16            -- parallel uclient-fetch processes
+local PROBE_TIMEOUT_MS = 3000          -- per-probe (clash query param)
+local REQ_TIMEOUT_S    = 5             -- uclient-fetch wall clock per probe
+local TEST_URL         = "http://www.gstatic.com/generate_204"
+
+local function shell_quote(s)
+	return "'" .. tostring(s):gsub("'", "'\\''") .. "'"
+end
+
+local function write_atomic(path, content)
+	local dir = path:gsub("/[^/]+$", "")
+	if dir ~= "" then os.execute("mkdir -p '" .. dir .. "' 2>/dev/null") end
+	local tmp = path .. ".tmp"
+	local f = io.open(tmp, "w")
+	if not f then return false end
+	f:write(content)
+	f:close()
+	return os.rename(tmp, path) ~= nil
+end
+
+local function update_status(state)
+	state.updated_at = os.time()
+	write_atomic(STATUS, jsonc.stringify(state))
+end
+
+local function bail(msg)
+	update_status({
+		running     = false,
+		error       = msg,
+		finished_at = os.time(),
+	})
+	os.exit(1)
+end
+
+-- ─── start ───────────────────────────────────────────────────────────────
+local started_at = os.time()
+update_status({ running = true, started_at = started_at })
+
+-- ─── decide which tags to probe ──────────────────────────────────────────
+-- If luci.prism's test_all_start was called with a tag list (subscription-
+-- scoped Test all from the UI), the RPC wrote those tags to TAG_FILE one
+-- per line. We use that list verbatim. Otherwise we fall back to the full
+-- membership of _prism_test_all from the clash API (the global Test all
+-- path).
+local TAG_FILE = "/var/etc/prism/.test-all-tags"
+local tags = {}
+local raw_tag_file = read_file(TAG_FILE)
+if raw_tag_file and raw_tag_file ~= "" then
+	for line in raw_tag_file:gmatch("[^\n]+") do
+		if line ~= "" then tags[#tags + 1] = line end
+	end
+	os.remove(TAG_FILE)
+end
+
+if #tags == 0 then
+	local f = io.popen(
+		"uclient-fetch -qO- 'http://" .. CLASH_HOST ..
+		"/proxies/_prism_test_all' 2>/dev/null")
+	if not f then bail("cannot fork uclient-fetch") end
+	local body = f:read("*a") or ""
+	f:close()
+	if body == "" then bail("clash API returned no proxy list") end
+
+	local ok, parsed = pcall(jsonc.parse, body)
+	if not ok or type(parsed) ~= "table" or type(parsed.all) ~= "table" then
+		bail("malformed proxy list from clash API")
+	end
+	tags = parsed.all
+end
+local total = #tags
+if total == 0 then
+	update_status({
+		running     = false,
+		started_at  = started_at,
+		finished_at = os.time(),
+		tested      = 0,
+		errors      = 0,
+	})
+	os.exit(0)
+end
+
+-- ─── prepare workspace ───────────────────────────────────────────────────
+os.execute("rm -rf '" .. TMPDIR .. "' 2>/dev/null")
+os.execute("mkdir -p '" .. TMPDIR .. "' 2>/dev/null")
+
+-- URL list for the shell batch script. Format: "<idx>\t<url>\n". We do the
+-- URL encoding in Lua because shell-side encoding of arbitrary Unicode
+-- (emoji-laden tags like 🇭🇰 HK1) is fragile across awk variants.
+local urls_path = TMPDIR .. "/urls.txt"
+local uf = io.open(urls_path, "w")
+if not uf then bail("cannot write urls file") end
+for i, tag in ipairs(tags) do
+	local enc = url_encode(tag)
+	local url = "http://" .. CLASH_HOST .. "/proxies/" .. enc
+		.. "/delay?timeout=" .. tostring(PROBE_TIMEOUT_MS)
+		.. "&url=" .. url_encode(TEST_URL)
+	uf:write(string.format("%d\t%s\n", i, url))
+end
+uf:close()
+
+update_status({
+	running    = true,
+	started_at = started_at,
+	total      = total,
+	done       = 0,
+})
+
+-- ─── read the existing cache so per-row results survive a batch run ─────
+local cache = { results = {} }
+local raw_cache = read_file(LATENCY)
+if raw_cache and raw_cache ~= "" then
+	local cok, cparsed = pcall(jsonc.parse, raw_cache)
+	if cok and type(cparsed) == "table" then
+		cache = cparsed
+		if type(cache.results) ~= "table" then cache.results = {} end
+	end
+end
+
+-- ─── parse one probe response, return a cache entry ─────────────────────
+local function parse_result(idx)
+	local entry = { tested_at = os.time() }
+	local content = read_file(TMPDIR .. "/r_" .. tostring(idx))
+	if not content or content == "" then
+		-- uclient-fetch suppresses the body on 4xx/5xx, so empty means
+		-- either the proxy isn't in the running config (404, but with
+		-- the hidden group we shouldn't see this) or the probe failed.
+		entry.error = "unreachable"
+		return entry, "error"
+	end
+	local pok, p = pcall(jsonc.parse, content)
+	if not pok or type(p) ~= "table" then
+		entry.error = "invalid response"
+		return entry, "error"
+	end
+	if type(p.delay) == "number" then
+		entry.delay_ms = p.delay
+		return entry, "ok"
+	end
+	if type(p.message) == "string" and p.message ~= "" then
+		entry.error = p.message
+		return entry, "error"
+	end
+	entry.error = "unknown response"
+	return entry, "error"
+end
+
+-- ─── run probes in parallel batches ─────────────────────────────────────
+-- One shell invocation per batch: spawn CONCURRENCY backgrounded
+-- uclient-fetch processes from inside one shell, then `wait $PIDS` joins
+-- them. The shell loop reads only this batch's slice of urls.txt via
+-- awk's NR range — Lua passes the slice bounds as start/end variables.
+local batch_script = TMPDIR .. "/run-batch.sh"
+local tested, errors = 0, 0
+local i = 1
+while i <= total do
+	local batch_end = math.min(i + CONCURRENCY - 1, total)
+	local bs = io.open(batch_script, "w")
+	if not bs then bail("cannot write batch script") end
+	bs:write(string.format([[#!/bin/sh
+# Slice this batch out of urls.txt into a side file so the while-read
+# loop can run in the *current* shell (input redirection, not a pipe).
+# A `awk | while` pipeline puts the while in a subshell — PIDS would
+# vanish when the subshell exits and `wait $PIDS` would join nothing,
+# leaving probes running after the script returned.
+TMPDIR=%s
+REQ_TIMEOUT=%d
+sed -n '%d,%dp' "$TMPDIR/urls.txt" > "$TMPDIR/batch.txt"
+PIDS=""
+while IFS=$(printf '\t') read -r idx url; do
+	uclient-fetch --timeout=$REQ_TIMEOUT -qO "$TMPDIR/r_$idx" "$url" 2>/dev/null &
+	PIDS="$PIDS $!"
+done < "$TMPDIR/batch.txt"
+[ -n "$PIDS" ] && wait $PIDS
+]], shell_quote(TMPDIR), REQ_TIMEOUT_S, i, batch_end))
+	bs:close()
+	os.execute("sh '" .. batch_script .. "'")
+
+	-- Merge this batch's results into the cache and persist; the UI
+	-- poll picks them up immediately so cells fill in progressively.
+	for idx = i, batch_end do
+		local tag = tags[idx]
+		local entry, kind = parse_result(idx)
+		cache.results[tag] = entry
+		if kind == "ok" then tested = tested + 1
+		else errors = errors + 1 end
+	end
+	write_atomic(LATENCY, jsonc.stringify(cache))
+	update_status({
+		running    = true,
+		started_at = started_at,
+		total      = total,
+		done       = batch_end,
+	})
+
+	i = batch_end + 1
+end
+
+-- ─── done ────────────────────────────────────────────────────────────────
+update_status({
+	running     = false,
+	started_at  = started_at,
+	finished_at = os.time(),
+	tested      = tested,
+	errors      = errors,
+	total       = total,
+})
+
+-- Cleanup
+os.execute("rm -rf '" .. TMPDIR .. "' 2>/dev/null")

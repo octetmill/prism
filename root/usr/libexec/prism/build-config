@@ -745,8 +745,19 @@ local function build_outbounds(c)
 		{ type = "direct", tag = "direct", domain_resolver = "local" }
 	}
 	local endpoints = {}
+	-- include_all_nodes: when the user has the clash API on and wants to be
+	-- able to test every known node (not just the ones the running config
+	-- happens to use), this flag loosens step 4's reference filter. Concrete
+	-- endpoint nodes pass through regardless; groups (urltest/selector) still
+	-- need to be referenced because emitting them without their member
+	-- expansion (step 3) would land an unresolved group in sing-box.
+	local include_all = c:get("prism", "global", "include_all_nodes") == "1"
+	-- Collected for the hidden _prism_test_all batch-test group below: every
+	-- concrete-endpoint tag that ends up in `outbounds`, in emission order.
+	local testable_tags = {}
 	for _, ob in ipairs(all_ordered) do
-		if referenced[ob.tag] then
+		local is_group = (ob.type == "urltest" or ob.type == "selector")
+		if referenced[ob.tag] or (include_all and not is_group) then
 			-- Strip Prism-internal markers before handing the node to sing-box,
 			-- which rejects unknown fields. `_outbound_regex(_sources)` are
 			-- already nil'd in step 3; `_source` is the origin tag used by the
@@ -756,6 +767,7 @@ local function build_outbounds(c)
 				-- Prism-built WireGuard node → top-level endpoints array.
 				ob._is_endpoint = nil
 				endpoints[#endpoints + 1] = ob
+				testable_tags[#testable_tags + 1] = ob.tag
 			elseif ob.type == "wireguard" then
 				-- A WireGuard node from a subscription is still in the legacy
 				-- outbound schema. Leave it in outbounds (it works on 1.12)
@@ -764,6 +776,7 @@ local function build_outbounds(c)
 					.. tostring(ob.tag) .. "' uses the legacy outbound schema; "
 					.. "it will not work on sing-box 1.13\n")
 				outbounds[#outbounds + 1] = ob
+				testable_tags[#testable_tags + 1] = ob.tag
 			else
 				if (ob.type == "urltest" or ob.type == "selector")
 				   and (type(ob.outbounds) ~= "table" or #ob.outbounds == 0) then
@@ -772,8 +785,32 @@ local function build_outbounds(c)
 						"' has no usable members; sing-box will reject the config\n")
 				end
 				outbounds[#outbounds + 1] = ob
+				if not is_group then
+					testable_tags[#testable_tags + 1] = ob.tag
+				end
 			end
 		end
+	end
+
+	-- Hidden selector group containing every concrete node that ended up in
+	-- the running config. The Nodes panel's "Test all" calls the clash API
+	-- /group/_prism_test_all/delay endpoint to probe every member in parallel
+	-- inside sing-box itself — one HTTP call, one rpcd worker, no fork-storm.
+	-- We use `selector` (not `urltest`) so sing-box doesn't auto-probe these
+	-- members at startup or on its own schedule — we only want probes when
+	-- the user clicks. Default is the first member, which sing-box requires
+	-- for selectors. The leading underscore in the tag avoids collision with
+	-- user-named nodes; the routing dropdown's "Default server" picker still
+	-- shows this tag, which is mildly ugly but harmless — see the matching
+	-- skip in routing.js / nodes.js if cosmetic exclusion is added later.
+	if c:get("prism", "global", "clash_api_enabled") == "1"
+	   and #testable_tags > 0 then
+		outbounds[#outbounds + 1] = {
+			type      = "selector",
+			tag       = "_prism_test_all",
+			outbounds = testable_tags,
+			default   = testable_tags[1]
+		}
 	end
 
 	return outbounds, endpoints
@@ -1304,6 +1341,7 @@ local function build_log(c)
 	return { level = level, timestamp = true }
 end
 
+
 local function build_config(c)
 	local prepared = prepare_rules(c)
 	local dns   = build_dns(c, prepared)
@@ -1323,6 +1361,8 @@ local function build_config(c)
 		config.endpoints = endpoints
 	end
 
+	local experimental = {}
+
 	-- Persist the remote rule-set cache to flash. On startup sing-box loads
 	-- rule-sets from this cache instead of downloading, so after one
 	-- successful fetch it starts offline — no network needed at init, no
@@ -1333,12 +1373,30 @@ local function build_config(c)
 	-- the per-query churn those stores would add.
 	if route.rule_set then
 		os.execute("mkdir -p /etc/prism 2>/dev/null")
-		config.experimental = {
-			cache_file = {
-				enabled = true,
-				path    = "/etc/prism/cache.db"
-			}
+		experimental.cache_file = {
+			enabled = true,
+			path    = "/etc/prism/cache.db"
 		}
+	end
+
+	-- Clash-compatible API for on-demand node latency probes. Loopback-only
+	-- (127.0.0.1:9090); no secret because the API is bound to 127.0.0.1 and
+	-- our threat model has no scenario where dropping it loses ground: any
+	-- attacker on the router with the capability to reach port 9090 is
+	-- already root and can read UCI, restart sing-box, etc. directly. With
+	-- no `secret` field sing-box's auth middleware is a no-op, which lets
+	-- uclient-fetch reach the API without a custom Authorization header (a
+	-- flag uclient-fetch has no spelling for). The API is opt-in via
+	-- `clash_api_enabled` — default off, nothing listens until the user
+	-- toggles it from Settings → Advanced.
+	if c:get("prism", "global", "clash_api_enabled") == "1" then
+		experimental.clash_api = {
+			external_controller = "127.0.0.1:9090"
+		}
+	end
+
+	if next(experimental) ~= nil then
+		config.experimental = experimental
 	end
 	return config
 end
