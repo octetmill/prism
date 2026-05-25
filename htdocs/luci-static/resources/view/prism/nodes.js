@@ -853,7 +853,13 @@ return baseclass.extend({
 					}
 					rows.push(E('tr', { 'class': 'tr cbi-section-table-row' }, cells));
 				}
-				content = E('div', { 'style': 'max-height:60vh; overflow:auto' }, [
+				// Modal grows to fit its content's min-width — give the
+				// node list a generous floor so the columns aren't
+				// crowded on wide screens but the modal still stays
+				// inside the viewport on narrow ones.
+				content = E('div', {
+					'style': 'min-width:min(85vw, 960px); max-height:75vh; overflow:auto;'
+				}, [
 					E('table', { 'class': 'table cbi-section-table' }, rows)
 				]);
 			}
