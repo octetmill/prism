@@ -772,24 +772,36 @@ local function url_encode(s)
 	end))
 end
 
--- Shell out to uclient-fetch and return the response body plus a synthetic
--- status: 200 when the JSON it returned carries a `delay` field, 0 when no
--- bytes came back at all, and whatever sing-box reports in its `message`
--- field otherwise. Probing happens against the loopback clash API so a stuck
--- connect cannot happen — port 9090 is either listening (instant connect) or
--- not (instant refusal). uclient-fetch's `--timeout` bounds the read/transfer.
+-- Shell out to uclient-fetch and return body, rc, and (when the server
+-- replied with a 4xx/5xx) the HTTP status code parsed out of stderr.
+-- Probing happens against the loopback clash API so a stuck connect cannot
+-- happen — port 9090 is either listening (instant connect) or not (instant
+-- refusal). uclient-fetch's `--timeout` bounds the transfer.
+--
+-- uclient-fetch suppresses the response body whenever the server returns a
+-- non-2xx status (it just emits "HTTP error N" to stderr and exits rc=8),
+-- so we can't read sing-box's "message" field for failures. We capture
+-- stderr to a tmpfs side-file and grep the status code back out — at least
+-- the UI can show "HTTP 404 (proxy not in running config)" instead of an
+-- opaque "empty response".
 local function clash_get(path_with_query, timeout_s)
 	local url = "http://" .. CLASH_HOST .. path_with_query
 	local safe_url = url:gsub("'", "'\\''")
+	local stderr_path = "/var/etc/prism/.uclient-fetch.stderr"
+	os.execute("mkdir -p /var/etc/prism 2>/dev/null")
 	local cmd = "uclient-fetch -q --timeout=" .. tostring(timeout_s)
-		.. " -O- '" .. safe_url .. "' 2>/dev/null; echo __RC__$?"
+		.. " -O- '" .. safe_url .. "' 2>'" .. stderr_path
+		.. "'; echo __RC__$?"
 	local f = io.popen(cmd)
-	if not f then return nil, 0 end
+	if not f then return nil, 0, nil end
 	local out = f:read("*a") or ""
 	f:close()
 	local rc = tonumber(out:match("__RC__(%d+)%s*$") or "1") or 1
 	out = out:gsub("__RC__%d+%s*$", "")
-	return out, rc
+	local stderr = read_file(stderr_path) or ""
+	os.remove(stderr_path)
+	local http_status = tonumber(stderr:match("HTTP error (%d+)") or "") or nil
+	return out, rc, http_status
 end
 
 -- Read the current latency cache. Empty object when the file is missing or
@@ -850,12 +862,25 @@ local function probe_node(tag, url, timeout_ms)
 	-- doesn't kill the connection before sing-box's own timer fires, giving
 	-- us a clean error body to parse instead of an EOF.
 	local req_timeout_s = math.ceil(t_ms / 1000) + 3
-	local body, rc = clash_get(path, req_timeout_s)
+	local body, rc, http_status = clash_get(path, req_timeout_s)
 	local result = { tested_at = os.time() }
-	-- uclient-fetch exit code 8 = server returned an error response (4xx/5xx)
-	-- but the body still came through; we want to parse it for sing-box's
-	-- "message" field. Other non-zero codes mean transport failure.
-	if rc ~= 0 and rc ~= 8 then
+	-- HTTP error: uclient-fetch wrote no body to stdout (it discards 4xx/5xx
+	-- bodies), but stderr told us the status code. The two cases we care
+	-- about: 404 = proxy not in the running config (typical for subscription
+	-- nodes not referenced by any rule or group, which build_outbounds
+	-- filters out before sing-box sees them); 504 = the delay probe itself
+	-- timed out (target unreachable through this outbound).
+	if http_status then
+		if http_status == 404 then
+			result.error = "proxy not in running config"
+		elseif http_status == 504 then
+			result.error = "timeout"
+		else
+			result.error = "HTTP " .. tostring(http_status)
+		end
+		return result
+	end
+	if rc ~= 0 then
 		result.error = "fetch failed (rc=" .. tostring(rc) .. ")"
 		return result
 	end
@@ -870,13 +895,6 @@ local function probe_node(tag, url, timeout_ms)
 	end
 	if type(parsed.delay) == "number" then
 		result.delay_ms = parsed.delay
-		return result
-	end
-	-- Sing-box returns { "message": "..." } on error. Surface it verbatim so
-	-- the UI shows "proxy not found" / "An error occurred in the delay test"
-	-- etc. without us having to map each variant.
-	if type(parsed.message) == "string" and parsed.message ~= "" then
-		result.error = parsed.message
 		return result
 	end
 	result.error = "unknown response"
