@@ -53,6 +53,27 @@ local function fetch_proxies()
 	return parsed
 end
 
+-- Ask procd for sing-box's current pid. Returns the pid (a positive
+-- number) on success, or nil when procd reports the instance as
+-- stopped / missing / unparseable. Pid changes are our authoritative
+-- signal that sing-box restarted between ticks — a fetch_proxies gap
+-- only catches restarts slow enough to fail at least one 10s poll, and
+-- a config-save-driven restart commonly completes inside that window.
+local function singbox_pid()
+	local f = io.popen("ubus call service list '{\"name\":\"prism\",\"instance\":\"singbox\"}' 2>/dev/null")
+	if not f then return nil end
+	local out = f:read("*a") or ""
+	f:close()
+	if out == "" then return nil end
+	local ok, parsed = pcall(jsonc.parse, out)
+	if not ok or type(parsed) ~= "table" then return nil end
+	local svc = parsed.prism
+	if type(svc) ~= "table" or type(svc.instances) ~= "table" then return nil end
+	local inst = svc.instances.singbox
+	if type(inst) ~= "table" then return nil end
+	return tonumber(inst.pid)
+end
+
 -- Extract the relevant slice of the /proxies response: one entry per
 -- urltest/selector group, carrying the active member tag and (when
 -- available) its most recent latency. Internal helper groups (tag starts
@@ -114,6 +135,12 @@ local FAIL_WARN_AFTER = 6  -- ~one minute of failures at 10s ticks
 local previous = load_snapshot()
 local primed   = next(previous) ~= nil
 local fail_streak = 0
+-- Captured at daemon start so the first iteration doesn't mis-detect a
+-- restart against nil. If procd is briefly unreachable, last_pid stays
+-- at its last known value through the gap — we only treat a true
+-- transition (last and new are both numbers and they differ) as a
+-- restart, so a pid lookup failure can't synthesise a fake one.
+local last_pid = singbox_pid()
 
 -- Emit one "active node is X" line per group. Used in two situations
 -- that both mean "the user just lost track of the live selection":
@@ -153,19 +180,29 @@ while true do
 		local had_outage = (fail_streak > 0)
 		fail_streak = 0
 
+		-- pid check after a successful fetch so we don't burn an ubus
+		-- call when we already know things are degraded. A pid change
+		-- here means: between our last successful tick and this one,
+		-- procd restarted sing-box — which is the primary case we want
+		-- to catch even when the restart is faster than our 10s poll.
+		local pid = singbox_pid()
+		local pid_changed = (last_pid and pid and pid ~= last_pid)
+		if pid then last_pid = pid end
+
 		local current = group_state(parsed)
 
-		if (not primed) or had_outage then
-			-- Cold prime, or recovery after a fetch gap. Re-announce the
-			-- current selection of every group: the user wants to see
-			-- which node each urltest/selector landed on when sing-box
-			-- (re-)started, not just future flips. The diff loop is
-			-- skipped this tick — previous is either empty (prime) or
-			-- pre-restart-and-therefore-suspect (recovery); the next
-			-- tick's diff will be against the post-restart snapshot we
-			-- save below.
-			log_initial(current,
-				had_outage and "resuming" or "starting")
+		if (not primed) or had_outage or pid_changed then
+			-- Cold prime, post-outage recovery, or sing-box pid changed
+			-- under us — in each case the previous snapshot is either
+			-- empty or no longer authoritative about the new sing-box's
+			-- selections. Re-announce every group so the user sees which
+			-- node each urltest/selector landed on after the event, not
+			-- just future flips. Diff loop skipped this tick; next
+			-- tick's diff runs against the snapshot we save below.
+			local context = (not primed) and "starting"
+				or pid_changed and "after sing-box restart"
+				or "resuming"
+			log_initial(current, context)
 		elseif primed then
 			-- Member changed within a still-existing group: the central
 			-- diagnostic — this is the "is my urltest flipping too
