@@ -973,25 +973,40 @@ return baseclass.extend({
 
 	// Run the test_node pool for the given tag list. Used by both the global
 	// "Test all" and the per-subscription "Test all in this subscription"
-	// from inside _showNodes — same code path either way.
+	// from inside _showNodes — same code path either way. No blocking modal:
+	// progress lives in a LuCI notification at the top of the page, so the
+	// user can navigate freely and still see how the run is going. Per-cell
+	// updates happen the same way regardless of which panel is mounted.
 	_doTestAll: function(tags) {
+		// Coalesce concurrent triggers (e.g. user clicks Test all twice, or
+		// kicks off another "Test all in this subscription" mid-run). Without
+		// this guard we'd double the in-flight test_node calls and the
+		// progress counters would race.
+		if (this._testAllRunning) {
+			ui.addNotification(null,
+				E('p', _('A latency test run is already in progress.')),
+				'warning');
+			return Promise.resolve();
+		}
+		this._testAllRunning = true;
+
 		var self = this;
 		var done = 0, errors = 0, total = tags.length;
-		var progress = E('p', {}, [
-			_('Testing %d of %d…').format(0, total)
+		ui.hideModal();
+
+		// Build a notification with an inline span we can mutate in place.
+		// addNotification returns the rendered banner; we keep the reference
+		// so we can remove it on completion without leaving a stale "Testing
+		// 12 / 306…" line on the page forever.
+		var progressEl = E('span', {}, [
+			_('Testing %d / %d…').format(0, total)
 		]);
-		ui.showModal(_('Testing nodes'), [
-			progress,
-			E('p', { 'style': 'opacity:0.65; font-size:0.9em;' }, [
-				_('You can close this dialog — results keep arriving in the background.')
-			]),
-			E('div', { 'class': 'right' }, [
-				E('button', {
-					'class': 'btn',
-					'click': ui.hideModal
-				}, [ _('Close') ])
+		var banner = ui.addNotification(_('Latency tests running'), [
+			E('p', {}, [ progressEl ]),
+			E('p', { 'style': 'opacity:0.7; font-size:0.9em; margin:0;' }, [
+				_('Tests continue in the background — you can switch tabs.')
 			])
-		]);
+		], 'info');
 
 		var idx = 0;
 		function next() {
@@ -1005,12 +1020,12 @@ return baseclass.extend({
 				self._refreshLatencyCell(tag);
 				done++;
 				if (r.error) errors++;
-				// Only update the progress element if the modal is still up;
-				// once the user closes it, progress is invisible but the pool
-				// keeps draining so cells continue to update under any other
-				// open view (subscription modal, the grid below).
-				if (progress.parentNode)
-					progress.textContent = _('Testing %d of %d…').format(done, total);
+				// Update the banner's progress span only if the banner is
+				// still in the DOM (user may have dismissed it). The pool
+				// keeps draining either way; cells update underneath.
+				if (progressEl.parentNode)
+					progressEl.textContent =
+						_('Testing %d / %d…').format(done, total);
 				return next();
 			});
 		}
@@ -1019,10 +1034,11 @@ return baseclass.extend({
 		for (var i = 0; i < Math.min(TEST_CONCURRENCY, tags.length); i++)
 			workers.push(next());
 		return Promise.all(workers).then(function() {
-			if (progress.parentNode) {
-				// Modal still open — close it and summarise via notification.
-				ui.hideModal();
-			}
+			self._testAllRunning = false;
+			// Replace the live banner with a final-state one — same place,
+			// different message, dismissable by the user.
+			if (banner && banner.parentNode)
+				banner.parentNode.removeChild(banner);
 			ui.addNotification(null, E('p',
 				errors > 0
 					? _('Tested %d nodes — %d failed.').format(total, errors)
