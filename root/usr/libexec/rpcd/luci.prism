@@ -930,12 +930,16 @@ local function ensure_nodes_dir()
 	os.execute("mkdir -p " .. NODES_DIR .. " 2>/dev/null")
 end
 
--- True when procd reports a running instance of the prism service. This is
--- authoritative (procd's own view) and scoped to our service, unlike a pgrep
--- that would also match a sing-box started outside Prism. Note this is the
--- live runtime state, distinct from the UCI `enabled` autostart-at-boot flag.
+-- True when procd reports the sing-box instance of the prism service is
+-- running. Scoped to the named `singbox` instance specifically — the prism
+-- service may also carry an `active_watch` instance (when clash API is
+-- enabled), so a substring match against `"running":true` in the unscoped
+-- service list would happily return true when sing-box is dead but the
+-- watcher is alive, defeating the LAN-blackhole recovery in watchdog.
+-- This is authoritative (procd's own view) and distinct from the UCI
+-- `enabled` autostart-at-boot flag.
 local function service_running()
-	local f = io.popen("ubus call service list '{\"name\":\"prism\"}' 2>/dev/null")
+	local f = io.popen("ubus call service list '{\"name\":\"prism\",\"instance\":\"singbox\"}' 2>/dev/null")
 	if not f then return false end
 	local out = f:read("*a") or ""
 	f:close()

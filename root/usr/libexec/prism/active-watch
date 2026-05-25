@@ -27,7 +27,14 @@ local SNAPSHOT   = "/var/etc/prism/.active-nodes.json"
 local POLL_S     = 10
 
 local function logmsg(level, msg)
-	local safe = msg:gsub("'", "'\\''")
+	-- Tag names ultimately come from URL-decoded subscription content, so a
+	-- node tag may legitimately contain any byte including newlines, NULs
+	-- and other control chars (an attacker subscription could also craft
+	-- one deliberately). Scrub control chars to spaces BEFORE shell-quoting
+	-- so a literal `\n` in the message can't fan a single logger call out
+	-- into multiple syslog lines — which the Status page log split would
+	-- then mis-attribute as additional `prism`-tagged events.
+	local safe = msg:gsub("[%c]", " "):gsub("'", "'\\''")
 	os.execute("logger -p daemon." .. level .. " -t prism '" .. safe .. "' 2>/dev/null")
 end
 
@@ -96,17 +103,34 @@ end
 -- previous: the last tick's state, used to detect changes.
 -- primed:  true once we've seen at least one successful poll. On a fresh
 -- boot (snapshot empty) we still take a poll and stash it, but we don't
--- emit "changed" lines for groups going from nothing to their first
--- reading — that isn't a flip.
+-- emit "changed" / "added" lines for groups going from nothing to their
+-- first reading — that isn't a flip, it's the initial inventory.
+-- fail_streak: count of consecutive fetch failures, so we can surface a
+-- single warning after a meaningful run of failures (sing-box restart,
+-- crash, clash port wedged) instead of silently going stale. Resets on
+-- the next success, logging a recovery line so the gap is bracketed in
+-- the syslog timeline.
+local FAIL_WARN_AFTER = 6  -- ~one minute of failures at 10s ticks
 local previous = load_snapshot()
 local primed   = next(previous) ~= nil
+local fail_streak = 0
 
 while true do
 	local parsed = fetch_proxies()
 	if parsed then
+		if fail_streak >= FAIL_WARN_AFTER then
+			logmsg("info", string.format(
+				"clash API reachable again after %d failed polls",
+				fail_streak))
+		end
+		fail_streak = 0
+
 		local current = group_state(parsed)
 
 		if primed then
+			-- Member changed within a still-existing group: the central
+			-- diagnostic — this is the "is my urltest flipping too
+			-- often" signal the user is hunting.
 			for tag, entry in pairs(current) do
 				local old = previous[tag]
 				if old and old.now and old.now ~= entry.now then
@@ -117,6 +141,24 @@ while true do
 						msg = msg .. string.format(" (%dms)", entry.delay_ms)
 					end
 					logmsg("info", msg)
+				elseif not old then
+					-- Group appeared between ticks (user added it, or a
+					-- sing-box reload pulled it into the running config).
+					-- Useful as a "yes, the daemon sees your new group"
+					-- ack and as a timeline anchor for later flips.
+					logmsg("info", string.format(
+						"group '%s': now tracked, active node %s",
+						tag, entry.now))
+				end
+			end
+			-- Group disappeared between ticks (user removed it, or a
+			-- reload dropped it from the running config). Logged so the
+			-- user troubleshooting "why did my auto group stop working"
+			-- finds the removal event in the same log they use for flips.
+			for tag, _ in pairs(previous) do
+				if not current[tag] then
+					logmsg("info", string.format(
+						"group '%s': no longer present", tag))
 				end
 			end
 		end
@@ -124,6 +166,17 @@ while true do
 		save_snapshot(current)
 		previous = current
 		primed   = true
+	else
+		fail_streak = fail_streak + 1
+		-- One warning at the threshold, not one per failed tick — the
+		-- syslog tail on the Status page is finite and the user needs
+		-- one clear signal, not a flood. Subsequent failures stay
+		-- silent until the streak breaks (which logs the recovery).
+		if fail_streak == FAIL_WARN_AFTER then
+			logmsg("warning", string.format(
+				"clash API unreachable for %d consecutive polls (~%ds) — sing-box may be down or the clash listener not bound",
+				fail_streak, fail_streak * POLL_S))
+		end
 	end
 	os.execute("sleep " .. tostring(POLL_S))
 end

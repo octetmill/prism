@@ -29,9 +29,13 @@ config_get_bool enabled global enabled 0
 # and an enabled-but-paused service resumes naturally.
 [ -e /var/run/prism.paused ] && exit 0
 
-# procd's own view of the instance, scoped to the prism service — mirrors
-# service_running() in the rpcd handler.
-if ubus call service list '{"name":"prism"}' 2>/dev/null \
+# procd's own view, scoped to the named `singbox` instance — mirrors
+# service_running() in the rpcd handler. Must be instance-scoped: the
+# prism service may also carry an `active_watch` instance, and an
+# unscoped grep for `"running": true` would match the watcher's status
+# and let the watchdog believe sing-box is alive when only the watcher
+# is — exactly the LAN-blackhole this watchdog exists to recover from.
+if ubus call service list '{"name":"prism","instance":"singbox"}' 2>/dev/null \
 		| grep -q '"running": *true'; then
 	exit 0
 fi

@@ -122,7 +122,12 @@ remove_dns_dropin() {
 # re-declare the existing instance — leaving the running process untouched —
 # without duplicating the parameter list.
 prism_declare_instance() {
-	procd_open_instance
+	# Named `singbox` so service_running() in luci.prism and the cron
+	# watchdog can query this instance specifically via ubus's `instance`
+	# filter, rather than substring-grepping for `"running":true` in the
+	# combined service list — which would also match active_watch and
+	# defeat the watchdog's whole purpose when clash API is enabled.
+	procd_open_instance singbox
 	procd_set_param command "$SINGBOX" run -c "$1"
 	# procd respawns a crashed sing-box; after a burst of fast crashes it
 	# hits its retry limit and gives up. /usr/libexec/prism/watchdog, run
@@ -252,7 +257,11 @@ start_service() {
 		fi
 		prism_log err "config: generated config was rejected, keeping sing-box on the last working config"
 		prism_declare_instance "$config_path"
-		prism_declare_active_watch
+		# Intentionally NOT declaring active_watch here: the last-working
+		# config may pre-date the user's clash_api_enabled flip and have
+		# no clash listener bound. Polling 127.0.0.1:9090 every 10s
+		# against nothing is pure log/CPU noise. The daemon will come
+		# back on the next successful Save.
 		return 0
 	fi
 
@@ -304,6 +313,12 @@ stop_service() {
 
 	# Return dnsmasq to its own resolvers before sing-box's dns-in goes away.
 	remove_dns_dropin
+
+	# Clear the active-node snapshot so the Status page's Groups panel
+	# doesn't keep displaying last-known members and latencies after the
+	# daemon writing them has been killed by procd. Without this the
+	# panel would show stale data with no "service is down" cue.
+	rm -f /var/etc/prism/.active-nodes.json
 
 	# Remove every Prism cron line — the hourly tick, the watchdog, and any
 	# legacy sync-subscriptions / fetch-rulesets lines from an older install.
