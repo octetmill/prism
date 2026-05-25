@@ -896,7 +896,7 @@ return baseclass.extend({
 			// to fill, instead of overflowing into the page underneath.
 			var modal = document.querySelector('#modal_overlay > .modal') ||
 			            document.querySelector('.modal');
-			if (modal) modal.style.maxWidth = 'min(95vw, 1100px)';
+			if (modal) modal.style.maxWidth = 'min(80vw, 850px)';
 		}).catch(function() {
 			ui.showModal(_('Nodes — %s').format(name), [
 				E('p', {}, [ _('Failed to load nodes.') ]),
