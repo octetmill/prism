@@ -853,12 +853,8 @@ return baseclass.extend({
 					}
 					rows.push(E('tr', { 'class': 'tr cbi-section-table-row' }, cells));
 				}
-				// Modal grows to fit its content's min-width — give the
-				// node list a generous floor so the columns aren't
-				// crowded on wide screens but the modal still stays
-				// inside the viewport on narrow ones.
 				content = E('div', {
-					'style': 'min-width:min(85vw, 960px); max-height:75vh; overflow:auto;'
+					'style': 'max-height:75vh; overflow:auto;'
 				}, [
 					E('table', { 'class': 'table cbi-section-table' }, rows)
 				]);
@@ -892,6 +888,15 @@ return baseclass.extend({
 				content,
 				E('div', { 'class': 'right' }, footer)
 			]);
+			// LuCI's stock .modal class clamps the modal at a narrow
+			// max-width — fine for a confirm dialog, too tight for a
+			// 5-column node list. Widen the modal container itself
+			// (overriding only max-width keeps LuCI's own centering
+			// and inner padding intact); the inner table then expands
+			// to fill, instead of overflowing into the page underneath.
+			var modal = document.querySelector('#modal_overlay > .modal') ||
+			            document.querySelector('.modal');
+			if (modal) modal.style.maxWidth = 'min(95vw, 1100px)';
 		}).catch(function() {
 			ui.showModal(_('Nodes — %s').format(name), [
 				E('p', {}, [ _('Failed to load nodes.') ]),
