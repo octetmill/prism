@@ -774,28 +774,46 @@ local function read_clash_secret()
 	return raw
 end
 
--- Shell out to uclient-fetch to call the clash API. Returns the response body
--- as a string plus the exit code. uclient-fetch is preferred over busybox wget
--- here because it is already a hard dependency of prism (subscription sync),
--- whereas the symbol `wget` may resolve to a stub. Auth is passed via the
--- `token` query parameter (clash API accepts both Bearer header and ?token=);
--- uclient-fetch has no --header flag, so the query form is mandatory.
+-- Issue a GET against the clash API and return body + HTTP status. We hand the
+-- request to busybox `nc` instead of uclient-fetch because sing-box's clash API
+-- only honours the `token` query parameter on WebSocket upgrades — every other
+-- request must carry `Authorization: Bearer <secret>`, and uclient-fetch has
+-- no flag for sending an arbitrary header (uclient-fetch's first attempt here
+-- got a clean HTTP 401 back from sing-box). `nc` is part of busybox so no
+-- extra dependency is needed; HTTP/1.0 + `Connection: close` makes the server
+-- shut the socket and `nc` exit on EOF, which we wait out via `nc -w`.
+-- Caller passes a path-with-query; `secret` is folded into the Authorization
+-- header here, not into the URL.
 local function clash_get(path_with_query, secret, timeout_s)
-	local sep = (path_with_query:find("?", 1, true)) and "&" or "?"
-	local url = "http://" .. CLASH_HOST .. path_with_query .. sep
-		.. "token=" .. url_encode(secret or "")
-	local safe_url = url:gsub("'", "'\\''")
-	-- uclient-fetch -O- writes to stdout. The timeout includes connect + read,
-	-- which is what we want for a delay probe (a stuck connect is a fail).
-	local cmd = "uclient-fetch -q --timeout=" .. tostring(timeout_s)
-		.. " -O- '" .. safe_url .. "' 2>/dev/null; echo __RC__$?"
+	-- Build the raw HTTP request. CRLFs are literal control characters inside
+	-- the Lua string, which `printf '%s' '...'` carries through to nc verbatim.
+	-- Inputs are constrained — the path is URL-encoded by callers, the secret
+	-- is 32 hex chars from /proc/sys/kernel/random/uuid — so neither can carry
+	-- a single quote that would close the shell-quoted block; we still escape
+	-- defensively in case a future caller passes something looser.
+	local req = "GET " .. path_with_query .. " HTTP/1.0\r\n"
+		.. "Host: " .. CLASH_HOST .. "\r\n"
+		.. "Authorization: Bearer " .. (secret or "") .. "\r\n"
+		.. "Connection: close\r\n"
+		.. "Accept: application/json\r\n"
+		.. "\r\n"
+	local safe_req = req:gsub("'", "'\\''")
+	local host, port = CLASH_HOST:match("^(.-):(%d+)$")
+	local cmd = "printf '%s' '" .. safe_req .. "' | nc -w " .. tostring(timeout_s)
+		.. " " .. host .. " " .. port .. " 2>/dev/null"
 	local f = io.popen(cmd)
-	if not f then return nil, -1 end
-	local out = f:read("*a") or ""
+	if not f then return nil, 0 end
+	local raw = f:read("*a") or ""
 	f:close()
-	local rc = tonumber(out:match("__RC__(%d+)%s*$") or "1") or 1
-	out = out:gsub("__RC__%d+%s*$", "")
-	return out, rc
+	if raw == "" then return nil, 0 end
+	-- Split status line + headers from the body. sing-box always sends
+	-- well-formed HTTP, so a missing `\r\n\r\n` is a transport failure.
+	local sep_at = raw:find("\r\n\r\n", 1, true)
+	if not sep_at then return nil, 0 end
+	local head = raw:sub(1, sep_at - 1)
+	local body = raw:sub(sep_at + 4)
+	local status = tonumber(head:match("^HTTP/%d%.%d%s+(%d+)") or "0") or 0
+	return body, status
 end
 
 -- Read the current latency cache. Empty object when the file is missing or
@@ -857,34 +875,39 @@ local function probe_node(tag, url, timeout_ms)
 	local path = "/proxies/" .. url_encode(tag) .. "/delay"
 		.. "?timeout=" .. tostring(t_ms)
 		.. "&url="     .. url_encode(test_url)
-	-- Allow the request itself a little headroom over the probe timeout so
-	-- uclient-fetch doesn't kill the connection before sing-box's own timer
-	-- fires (giving a clean "504 timeout" body to parse instead of an EOF).
+	-- Allow nc itself a little headroom over the probe timeout so it doesn't
+	-- close the socket before sing-box's own timer fires (giving a clean
+	-- "504 timeout" body to parse instead of an EOF).
 	local req_timeout_s = math.ceil(t_ms / 1000) + 3
-	local body, rc = clash_get(path, secret, req_timeout_s)
+	local body, status = clash_get(path, secret, req_timeout_s)
 	local result = { tested_at = os.time() }
-	if rc ~= 0 then
-		result.error = "fetch failed (rc=" .. tostring(rc) .. ")"
+	if status == 0 then
+		result.error = "no response from clash API"
 		return result
 	end
 	if not _jsonc_ok or not body or body == "" then
-		result.error = "empty response"
+		-- Sing-box's clash API always sends a JSON body even on errors, so an
+		-- empty body alongside a non-zero status is itself a transport bug.
+		result.error = "HTTP " .. tostring(status) .. " (empty body)"
 		return result
 	end
 	local ok, parsed = pcall(_jsonc.parse, body)
 	if not ok or type(parsed) ~= "table" then
-		result.error = "invalid response"
+		result.error = "HTTP " .. tostring(status) .. " (invalid body)"
 		return result
 	end
-	if type(parsed.delay) == "number" then
+	if status == 200 and type(parsed.delay) == "number" then
 		result.delay_ms = parsed.delay
 		return result
 	end
-	if type(parsed.message) == "string" then
+	-- Non-200: sing-box returns { "message": "..." }. Surface it verbatim so
+	-- the UI can show "proxy not found" / "An error occurred in the delay
+	-- test" etc. without us having to map each variant.
+	if type(parsed.message) == "string" and parsed.message ~= "" then
 		result.error = parsed.message
 		return result
 	end
-	result.error = "unknown response"
+	result.error = "HTTP " .. tostring(status)
 	return result
 end
 
