@@ -875,10 +875,20 @@ local function probe_node(tag, url, timeout_ms)
 	-- filters out before sing-box sees them); 504 = the delay probe itself
 	-- timed out (target unreachable through this outbound).
 	if http_status then
+		-- sing-box 1.12 clash API status conventions:
+		--   404 = no such proxy registered (only happens when the tag is
+		--         not in the running config, e.g. include_all_nodes is off
+		--         and the node isn't referenced by any rule or group)
+		--   503 = probe couldn't complete — outbound dial failed, the test
+		--         URL didn't load through this node, or the test timed out.
+		--         sing-box doesn't distinguish "unreachable" from "timeout"
+		--         at the HTTP layer, so we report a single label here.
+		--   504 = older sing-box used this for timeout; keep the mapping
+		--         for forward/backward compatibility.
 		if http_status == 404 then
 			result.error = "proxy not in running config"
-		elseif http_status == 504 then
-			result.error = "timeout"
+		elseif http_status == 503 or http_status == 504 then
+			result.error = "unreachable"
 		else
 			result.error = "HTTP " .. tostring(http_status)
 		end
