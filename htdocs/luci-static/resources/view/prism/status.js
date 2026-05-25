@@ -31,8 +31,11 @@
 //
 // The active-node line shows `routing.final_outbound` from UCI — the tag
 // of the default node the rule chain falls through to (a group counts as a
-// node here). This commit shows it read-only; a follow-up may turn it into
-// an inline group switcher.
+// node here). Subscription nodes render as "<subscription>/<tag>" so two
+// nodes that happen to share a tag across subscriptions can be told apart;
+// manual nodes and groups render as the bare tag. Same formatting as the
+// Routing tab's dropdown. Read-only here; a follow-up may turn it into an
+// inline group switcher.
 
 'use strict';
 'require baseclass';
@@ -91,6 +94,12 @@ var callGetConfig = rpc.declare({
 	expect: { '': {} }
 });
 
+var callListOutbounds = rpc.declare({
+	object: 'luci.prism',
+	method: 'list_outbounds',
+	expect: { '': {} }
+});
+
 var TAIL_LINES   = 20;
 var POLL_MS      = 2000;
 var FULL_LOG_LINES = 500;
@@ -132,6 +141,29 @@ function shortVersion(v) {
 	return String(v).replace(/^sing-box version\s+/, 'sing-box ');
 }
 
+// Format the active-outbound tag for display: "<subscription>/<tag>" for a
+// subscription node, just "<tag>" for a manual node or a group (groups don't
+// appear in list_outbounds, so the lookup misses and falls through to the
+// raw tag — which is what we want, a group is a single named entity). Same
+// shape as the Routing tab's dropdown labels (routing.js:addServers).
+function formatActiveNode(tag, outbounds) {
+	if (!tag) return '';
+	if (tag === 'direct') return _('direct (no proxy)');
+	if (tag === 'block')  return _('block (drop)');
+	var subName = {};
+	uci.sections('prism', 'subscription').forEach(function(sub) {
+		subName[sub['.name']] = sub.name || sub['.name'];
+	});
+	for (var i = 0; i < (outbounds || []).length; i++) {
+		var ob = outbounds[i];
+		if (ob.tag !== tag) continue;
+		if (ob.subscription && subName[ob.subscription])
+			return subName[ob.subscription] + '/' + ob.tag;
+		return ob.tag;
+	}
+	return tag;
+}
+
 // Trigger a browser download of the given JSON text as sing-box.json. Uses a
 // Blob URL rather than a data: URL — large configs would otherwise blow past
 // the data-URL length limit some browsers still enforce.
@@ -161,6 +193,7 @@ return baseclass.extend({
 		return Promise.all([
 			callGetStatus().catch(function() { return {}; }),
 			callGetLogs(TAIL_LINES).catch(function() { return {}; }),
+			callListOutbounds().catch(function() { return {}; }),
 			uci.load('prism').catch(function() { return null; })
 		]);
 	},
@@ -168,10 +201,17 @@ return baseclass.extend({
 	render: function(results) {
 		var status     = (results && results[0]) || {};
 		var logsData   = (results && results[1]) || {};
+		var outbounds  = ((results && results[2]) || {}).outbounds || [];
 		var prismText  = formatLog(logsData.prism);
 		var singboxText = formatLog(logsData.singbox);
+		// Cache the outbound list for _updateStatus to reuse when the
+		// runtime section is rebuilt on an enable-flip. final_outbound
+		// rarely changes mid-session, so a snapshot at load time is fine;
+		// the user has to leave the tab to add a node anyway.
+		this._outbounds = outbounds;
 
-		var active = uci.get('prism', 'routing', 'final_outbound') || '';
+		var active = formatActiveNode(
+			uci.get('prism', 'routing', 'final_outbound') || '', outbounds);
 		var mode   = uci.get('prism', 'inbounds', 'mode') || 'tproxy';
 		var subCount = uci.sections('prism', 'subscription').length;
 		var ruleCount = uci.sections('prism', 'rule').filter(function(r) {
@@ -465,7 +505,9 @@ return baseclass.extend({
 			if (status.enabled) {
 				runtime.style.display = '';
 				if (!document.getElementById('prism-status-badge')) {
-					var active = uci.get('prism', 'routing', 'final_outbound') || '';
+					var active = formatActiveNode(
+						uci.get('prism', 'routing', 'final_outbound') || '',
+						this._outbounds);
 					var mode   = uci.get('prism', 'inbounds', 'mode') || 'tproxy';
 					var subCount = uci.sections('prism', 'subscription').length;
 					var ruleCount = uci.sections('prism', 'rule').filter(function(r) {
