@@ -779,18 +779,22 @@ end
 -- only honours the `token` query parameter on WebSocket upgrades — every other
 -- request must carry `Authorization: Bearer <secret>`, and uclient-fetch has
 -- no flag for sending an arbitrary header (uclient-fetch's first attempt here
--- got a clean HTTP 401 back from sing-box). `nc` is part of busybox so no
--- extra dependency is needed; HTTP/1.0 + `Connection: close` makes the server
--- shut the socket and `nc` exit on EOF, which we wait out via `nc -w`.
--- Caller passes a path-with-query; `secret` is folded into the Authorization
--- header here, not into the URL.
+-- got a clean HTTP 401 back from sing-box). Caller passes a path-with-query;
+-- `secret` is folded into the Authorization header here, not into the URL.
+--
+-- OpenWrt's busybox is built without FEATURE_NC_EXTRA so the `nc` applet is
+-- the minimal "nc IPADDR PORT" variant — no flags at all, not even -w. We
+-- wrap it in `timeout` (a separate busybox applet, always present) so a stuck
+-- connection still returns control to the caller. HTTP/1.0 + `Connection:
+-- close` makes sing-box close the socket as soon as it has answered, and
+-- minimal nc exits on socket EOF, so the happy path returns immediately.
 local function clash_get(path_with_query, secret, timeout_s)
 	-- Build the raw HTTP request. CRLFs are literal control characters inside
-	-- the Lua string, which `printf '%s' '...'` carries through to nc verbatim.
-	-- Inputs are constrained — the path is URL-encoded by callers, the secret
-	-- is 32 hex chars from /proc/sys/kernel/random/uuid — so neither can carry
-	-- a single quote that would close the shell-quoted block; we still escape
-	-- defensively in case a future caller passes something looser.
+	-- the Lua string, which `printf '%s' '...'` carries through to nc verbatim
+	-- (confirmed with od -c). The path is URL-encoded by callers and the
+	-- secret is 32 hex chars from /proc/sys/kernel/random/uuid, so neither
+	-- carries a single quote that could close the shell-quoted block; we still
+	-- escape defensively in case a future caller passes something looser.
 	local req = "GET " .. path_with_query .. " HTTP/1.0\r\n"
 		.. "Host: " .. CLASH_HOST .. "\r\n"
 		.. "Authorization: Bearer " .. (secret or "") .. "\r\n"
@@ -799,8 +803,8 @@ local function clash_get(path_with_query, secret, timeout_s)
 		.. "\r\n"
 	local safe_req = req:gsub("'", "'\\''")
 	local host, port = CLASH_HOST:match("^(.-):(%d+)$")
-	local cmd = "printf '%s' '" .. safe_req .. "' | nc -w " .. tostring(timeout_s)
-		.. " " .. host .. " " .. port .. " 2>/dev/null"
+	local cmd = "printf '%s' '" .. safe_req .. "' | timeout " .. tostring(timeout_s)
+		.. " nc " .. host .. " " .. port .. " 2>/dev/null"
 	local f = io.popen(cmd)
 	if not f then return nil, 0 end
 	local raw = f:read("*a") or ""
