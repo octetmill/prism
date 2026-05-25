@@ -65,10 +65,25 @@ var callGetLastLatency = rpc.declare({
 	expect: { '': {} }
 });
 
-// Group-delay endpoint: probes every member of the hidden _prism_test_all
-// selector group in one HTTP call. sing-box parallelises internally — much
-// faster than JS issuing N separate test_node RPCs and far less memory
-// pressure (one rpcd worker, not 8 concurrent ones).
+// Background-runner RPCs for "Test all": test_all_start forks the runner
+// and returns immediately (no XHR-timeout issue — the heavy lifting is
+// fire-and-forget on the device), test_all_status reads the runner's tiny
+// progress file. UI polls the status while refreshing cells from
+// get_last_latency between ticks, so results appear as the runner writes
+// them. test_group_delay (the synchronous RPC) is no longer called from
+// the UI but stays declared for direct debugging via ubus call.
+var callTestAllStart = rpc.declare({
+	object: 'luci.prism',
+	method: 'test_all_start',
+	expect: { '': {} }
+});
+
+var callTestAllStatus = rpc.declare({
+	object: 'luci.prism',
+	method: 'test_all_status',
+	expect: { '': {} }
+});
+
 var callTestGroupDelay = rpc.declare({
 	object: 'luci.prism',
 	method: 'test_group_delay',
@@ -876,7 +891,10 @@ return baseclass.extend({
 							if (n.tag && n.type !== 'urltest' && n.type !== 'selector')
 								tags.push(n.tag);
 						});
-						self._doTestAll(tags);
+						// _doTestSome: per-tag pool, scoped to this
+						// subscription's tags only. _doTestAll uses the
+						// background runner which probes everything.
+						self._doTestSome(tags);
 					}
 				}, [ _('Test all in this subscription') ]));
 			}
@@ -1004,17 +1022,120 @@ return baseclass.extend({
 		]);
 	},
 
-	// Run a pool of concurrent test_node calls for the given tag list. Each
-	// RPC is fast (≤ TEST_TIMEOUT_MS), so we sidestep the long-running-RPC
-	// problem that broke the group-delay path — LuCI's XHR layer aborts
-	// calls past ~20 s, and even bumping L.env.rpctimeout didn't reliably
-	// keep that limit lifted on this LuCI build. The trade-off: rather
-	// than waiting ~50 s for one big response, we get progressive updates
-	// as each cell fills in. The hidden _prism_test_all group and the
-	// test_group_delay RPC stay in build-config / luci.prism for a future
-	// fire-and-forget rework where a background worker drives the group
-	// endpoint and the UI just polls.
+	// Global "Test all": fork the background runner on the device and poll
+	// for completion. The runner calls sing-box's group-delay endpoint and
+	// writes results into /var/etc/prism/latency.json; we refresh cells
+	// from that cache between polls so results appear as they land. No
+	// long-running RPC, so LuCI's XHR timeout (which broke earlier attempts
+	// at the synchronous group-delay call) is a non-issue.
 	_doTestAll: function(tags) {
+		if (this._testAllRunning) {
+			ui.addNotification(null,
+				E('p', _('A latency test run is already in progress.')),
+				'warning');
+			return Promise.resolve();
+		}
+		this._testAllRunning = true;
+
+		var self = this;
+		ui.hideModal();
+
+		var elapsedEl = E('span', {}, [ _('Starting…') ]);
+		var banner = ui.addNotification(_('Latency tests running'), [
+			E('p', {}, [ elapsedEl ]),
+			E('p', { 'style': 'opacity:0.7; font-size:0.9em; margin:0;' }, [
+				_('sing-box probes every node in parallel. ' +
+				  'You can switch tabs — results land as they arrive.')
+			])
+		], 'info');
+
+		return callTestAllStart().then(function(res) {
+			if (res && res.error) {
+				throw new Error(res.error);
+			}
+			return self._pollTestAll(elapsedEl, banner);
+		}).catch(function(err) {
+			self._testAllRunning = false;
+			if (banner && banner.parentNode)
+				banner.parentNode.removeChild(banner);
+			var detail = err && (err.message || String(err)) || _('unknown error');
+			ui.addNotification(null,
+				E('p', [ _('Test all failed: '), detail ]),
+				'error');
+		});
+	},
+
+	// Drive the poll loop while the background runner does its work.
+	// Each tick: ask for status, refresh cells from the cache, update
+	// the banner's elapsed counter. Stops when status.running flips off.
+	_pollTestAll: function(elapsedEl, banner) {
+		var self = this;
+		var startMs = Date.now();
+		var POLL_INTERVAL = 1500;
+		// Safety cap: if the runner crashes without clearing the status
+		// (e.g. SIGKILL), we still want the UI to stop polling. 3 min is
+		// generous — the runner's own clash timeout is 60 s.
+		var MAX_ELAPSED_MS = 3 * 60 * 1000;
+
+		return new Promise(function(resolve, reject) {
+			function refreshCells() {
+				return callGetLastLatency().then(function(c) {
+					var results = (c && c.results) || {};
+					for (var tag in results) {
+						self._latency[tag] = results[tag];
+						self._refreshLatencyCell(tag);
+					}
+				}).catch(function() { /* transient — try again next tick */ });
+			}
+
+			function tick() {
+				if (Date.now() - startMs > MAX_ELAPSED_MS) {
+					reject(new Error(_('runner timed out (status file never cleared)')));
+					return;
+				}
+				var elapsed = Math.floor((Date.now() - startMs) / 1000);
+				if (elapsedEl.parentNode)
+					elapsedEl.textContent = _('Probing… %ds elapsed').format(elapsed);
+
+				callTestAllStatus().then(function(status) {
+					return refreshCells().then(function() { return status; });
+				}).then(function(status) {
+					if (status && !status.running) {
+						resolve(status);
+					} else {
+						setTimeout(tick, POLL_INTERVAL);
+					}
+				}).catch(function() {
+					setTimeout(tick, POLL_INTERVAL);
+				});
+			}
+			setTimeout(tick, POLL_INTERVAL);
+		}).then(function(status) {
+			self._testAllRunning = false;
+			if (banner && banner.parentNode)
+				banner.parentNode.removeChild(banner);
+			if (status && status.error) {
+				ui.addNotification(null,
+					E('p', _('Test all failed: %s').format(status.error)),
+					'error');
+				return;
+			}
+			var tested = (status && status.tested) || 0;
+			var errors = (status && status.errors) || 0;
+			ui.addNotification(null, E('p',
+				errors > 0
+					? _('Tested %d nodes — %d unreachable.').format(tested + errors, errors)
+					: _('Tested %d nodes.').format(tested)),
+				'info');
+		});
+	},
+
+	// Per-subscription "Test all in this subscription" path. Uses the
+	// per-tag pool because (a) subscriptions are typically small (≤50
+	// nodes), fitting comfortably under LuCI's RPC timeout, and (b)
+	// test_node gives progressive per-tag updates without needing the
+	// background runner. The runner is overkill for this scope.
+	_doTestSome: function(tags) {
 		if (this._testAllRunning) {
 			ui.addNotification(null,
 				E('p', _('A latency test run is already in progress.')),
@@ -1027,9 +1148,7 @@ return baseclass.extend({
 		var done = 0, errors = 0, total = tags.length;
 		ui.hideModal();
 
-		var progressEl = E('span', {}, [
-			_('Testing %d / %d…').format(0, total)
-		]);
+		var progressEl = E('span', {}, [ _('Testing %d / %d…').format(0, total) ]);
 		var banner = ui.addNotification(_('Latency tests running'), [
 			E('p', {}, [ progressEl ]),
 			E('p', { 'style': 'opacity:0.7; font-size:0.9em; margin:0;' }, [
@@ -1050,12 +1169,10 @@ return baseclass.extend({
 				done++;
 				if (r.error) errors++;
 				if (progressEl.parentNode)
-					progressEl.textContent =
-						_('Testing %d / %d…').format(done, total);
+					progressEl.textContent = _('Testing %d / %d…').format(done, total);
 				return next();
 			});
 		}
-
 		var workers = [];
 		for (var i = 0; i < Math.min(TEST_CONCURRENCY, tags.length); i++)
 			workers.push(next());
@@ -1065,13 +1182,9 @@ return baseclass.extend({
 				banner.parentNode.removeChild(banner);
 			ui.addNotification(null, E('p',
 				errors > 0
-					? _('Tested %d nodes — %d failed or unreachable.').format(total, errors)
+					? _('Tested %d nodes — %d failed.').format(total, errors)
 					: _('Tested %d nodes.').format(total)),
 				errors > 0 ? 'warning' : 'info');
-		}).catch(function() {
-			self._testAllRunning = false;
-			if (banner && banner.parentNode)
-				banner.parentNode.removeChild(banner);
 		});
 	},
 

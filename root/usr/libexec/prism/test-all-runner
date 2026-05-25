@@ -1,0 +1,134 @@
+#!/usr/bin/env lua
+-- SPDX-License-Identifier: GPL-3.0-only
+-- Copyright (C) 2026 OctetMill
+--
+-- Background runner for the Nodes panel's "Test all" button.
+--
+-- luci.prism's test_all_start RPC forks this script with </dev/null >/dev/null
+-- 2>&1 & so it survives the parent rpcd worker's exit; the script then calls
+-- sing-box's clash group-delay endpoint, merges the result into the latency
+-- cache, and updates a status file the UI polls. This sidesteps the "50 s RPC
+-- vs LuCI's 20 s XHR timeout" mismatch that broke the synchronous path —
+-- test_all_start returns in milliseconds, the UI polls test_all_status until
+-- `running` flips to false, and reads the latency cache between polls to show
+-- results as they land.
+
+local jsonc = require "luci.jsonc"
+local lib   = dofile("/usr/libexec/prism/prismlib.lua")
+local read_file = lib.read_file
+
+local CACHE_FILE  = "/var/etc/prism/latency.json"
+local STATUS_FILE = "/var/etc/prism/.test-all-status"
+local CLASH_HOST  = "127.0.0.1:9090"
+local GROUP_TAG   = "_prism_test_all"
+local DEFAULT_URL = "http://www.gstatic.com/generate_204"
+-- Total budget for sing-box's internal probe pool. Passed both to clash
+-- (as the `timeout` query parameter, total time for the whole batch) and
+-- to uclient-fetch with extra headroom so the HTTP client doesn't reap
+-- the socket before sing-box's own timer fires.
+local CLASH_TIMEOUT_MS = 60000
+
+local function url_encode(s)
+	return (tostring(s):gsub("([^%w%-%._~])", function(c)
+		return string.format("%%%02X", string.byte(c))
+	end))
+end
+
+local function write_atomic(path, content)
+	os.execute("mkdir -p '" .. path:gsub("/[^/]+$", "") .. "' 2>/dev/null")
+	local tmp = path .. ".tmp"
+	local f = io.open(tmp, "w")
+	if not f then return false end
+	f:write(content)
+	f:close()
+	return os.rename(tmp, path) ~= nil
+end
+
+local function update_status(state)
+	state.updated_at = os.time()
+	write_atomic(STATUS_FILE, jsonc.stringify(state))
+end
+
+-- Initial state — UI sees running=true the moment its first poll lands.
+local started_at = os.time()
+update_status({ running = true, started_at = started_at })
+
+-- Build the URL once. uclient-fetch's --timeout has to outlast the clash
+-- side's own internal timer, otherwise we'd kill the socket while sing-box
+-- is mid-batch and never see the response.
+local path = "/group/" .. url_encode(GROUP_TAG) .. "/delay"
+	.. "?timeout=" .. tostring(CLASH_TIMEOUT_MS)
+	.. "&url="     .. url_encode(DEFAULT_URL)
+local url      = "http://" .. CLASH_HOST .. path
+local safe_url = url:gsub("'", "'\\''")
+local req_timeout_s = math.ceil(CLASH_TIMEOUT_MS / 1000) + 10
+local cmd = "uclient-fetch --timeout=" .. tostring(req_timeout_s)
+	.. " -O- '" .. safe_url .. "' 2>/dev/null"
+
+local f = io.popen(cmd)
+if not f then
+	update_status({
+		running     = false,
+		finished_at = os.time(),
+		error       = "failed to spawn uclient-fetch"
+	})
+	os.exit(1)
+end
+local body = f:read("*a") or ""
+f:close()
+
+if body == "" then
+	update_status({
+		running     = false,
+		finished_at = os.time(),
+		error       = "no response from clash API"
+	})
+	os.exit(1)
+end
+
+local ok, parsed = pcall(jsonc.parse, body)
+if not ok or type(parsed) ~= "table" then
+	update_status({
+		running     = false,
+		finished_at = os.time(),
+		error       = "invalid response from clash API"
+	})
+	os.exit(1)
+end
+
+-- Read the existing cache so per-row Test results (and previous Test all
+-- runs) survive a batch update — we merge, we don't overwrite.
+local cache = { results = {} }
+local raw_cache = read_file(CACHE_FILE)
+if raw_cache and raw_cache ~= "" then
+	local cok, cparsed = pcall(jsonc.parse, raw_cache)
+	if cok and type(cparsed) == "table" then
+		cache = cparsed
+		if type(cache.results) ~= "table" then cache.results = {} end
+	end
+end
+
+local now = os.time()
+local tested, errors = 0, 0
+-- sing-box returns { "<tag>": <delay_ms_or_zero>, ... } — 0 means the
+-- internal URLTest failed (target unreachable through that outbound).
+for tag, delay in pairs(parsed) do
+	if type(delay) == "number" then
+		if delay > 0 then
+			cache.results[tag] = { delay_ms = delay, tested_at = now }
+			tested = tested + 1
+		else
+			cache.results[tag] = { error = "unreachable", tested_at = now }
+			errors = errors + 1
+		end
+	end
+end
+
+write_atomic(CACHE_FILE, jsonc.stringify(cache))
+update_status({
+	running     = false,
+	started_at  = started_at,
+	finished_at = now,
+	tested      = tested,
+	errors      = errors
+})

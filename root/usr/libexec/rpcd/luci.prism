@@ -1666,6 +1666,54 @@ local methods = {
 		end
 	},
 
+	-- Fork the background "Test all" runner. The runner calls the clash
+	-- group delay endpoint on its own (no synchronous RPC waiting for the
+	-- response), writes results into /var/etc/prism/latency.json, and
+	-- updates /var/etc/prism/.test-all-status with running=true/false. The
+	-- UI polls test_all_status to know when to stop and refreshes cells
+	-- from get_last_latency between polls. Returns immediately so the
+	-- request stays well under any LuCI XHR-timeout limit.
+	test_all_start = {
+		call = function()
+			local c = uci_cursor()
+			local enabled = c:get("prism", "global", "clash_api_enabled")
+			c:close()
+			if enabled ~= "1" then
+				return { error = "clash API disabled" }
+			end
+			-- If a previous runner is still alive (status file present
+			-- with running=true), refuse — two runners would race on the
+			-- cache file.
+			local raw = read_file("/var/etc/prism/.test-all-status")
+			if raw and raw ~= "" and _jsonc_ok then
+				local ok, st = pcall(_jsonc.parse, raw)
+				if ok and type(st) == "table" and st.running then
+					return { error = "test already running" }
+				end
+			end
+			-- Fork-and-forget: redirect all FDs so the parent rpcd worker
+			-- can exit without waiting on the child's pipes. The Lua
+			-- runner then survives this RPC's return.
+			os.execute("/usr/libexec/prism/test-all-runner </dev/null >/dev/null 2>&1 &")
+			return { started = true }
+		end
+	},
+
+	-- Return the runner's status file as-is. UI polls this every couple of
+	-- seconds; when `running` flips to false the batch is done and the
+	-- final summary fields (tested, errors, finished_at) are populated.
+	-- Absent file = no run has happened since boot.
+	test_all_status = {
+		call = function()
+			local raw = read_file("/var/etc/prism/.test-all-status")
+			if not raw or raw == "" then return { running = false } end
+			if not _jsonc_ok then return { running = false } end
+			local ok, st = pcall(_jsonc.parse, raw)
+			if not ok or type(st) ~= "table" then return { running = false } end
+			return st
+		end
+	},
+
 	-- Probe every member of the hidden _prism_test_all selector group in one
 	-- HTTP call to the clash API's /group/<tag>/delay endpoint. sing-box
 	-- runs the probes as parallel goroutines internally — much faster than
