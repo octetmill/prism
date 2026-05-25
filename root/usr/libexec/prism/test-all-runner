@@ -26,7 +26,8 @@
 
 local jsonc = require "luci.jsonc"
 local lib   = dofile("/usr/libexec/prism/prismlib.lua")
-local read_file = lib.read_file
+local read_file  = lib.read_file
+local url_encode = lib.url_encode
 
 local STATUS  = "/var/etc/prism/.test-all-status"
 local LATENCY = "/var/etc/prism/latency.json"
@@ -37,12 +38,6 @@ local CONCURRENCY      = 16            -- parallel uclient-fetch processes
 local PROBE_TIMEOUT_MS = 3000          -- per-probe (clash query param)
 local REQ_TIMEOUT_S    = 5             -- uclient-fetch wall clock per probe
 local TEST_URL         = "http://www.gstatic.com/generate_204"
-
-local function url_encode(s)
-	return (tostring(s):gsub("([^%w%-%._~])", function(c)
-		return string.format("%%%02X", string.byte(c))
-	end))
-end
 
 local function shell_quote(s)
 	return "'" .. tostring(s):gsub("'", "'\\''") .. "'"

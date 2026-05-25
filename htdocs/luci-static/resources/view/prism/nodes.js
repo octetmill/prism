@@ -67,11 +67,10 @@ var callGetLastLatency = rpc.declare({
 
 // Background-runner RPCs for "Test all": test_all_start forks the runner
 // and returns immediately (no XHR-timeout issue — the heavy lifting is
-// fire-and-forget on the device), test_all_status reads the runner's tiny
-// progress file. UI polls the status while refreshing cells from
-// get_last_latency between ticks, so results appear as the runner writes
-// them. test_group_delay (the synchronous RPC) is no longer called from
-// the UI but stays declared for direct debugging via ubus call.
+// fire-and-forget on the device); test_all_status reads the runner's
+// tiny progress file. UI polls the status while refreshing cells from
+// get_last_latency between ticks, so results appear as the runner
+// writes them.
 var callTestAllStart = rpc.declare({
 	object: 'luci.prism',
 	method: 'test_all_start',
@@ -82,13 +81,6 @@ var callTestAllStart = rpc.declare({
 var callTestAllStatus = rpc.declare({
 	object: 'luci.prism',
 	method: 'test_all_status',
-	expect: { '': {} }
-});
-
-var callTestGroupDelay = rpc.declare({
-	object: 'luci.prism',
-	method: 'test_group_delay',
-	params: ['tag', 'url', 'timeout_ms'],
 	expect: { '': {} }
 });
 

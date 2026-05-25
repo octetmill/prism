@@ -742,13 +742,15 @@ end
 -- crashed with "attempt to call global 'read_file' (a nil value)".
 local lib = dofile("/usr/libexec/prism/prismlib.lua")
 local read_file = lib.read_file
+local url_encode = lib.url_encode
 
 -- ─── Node latency probe via sing-box clash API ────────────────────────────
 -- Loopback-only API surface configured by build-config when the user enables
 -- `prism.global.clash_api_enabled` from Settings. Tests are on-demand: the UI
--- triggers them per node (or via test_all_nodes), the result lands in a tmpfs
--- cache so a page reload doesn't drop measurements, and `get_last_latency`
--- reads the cache for the Nodes panel's Latency column.
+-- triggers them per node (test_node) or via the background runner spawned
+-- by test_all_start; results land in a tmpfs cache so a page reload doesn't
+-- drop measurements, and `get_last_latency` reads the cache for the Nodes
+-- panel's Latency column.
 --
 -- We talk to the API with uclient-fetch — the same downloader the subscription
 -- sync code already uses, so no new dependency. sing-box's clash auth only
@@ -761,16 +763,6 @@ local CLASH_HOST          = "127.0.0.1:9090"
 local LATENCY_CACHE_PATH  = "/var/etc/prism/latency.json"
 local DEFAULT_TEST_URL    = "http://www.gstatic.com/generate_204"
 local DEFAULT_TEST_TIMEOUT_MS = 5000
-
--- RFC 3986 percent-encoding. Node tags and the test URL ride in a uclient-fetch
--- command line via the URL; anything not in [A-Za-z0-9-._~] gets %XX-encoded so
--- a tag like "🇭🇰 HK 01" or a URL with a query string round-trips intact.
-local function url_encode(s)
-	if s == nil then return "" end
-	return (tostring(s):gsub("([^%w%-%._~])", function(c)
-		return string.format("%%%02X", string.byte(c))
-	end))
-end
 
 -- Shell out to uclient-fetch and return body, rc, and (when the server
 -- replied with a 4xx/5xx) the HTTP status code parsed out of stderr.
@@ -835,8 +827,9 @@ local function write_latency_cache(cache)
 end
 
 -- Run one delay probe against the clash API. Returns a result table with
--- `delay_ms` (number on success) and/or `error` (string on failure). The
--- caller decides whether to persist it (test_node / test_all_nodes both do).
+-- `delay_ms` (number on success) and/or `error` (string on failure). Used
+-- by the per-row Test button via the test_node RPC; "Test all" goes
+-- through the background runner instead and doesn't call this.
 -- Caveats surfaced as `error`:
 --   "clash API disabled"   — UCI flag off (the experimental.clash_api block
 --                            is absent, so port 9090 isn't listening)
@@ -1630,32 +1623,6 @@ local methods = {
 		end
 	},
 
-	-- Probe every user-defined node sequentially. Returns once every test is
-	-- done — note that for many nodes the total runtime can exceed rpcd's
-	-- per-call timeout; the UI is expected to prefer per-tag test_node calls
-	-- when the node list is large (it gets progressive feedback that way too).
-	-- Skips group types (urltest, selector): the clash API would return the
-	-- active member's latency, which is the same number test_node already
-	-- gives for that member's own tag, so testing the group is redundant.
-	test_all_nodes = {
-		args = { url = "", timeout_ms = 0 },
-		call = function(args)
-			local cache = read_latency_cache()
-			local tested, errors = 0, 0
-			local all = list_all_nodes()
-			local SKIP = { urltest = true, selector = true, direct = true, block = true }
-			for _, n in ipairs(all) do
-				if n.tag ~= "" and not SKIP[n.type] then
-					local r = probe_node(n.tag, args.url, args.timeout_ms)
-					cache.results[n.tag] = r
-					if r.delay_ms then tested = tested + 1 else errors = errors + 1 end
-				end
-			end
-			write_latency_cache(cache)
-			return { tested = tested, errors = errors }
-		end
-	},
-
 	-- Return the cached latency results so the Nodes panel can render the
 	-- Latency / Last-tested columns without re-probing on every page load.
 	-- Empty `results` table when the cache file is missing (first run, or a
@@ -1739,83 +1706,6 @@ local methods = {
 			local ok, st = pcall(_jsonc.parse, raw)
 			if not ok or type(st) ~= "table" then return { running = false } end
 			return st
-		end
-	},
-
-	-- Probe every member of the hidden _prism_test_all selector group in one
-	-- HTTP call to the clash API's /group/<tag>/delay endpoint. sing-box
-	-- runs the probes as parallel goroutines internally — much faster than
-	-- JS issuing 300 separate test_node RPCs and far less memory pressure
-	-- (one rpcd worker instead of N concurrent ones). The hidden group is
-	-- only emitted by build-config when clash_api_enabled=1, so a 404 here
-	-- means the user is on an older config and should reload after enabling.
-	-- Response from sing-box: { "<tag>": <delay_ms_or_zero>, ... }. A zero
-	-- (or omitted key) means the probe failed; non-zero is the delay in ms.
-	test_group_delay = {
-		args = { tag = "_prism_test_all", url = "", timeout_ms = 0 },
-		call = function(args)
-			local c = uci_cursor()
-			local enabled = c:get("prism", "global", "clash_api_enabled")
-			c:close()
-			if enabled ~= "1" then
-				return { error = "clash API disabled" }
-			end
-			local group_tag = (type(args.tag) == "string" and args.tag ~= "")
-				and args.tag or "_prism_test_all"
-			-- Clash treats `timeout` as the TOTAL time budget for the whole
-			-- group test, not per-probe. With sing-box's internal worker pool
-			-- and N nodes, the realistic worst-case is roughly
-			-- N/concurrency * per_probe_timeout. 60 s is comfortable for 300
-			-- nodes; clamp at 5 min so a runaway request can't wedge rpcd.
-			local t_ms = tonumber(args.timeout_ms) or 60000
-			if t_ms < 1000   then t_ms = 1000   end
-			if t_ms > 300000 then t_ms = 300000 end
-			local test_url = (type(args.url) == "string" and args.url ~= "")
-				and args.url or DEFAULT_TEST_URL
-			local path = "/group/" .. url_encode(group_tag) .. "/delay"
-				.. "?timeout=" .. tostring(t_ms)
-				.. "&url="     .. url_encode(test_url)
-			-- uclient-fetch needs a wall-clock cap beyond sing-box's own
-			-- timeout so we don't lose the response to a transport reaper.
-			local req_timeout_s = math.ceil(t_ms / 1000) + 10
-			local body, rc, http_status = clash_get(path, req_timeout_s)
-			if http_status then
-				if http_status == 404 then
-					return { error = "group not found — reload after enabling clash API" }
-				end
-				return { error = "HTTP " .. tostring(http_status) }
-			end
-			if rc ~= 0 then
-				return { error = "fetch failed (rc=" .. tostring(rc) .. ")" }
-			end
-			if not _jsonc_ok or not body or body == "" then
-				return { error = "empty response" }
-			end
-			local ok, parsed = pcall(_jsonc.parse, body)
-			if not ok or type(parsed) ~= "table" then
-				return { error = "invalid response" }
-			end
-			-- Translate sing-box's { tag: delay_or_0 } shape into our cache
-			-- entry format and merge into the latency cache so a page reload
-			-- shows the freshly-tested values.
-			local now = os.time()
-			local results = {}
-			local tested, errors = 0, 0
-			for tag, delay in pairs(parsed) do
-				if type(delay) == "number" then
-					if delay > 0 then
-						results[tag] = { delay_ms = delay, tested_at = now }
-						tested = tested + 1
-					else
-						results[tag] = { error = "unreachable", tested_at = now }
-						errors = errors + 1
-					end
-				end
-			end
-			local cache = read_latency_cache()
-			for tag, r in pairs(results) do cache.results[tag] = r end
-			write_latency_cache(cache)
-			return { results = results, tested = tested, errors = errors }
 		end
 	},
 

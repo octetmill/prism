@@ -33,6 +33,17 @@ function M.uci_list(s, key)
 	return {}
 end
 
+-- RFC 3986 percent-encoding for one URL component. Tags and URLs ride in a
+-- shell command line via the clash API URL; anything not in the unreserved
+-- set ([A-Za-z0-9-._~]) gets %XX-encoded so a tag like "🇭🇰 HK 01" or a URL
+-- with a query string round-trips intact through both the shell and HTTP.
+function M.url_encode(s)
+	if s == nil then return "" end
+	return (tostring(s):gsub("([^%w%-%._~])", function(c)
+		return string.format("%%%02X", string.byte(c))
+	end))
+end
+
 -- Split a "provider/name" rule-set token. Returns provider, name — or nil
 -- when the token carries no slash (a bare custom-rule-set label).
 function M.split_provider_token(token)
