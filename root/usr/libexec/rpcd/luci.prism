@@ -1606,6 +1606,79 @@ local methods = {
 		end
 	},
 
+	-- Return the live state of every urltest/selector group: the currently
+	-- active member (the clash `now` field) plus its last-known latency.
+	-- Source is the snapshot file the active-watch daemon writes every 10s,
+	-- not a fresh /proxies GET — keeps the RPC cheap (no extra HTTP round
+	-- trip on every Status-page tick), and ties the UI to the same view the
+	-- daemon logs against, so what the Prism log says flipped matches what
+	-- the Groups panel shows is active.
+	--
+	-- Joins UCI on the group tag to surface `interval` / `tolerance` /
+	-- `default` so the user can read each group's tuning right next to the
+	-- evidence of it churning. UCI is open as a cursor only once for the
+	-- whole list — group counts are small (a handful).
+	--
+	-- Reports the same `error = "clash API disabled"` as test_node when the
+	-- feature flag is off, so the UI can render a consistent hint.
+	get_active_groups = {
+		call = function()
+			local c = uci_cursor()
+			local enabled = c:get("prism", "global", "clash_api_enabled")
+			if enabled ~= "1" then
+				c:close()
+				return { error = "clash API disabled", groups = {} }
+			end
+
+			-- Index UCI group sections (type=node with urltest/selector
+			-- type) by their tag, so the snapshot tag maps back to the
+			-- user's configured interval/tolerance/default.
+			local uci_groups = {}
+			c:foreach("prism", "node", function(s)
+				if s.type == "urltest" or s.type == "selector" then
+					if s.tag and s.tag ~= "" then
+						uci_groups[s.tag] = {
+							type      = s.type,
+							interval  = s.urltest_interval or "",
+							tolerance = s.urltest_tolerance or "",
+							default   = s.selector_default or ""
+						}
+					end
+				end
+			end)
+			c:close()
+
+			local snap = read_file("/var/etc/prism/.active-nodes.json")
+			if not snap or snap == "" or not _jsonc_ok then
+				return { groups = {}, updated_at = 0 }
+			end
+			local ok, parsed = pcall(_jsonc.parse, snap)
+			if not ok or type(parsed) ~= "table" or type(parsed.groups) ~= "table" then
+				return { groups = {}, updated_at = 0 }
+			end
+
+			local out = {}
+			for tag, entry in pairs(parsed.groups) do
+				local u = uci_groups[tag] or {}
+				out[#out + 1] = {
+					tag       = tag,
+					type      = (entry.type == "URLTest") and "urltest"
+					            or (entry.type == "Selector") and "selector"
+					            or string.lower(tostring(entry.type or "")),
+					now       = entry.now or "",
+					delay_ms  = entry.delay_ms,
+					interval  = u.interval or "",
+					tolerance = u.tolerance or "",
+					default   = u.default or ""
+				}
+			end
+			-- Stable order so the UI rows don't jump on each refresh —
+			-- pairs() over the snapshot is unordered. Sort by tag.
+			table.sort(out, function(a, b) return a.tag < b.tag end)
+			return { groups = out, updated_at = tonumber(parsed.updated_at) or 0 }
+		end
+	},
+
 	-- Probe one outbound's latency via the loopback clash API. The clash API
 	-- block must be enabled in Settings (UCI clash_api_enabled=1) so sing-box
 	-- is listening on 127.0.0.1:9090; otherwise we return error="clash API

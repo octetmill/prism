@@ -1,0 +1,129 @@
+#!/usr/bin/env lua
+-- SPDX-License-Identifier: GPL-3.0-only
+-- Copyright (C) 2026 OctetMill
+--
+-- Active-node watcher — long-running daemon that polls sing-box's clash API
+-- at /proxies every POLL_S seconds and logs to syslog whenever the currently
+-- active member (the `now` field) of any urltest or selector group changes.
+-- Provides the diagnostic trail a user needs to decide whether their urltest
+-- `tolerance` / `interval` are tuned too aggressively for their network.
+--
+-- Lifecycle: a procd instance declared by /etc/init.d/prism alongside the
+-- sing-box instance, gated on UCI prism.global.clash_api_enabled. Stops and
+-- starts with the service; respawned by procd if it crashes.
+--
+-- Snapshot at /var/etc/prism/.active-nodes.json (tmpfs — cleared on reboot,
+-- which is fine: the first tick after boot primes the snapshot without
+-- emitting a change line). The same file backs the Status page's Groups
+-- panel via the get_active_groups RPC, so the UI sees the same view this
+-- watcher logs against.
+
+local jsonc = require "luci.jsonc"
+local lib   = dofile("/usr/libexec/prism/prismlib.lua")
+local read_file = lib.read_file
+
+local CLASH_HOST = "127.0.0.1:9090"
+local SNAPSHOT   = "/var/etc/prism/.active-nodes.json"
+local POLL_S     = 10
+
+local function logmsg(level, msg)
+	local safe = msg:gsub("'", "'\\''")
+	os.execute("logger -p daemon." .. level .. " -t prism '" .. safe .. "' 2>/dev/null")
+end
+
+-- One GET to the loopback clash API. Returns the parsed response object,
+-- or nil on any failure (port not listening yet, malformed body, etc.).
+-- Transient failures are silent: the daemon retries on the next tick.
+local function fetch_proxies()
+	local f = io.popen("uclient-fetch --timeout=5 -qO- 'http://"
+		.. CLASH_HOST .. "/proxies' 2>/dev/null")
+	if not f then return nil end
+	local body = f:read("*a") or ""
+	f:close()
+	if body == "" then return nil end
+	local ok, parsed = pcall(jsonc.parse, body)
+	if not ok or type(parsed) ~= "table" then return nil end
+	return parsed
+end
+
+-- Extract the relevant slice of the /proxies response: one entry per
+-- urltest/selector group, carrying the active member tag and (when
+-- available) its most recent latency. Internal helper groups (tag starts
+-- with "_", e.g. _prism_test_all) are filtered out — they're our own
+-- machinery, not something the user configured or wants to see flip.
+local function group_state(parsed)
+	local out = {}
+	if type(parsed.proxies) ~= "table" then return out end
+	for tag, p in pairs(parsed.proxies) do
+		if type(p) == "table"
+			and (p.type == "URLTest" or p.type == "Selector")
+			and type(p.now) == "string" and p.now ~= ""
+			and tag:sub(1, 1) ~= "_"
+		then
+			local entry = { now = p.now, type = p.type }
+			-- Latency lives on the member proxy's history, not the group's.
+			local member = parsed.proxies[p.now]
+			if type(member) == "table" and type(member.history) == "table" then
+				local last = member.history[#member.history]
+				if last and type(last.delay) == "number" and last.delay > 0 then
+					entry.delay_ms = last.delay
+				end
+			end
+			out[tag] = entry
+		end
+	end
+	return out
+end
+
+local function save_snapshot(state)
+	os.execute("mkdir -p /var/etc/prism 2>/dev/null")
+	local tmp = SNAPSHOT .. ".tmp"
+	local f = io.open(tmp, "w")
+	if not f then return end
+	f:write(jsonc.stringify({ groups = state, updated_at = os.time() }))
+	f:close()
+	os.rename(tmp, SNAPSHOT)
+end
+
+local function load_snapshot()
+	local raw = read_file(SNAPSHOT)
+	if not raw or raw == "" then return {} end
+	local ok, parsed = pcall(jsonc.parse, raw)
+	if not ok or type(parsed) ~= "table" then return {} end
+	return (type(parsed.groups) == "table") and parsed.groups or {}
+end
+
+-- previous: the last tick's state, used to detect changes.
+-- primed:  true once we've seen at least one successful poll. On a fresh
+-- boot (snapshot empty) we still take a poll and stash it, but we don't
+-- emit "changed" lines for groups going from nothing to their first
+-- reading — that isn't a flip.
+local previous = load_snapshot()
+local primed   = next(previous) ~= nil
+
+while true do
+	local parsed = fetch_proxies()
+	if parsed then
+		local current = group_state(parsed)
+
+		if primed then
+			for tag, entry in pairs(current) do
+				local old = previous[tag]
+				if old and old.now and old.now ~= entry.now then
+					local msg = string.format(
+						"group '%s': active node %s -> %s",
+						tag, old.now, entry.now)
+					if entry.delay_ms then
+						msg = msg .. string.format(" (%dms)", entry.delay_ms)
+					end
+					logmsg("info", msg)
+				end
+			end
+		end
+
+		save_snapshot(current)
+		previous = current
+		primed   = true
+	end
+	os.execute("sleep " .. tostring(POLL_S))
+end
