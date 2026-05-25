@@ -157,6 +157,15 @@ prism_declare_active_watch() {
 	procd_set_param respawn
 	procd_set_param stdout 1
 	procd_set_param stderr 1
+	# Hash the script itself, mirroring what we do for sing-box's
+	# config file. Without this, procd treats every reload as "same
+	# instance, no work to do" — even after the package upgrade
+	# rewrites the script on disk. The OLD Lua interpreter then keeps
+	# running indefinitely, silently shipping pre-upgrade behaviour.
+	# With `file` set, an apk upgrade triggers an automatic restart
+	# the next time start_service runs (which happens on every UCI
+	# commit via the reload trigger).
+	procd_set_param file /usr/libexec/prism/active-watch
 	procd_close_instance
 }
 
