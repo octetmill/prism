@@ -22,6 +22,13 @@ config_get_bool enabled global enabled 0
 # Nothing to watch when the service is intentionally stopped.
 [ "$enabled" = "1" ] || exit 0
 
+# A transient pause (Status page Stop button) writes /var/run/prism.paused
+# and stops the service without flipping the persistent `enabled` flag. Skip
+# re-arming while paused — otherwise this watchdog would undo the user's
+# action within 5 minutes. The marker is on tmpfs, so a reboot clears it
+# and an enabled-but-paused service resumes naturally.
+[ -e /var/run/prism.paused ] && exit 0
+
 # procd's own view of the instance, scoped to the prism service — mirrors
 # service_running() in the rpcd handler.
 if ubus call service list '{"name":"prism"}' 2>/dev/null \

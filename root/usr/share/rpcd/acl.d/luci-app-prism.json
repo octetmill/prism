@@ -9,7 +9,7 @@
 		},
 		"write": {
 			"ubus": {
-				"luci.prism": [ "reload", "reload_if_changed", "set_extra_config", "sync_subscription", "sync_all_subscriptions", "start", "stop", "restart" ]
+				"luci.prism": [ "reload", "reload_if_changed", "set_enabled", "set_extra_config", "sync_subscription", "sync_all_subscriptions", "start", "stop", "restart" ]
 			},
 			"uci": [ "prism" ]
 		}
