@@ -1038,20 +1038,18 @@ return baseclass.extend({
 		var GROUP_TIMEOUT_MS = 60000;
 
 		// LuCI's XHR-side RPC timeout defaults to 20 s (L.env.rpctimeout),
-		// which is well under our 60 s budget — without overriding, the
-		// browser aborts the XHR before sing-box has finished and the .catch
-		// below fires even though the server-side probe completed cleanly.
-		// L.env.rpctimeout is read at the moment the request is dispatched
-		// (rpc.js → handleCallReply → Request.post), so we set, call (the
-		// XHR is now configured), and restore right after — no need for the
-		// override to live past the synchronous dispatch.
+		// which is well under our 60 s budget. Bump it before dispatching
+		// the call and only restore after the promise settles — restoring
+		// synchronously caused 'XHR request aborted by browser' because
+		// LuCI's Request.post defers the actual XHR setup to a microtask,
+		// by which time the variable was already back to 20.
 		var origRpcTimeout = L.env.rpctimeout;
 		L.env.rpctimeout = 120;
-		var p = callTestGroupDelay('_prism_test_all', '', GROUP_TIMEOUT_MS);
-		L.env.rpctimeout = origRpcTimeout;
+		function restoreTimeout() { L.env.rpctimeout = origRpcTimeout; }
 
-		return p
+		return callTestGroupDelay('_prism_test_all', '', GROUP_TIMEOUT_MS)
 			.then(function(res) {
+				restoreTimeout();
 				self._testAllRunning = false;
 				if (banner && banner.parentNode)
 					banner.parentNode.removeChild(banner);
@@ -1093,6 +1091,7 @@ return baseclass.extend({
 					'info');
 			})
 			.catch(function(err) {
+				restoreTimeout();
 				self._testAllRunning = false;
 				if (banner && banner.parentNode)
 					banner.parentNode.removeChild(banner);
