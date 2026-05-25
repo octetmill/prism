@@ -270,7 +270,7 @@ return baseclass.extend({
 			E('div', {
 				'id': 'prism-groups-section',
 				'class': 'cbi-section',
-				'style': (groupsData.groups && groupsData.groups.length) ? '' : 'display:none;'
+				'style': (Array.isArray(groupsData.groups) && groupsData.groups.length) ? '' : 'display:none;'
 			}, this._renderGroups(groupsData)),
 
 			// ── Recent activity ────────────────────────────────────────
@@ -460,7 +460,13 @@ return baseclass.extend({
 	// nothing once it's been shown — the caller hides the whole section
 	// when there are no groups, so this branch is only seen mid-flip.
 	_renderGroups: function(data) {
-		var groups = (data && data.groups) || [];
+		// luci.jsonc can't tell empty arrays from empty objects at the Lua
+		// boundary — an empty `out = {}` in get_active_groups serializes
+		// as `{}`, which arrives here as an object, not an array. The
+		// section is hidden in that case anyway, but _renderGroups is
+		// still invoked to build the contents; coerce defensively so the
+		// `.forEach` below doesn't blow up the whole tab.
+		var groups = (data && Array.isArray(data.groups)) ? data.groups : [];
 		var rows = [];
 		var self = this;
 		groups.forEach(function(g) {
@@ -668,7 +674,7 @@ return baseclass.extend({
 	_updateGroups: function(data) {
 		var section = document.getElementById('prism-groups-section');
 		if (!section) return;
-		var groups = (data && data.groups) || [];
+		var groups = (data && Array.isArray(data.groups)) ? data.groups : [];
 		section.style.display = (groups.length > 0) ? '' : 'none';
 		if (groups.length === 0) return;
 		while (section.firstChild) section.removeChild(section.firstChild);
