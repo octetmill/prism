@@ -1145,23 +1145,33 @@ local methods = {
 			local raw = args.payload or ""
 			if raw:match("^%s*$") then
 				os.remove("/etc/prism/extra.json")
+				log_prism("notice", "config: extra.json removed")
 				return { ok = true }
 			end
-			if not _jsonc_ok then return { ok = false, error = "luci.jsonc not available" } end
+			if not _jsonc_ok then
+				log_prism("warning", "config: extra.json rejected — luci.jsonc not available")
+				return { ok = false, error = "luci.jsonc not available" }
+			end
 			local ok, parsed = pcall(_jsonc.parse, raw)
 			if not ok or type(parsed) ~= "table" then
+				log_prism("warning", "config: extra.json rejected — invalid JSON object")
 				return { ok = false, error = "invalid JSON object" }
 			end
 			os.execute("mkdir -p /etc/prism 2>/dev/null")
 			local tmp = "/etc/prism/extra.json.tmp"
 			local f = io.open(tmp, "w")
-			if not f then return { ok = false, error = "cannot write " .. tmp } end
+			if not f then
+				log_prism("warning", "config: extra.json rejected — cannot write " .. tmp)
+				return { ok = false, error = "cannot write " .. tmp }
+			end
 			f:write(raw)
 			f:close()
 			if not os.rename(tmp, "/etc/prism/extra.json") then
 				os.remove(tmp)
+				log_prism("warning", "config: extra.json rejected — rename failed")
 				return { ok = false, error = "rename failed" }
 			end
+			log_prism("notice", string.format("config: extra.json updated (%d bytes)", #raw))
 			return { ok = true }
 		end
 	},
@@ -1239,6 +1249,7 @@ local methods = {
 
 	reload = {
 		call = function()
+			log_prism("notice", "service: manual reload")
 			os.execute("/etc/init.d/prism reload >/dev/null 2>&1")
 			return {}
 		end
@@ -1268,6 +1279,7 @@ local methods = {
 			-- transient pause across an enable/disable cycle would be
 			-- surprising. set_enabled is the canonical reset point.
 			os.remove("/var/run/prism.paused")
+			log_prism("notice", on and "service: enabled" or "service: disabled")
 			local cmd = on and "start" or "stop"
 			local rc = os.execute("/etc/init.d/prism " .. cmd
 				.. " >/dev/null 2>&1")
@@ -1278,6 +1290,7 @@ local methods = {
 	start = {
 		call = function()
 			os.remove("/var/run/prism.paused")
+			log_prism("notice", "service: manual start")
 			local rc = os.execute("/etc/init.d/prism start >/dev/null 2>&1")
 			return { ok = (rc == 0) }
 		end
@@ -1290,6 +1303,7 @@ local methods = {
 			-- the write and the init-script stop.
 			local mf = io.open("/var/run/prism.paused", "w")
 			if mf then mf:close() end
+			log_prism("notice", "service: manual stop (paused — will not autostart until cleared)")
 			os.execute("/etc/init.d/prism stop >/dev/null 2>&1")
 			return { ok = true }
 		end
@@ -1301,6 +1315,7 @@ local methods = {
 			-- restart actually takes effect (start_service refuses while
 			-- the marker is present).
 			os.remove("/var/run/prism.paused")
+			log_prism("notice", "service: manual restart")
 			local rc = os.execute("/etc/init.d/prism restart >/dev/null 2>&1")
 			return { ok = (rc == 0) }
 		end
