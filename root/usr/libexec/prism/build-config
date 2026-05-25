@@ -1304,6 +1304,40 @@ local function build_log(c)
 	return { level = level, timestamp = true }
 end
 
+-- Return the per-router clash API bearer secret, generating it on first call.
+-- File lives at /etc/prism/clash.secret (flash, mode 600) so a single secret
+-- survives reboots and remains stable for the LuCI session token cookie. The
+-- secret protects the loopback-only API surface against other local processes
+-- — paranoid given the LAN never reaches port 9090, but cheap to keep.
+-- Source is /proc/sys/kernel/random/uuid (always present on Linux): one UUID
+-- minus the dashes = 32 hex characters = 128 bits, which is plenty for a
+-- localhost API. Returns nil only when both read paths fail (extremely rare —
+-- a degenerate filesystem state we surface as a stderr warning).
+local CLASH_SECRET_PATH = "/etc/prism/clash.secret"
+local function ensure_clash_secret()
+	local existing = read_file(CLASH_SECRET_PATH)
+	if existing then
+		existing = existing:gsub("%s+", "")
+		if existing ~= "" then return existing end
+	end
+	local uuid = read_file("/proc/sys/kernel/random/uuid")
+	if not uuid then return nil end
+	local secret = uuid:gsub("[%-%s]", "")
+	if secret == "" then return nil end
+	os.execute("mkdir -p /etc/prism 2>/dev/null")
+	local tmp = CLASH_SECRET_PATH .. ".tmp"
+	local f = io.open(tmp, "w")
+	if not f then return nil end
+	f:write(secret)
+	f:close()
+	os.execute("chmod 600 '" .. tmp .. "' 2>/dev/null")
+	if not os.rename(tmp, CLASH_SECRET_PATH) then
+		os.remove(tmp)
+		return nil
+	end
+	return secret
+end
+
 local function build_config(c)
 	local prepared = prepare_rules(c)
 	local dns   = build_dns(c, prepared)
@@ -1323,6 +1357,8 @@ local function build_config(c)
 		config.endpoints = endpoints
 	end
 
+	local experimental = {}
+
 	-- Persist the remote rule-set cache to flash. On startup sing-box loads
 	-- rule-sets from this cache instead of downloading, so after one
 	-- successful fetch it starts offline — no network needed at init, no
@@ -1333,12 +1369,32 @@ local function build_config(c)
 	-- the per-query churn those stores would add.
 	if route.rule_set then
 		os.execute("mkdir -p /etc/prism 2>/dev/null")
-		config.experimental = {
-			cache_file = {
-				enabled = true,
-				path    = "/etc/prism/cache.db"
-			}
+		experimental.cache_file = {
+			enabled = true,
+			path    = "/etc/prism/cache.db"
 		}
+	end
+
+	-- Clash-compatible API for on-demand node latency probes. Loopback-only
+	-- (127.0.0.1:9090), with a per-router secret read from
+	-- /etc/prism/clash.secret — the secret is generated on first build when
+	-- the flag is on. The API is opt-in (default off): nothing listens until
+	-- the user enables it from Settings → Advanced. The Nodes panel's Test
+	-- buttons (rpcd → uclient-fetch → /proxies/<tag>/delay) need this block.
+	if c:get("prism", "global", "clash_api_enabled") == "1" then
+		local secret = ensure_clash_secret()
+		if secret then
+			experimental.clash_api = {
+				external_controller = "127.0.0.1:9090",
+				secret              = secret
+			}
+		else
+			io.stderr:write("prism build-config: clash_api enabled but secret unavailable; skipping clash_api block\n")
+		end
+	end
+
+	if next(experimental) ~= nil then
+		config.experimental = experimental
 	end
 	return config
 end
