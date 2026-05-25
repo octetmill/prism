@@ -745,8 +745,16 @@ local function build_outbounds(c)
 		{ type = "direct", tag = "direct", domain_resolver = "local" }
 	}
 	local endpoints = {}
+	-- include_all_nodes: when the user has the clash API on and wants to be
+	-- able to test every known node (not just the ones the running config
+	-- happens to use), this flag loosens step 4's reference filter. Concrete
+	-- endpoint nodes pass through regardless; groups (urltest/selector) still
+	-- need to be referenced because emitting them without their member
+	-- expansion (step 3) would land an unresolved group in sing-box.
+	local include_all = c:get("prism", "global", "include_all_nodes") == "1"
 	for _, ob in ipairs(all_ordered) do
-		if referenced[ob.tag] then
+		local is_group = (ob.type == "urltest" or ob.type == "selector")
+		if referenced[ob.tag] or (include_all and not is_group) then
 			-- Strip Prism-internal markers before handing the node to sing-box,
 			-- which rejects unknown fields. `_outbound_regex(_sources)` are
 			-- already nil'd in step 3; `_source` is the origin tag used by the
