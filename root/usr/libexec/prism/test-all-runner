@@ -77,23 +77,37 @@ end
 local started_at = os.time()
 update_status({ running = true, started_at = started_at })
 
--- ─── fetch group membership from clash ──────────────────────────────────
--- sing-box's /proxies/<group>/delay endpoint returns the proxy with its
--- `all` field listing member tag names. We probe each member individually
--- via /proxies/<tag>/delay so we control the concurrency.
-local f = io.popen(
-	"uclient-fetch -qO- 'http://" .. CLASH_HOST ..
-	"/proxies/_prism_test_all' 2>/dev/null")
-if not f then bail("cannot fork uclient-fetch") end
-local body = f:read("*a") or ""
-f:close()
-if body == "" then bail("clash API returned no proxy list") end
-
-local ok, parsed = pcall(jsonc.parse, body)
-if not ok or type(parsed) ~= "table" or type(parsed.all) ~= "table" then
-	bail("malformed proxy list from clash API")
+-- ─── decide which tags to probe ──────────────────────────────────────────
+-- If luci.prism's test_all_start was called with a tag list (subscription-
+-- scoped Test all from the UI), the RPC wrote those tags to TAG_FILE one
+-- per line. We use that list verbatim. Otherwise we fall back to the full
+-- membership of _prism_test_all from the clash API (the global Test all
+-- path).
+local TAG_FILE = "/var/etc/prism/.test-all-tags"
+local tags = {}
+local raw_tag_file = read_file(TAG_FILE)
+if raw_tag_file and raw_tag_file ~= "" then
+	for line in raw_tag_file:gmatch("[^\n]+") do
+		if line ~= "" then tags[#tags + 1] = line end
+	end
+	os.remove(TAG_FILE)
 end
-local tags = parsed.all
+
+if #tags == 0 then
+	local f = io.popen(
+		"uclient-fetch -qO- 'http://" .. CLASH_HOST ..
+		"/proxies/_prism_test_all' 2>/dev/null")
+	if not f then bail("cannot fork uclient-fetch") end
+	local body = f:read("*a") or ""
+	f:close()
+	if body == "" then bail("clash API returned no proxy list") end
+
+	local ok, parsed = pcall(jsonc.parse, body)
+	if not ok or type(parsed) ~= "table" or type(parsed.all) ~= "table" then
+		bail("malformed proxy list from clash API")
+	end
+	tags = parsed.all
+end
 local total = #tags
 if total == 0 then
 	update_status({

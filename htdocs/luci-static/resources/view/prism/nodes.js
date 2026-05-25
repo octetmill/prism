@@ -75,6 +75,7 @@ var callGetLastLatency = rpc.declare({
 var callTestAllStart = rpc.declare({
 	object: 'luci.prism',
 	method: 'test_all_start',
+	params: ['tags'],
 	expect: { '': {} }
 });
 
@@ -98,12 +99,6 @@ var callTestGroupDelay = rpc.declare({
 // shorter values here directly shorten the batch.
 var TEST_TIMEOUT_MS = 3000;
 
-// Pool size for "Test all" probes. Each in-flight test_node call holds
-// one rpcd worker (~5 MB Lua process) plus a uclient-fetch process; at 16
-// concurrent that's ~160 MB peak memory burst, which a router that runs
-// sing-box can absorb. Higher gives diminishing returns — fork+exec
-// overhead and uclient-fetch startup dominate beyond this.
-var TEST_CONCURRENCY = 16;
 
 // Color-coded latency badge. Maps a probe result `{ delay_ms?, error? }` to a
 // span styled with the same label-* classes the rest of Prism uses.
@@ -891,10 +886,12 @@ return baseclass.extend({
 							if (n.tag && n.type !== 'urltest' && n.type !== 'selector')
 								tags.push(n.tag);
 						});
-						// _doTestSome: per-tag pool, scoped to this
-						// subscription's tags only. _doTestAll uses the
-						// background runner which probes everything.
-						self._doTestSome(tags);
+						// Same code path as the global Test all — the
+						// background runner accepts an optional tag list
+						// to scope the run. Avoids the per-tag RPC pool
+						// (which was 18× slower than the runner due to
+						// rpcd dispatch overhead on every call).
+						self._doTestAll(tags);
 					}
 				}, [ _('Test all in this subscription') ]));
 			}
@@ -1005,11 +1002,12 @@ return baseclass.extend({
 		var self = this;
 		ui.showModal(_('Test all nodes'), [
 			E('p', {}, [
-				_('Probe latency for %d nodes? Tests run %d at a time and ' +
-				  'cells update as results arrive. A node that isn\'t in the ' +
-				  'running config — see Settings → Latency testing → "Include ' +
-				  'all nodes" — will report "proxy not in running config".')
-					.format(tags.length, TEST_CONCURRENCY)
+				_('Probe latency for %d nodes? A background runner probes ' +
+				  'them in parallel and cells update as results arrive. A ' +
+				  'node that isn\'t in the running config — see Settings → ' +
+				  'Latency testing → "Include all nodes" — will report ' +
+				  '"proxy not in running config".')
+					.format(tags.length)
 			]),
 			E('div', { 'class': 'right' }, [
 				E('button', { 'class': 'btn', 'click': ui.hideModal }, [ _('Cancel') ]),
@@ -1022,12 +1020,16 @@ return baseclass.extend({
 		]);
 	},
 
-	// Global "Test all": fork the background runner on the device and poll
-	// for completion. The runner calls sing-box's group-delay endpoint and
-	// writes results into /var/etc/prism/latency.json; we refresh cells
-	// from that cache between polls so results appear as they land. No
-	// long-running RPC, so LuCI's XHR timeout (which broke earlier attempts
-	// at the synchronous group-delay call) is a non-issue.
+	// "Test all": fork the background runner on the device and poll for
+	// completion. The runner probes each tag via /proxies/<tag>/delay in
+	// parallel shell-forked batches and writes results into
+	// /var/etc/prism/latency.json; we refresh cells from that cache between
+	// polls so results land progressively. No long-running RPC, so LuCI's
+	// XHR timeout is a non-issue.
+	//
+	// `tags` is optional: pass a list to scope the run to a subset (the
+	// per-subscription "Test all in this subscription" button does this);
+	// omit/empty to probe every node in the hidden _prism_test_all group.
 	_doTestAll: function(tags) {
 		if (this._testAllRunning) {
 			ui.addNotification(null,
@@ -1044,12 +1046,12 @@ return baseclass.extend({
 		var banner = ui.addNotification(_('Latency tests running'), [
 			E('p', {}, [ elapsedEl ]),
 			E('p', { 'style': 'opacity:0.7; font-size:0.9em; margin:0;' }, [
-				_('sing-box probes every node in parallel. ' +
+				_('Probes run in parallel on the device. ' +
 				  'You can switch tabs — results land as they arrive.')
 			])
 		], 'info');
 
-		return callTestAllStart().then(function(res) {
+		return callTestAllStart(Array.isArray(tags) ? tags : []).then(function(res) {
 			if (res && res.error) {
 				throw new Error(res.error);
 			}
@@ -1127,64 +1129,6 @@ return baseclass.extend({
 					? _('Tested %d nodes — %d unreachable.').format(tested + errors, errors)
 					: _('Tested %d nodes.').format(tested)),
 				'info');
-		});
-	},
-
-	// Per-subscription "Test all in this subscription" path. Uses the
-	// per-tag pool because (a) subscriptions are typically small (≤50
-	// nodes), fitting comfortably under LuCI's RPC timeout, and (b)
-	// test_node gives progressive per-tag updates without needing the
-	// background runner. The runner is overkill for this scope.
-	_doTestSome: function(tags) {
-		if (this._testAllRunning) {
-			ui.addNotification(null,
-				E('p', _('A latency test run is already in progress.')),
-				'warning');
-			return Promise.resolve();
-		}
-		this._testAllRunning = true;
-
-		var self = this;
-		var done = 0, errors = 0, total = tags.length;
-		ui.hideModal();
-
-		var progressEl = E('span', {}, [ _('Testing %d / %d…').format(0, total) ]);
-		var banner = ui.addNotification(_('Latency tests running'), [
-			E('p', {}, [ progressEl ]),
-			E('p', { 'style': 'opacity:0.7; font-size:0.9em; margin:0;' }, [
-				_('Tests continue in the background — you can switch tabs.')
-			])
-		], 'info');
-
-		var idx = 0;
-		function next() {
-			if (idx >= tags.length) return Promise.resolve();
-			var tag = tags[idx++];
-			return callTestNode(tag, TEST_TIMEOUT_MS).catch(function() {
-				return { error: 'rpc failed', tested_at: Math.floor(Date.now() / 1000) };
-			}).then(function(r) {
-				r = r || {};
-				self._latency[tag] = r;
-				self._refreshLatencyCell(tag);
-				done++;
-				if (r.error) errors++;
-				if (progressEl.parentNode)
-					progressEl.textContent = _('Testing %d / %d…').format(done, total);
-				return next();
-			});
-		}
-		var workers = [];
-		for (var i = 0; i < Math.min(TEST_CONCURRENCY, tags.length); i++)
-			workers.push(next());
-		return Promise.all(workers).then(function() {
-			self._testAllRunning = false;
-			if (banner && banner.parentNode)
-				banner.parentNode.removeChild(banner);
-			ui.addNotification(null, E('p',
-				errors > 0
-					? _('Tested %d nodes — %d failed.').format(total, errors)
-					: _('Tested %d nodes.').format(total)),
-				errors > 0 ? 'warning' : 'info');
 		});
 	},
 
