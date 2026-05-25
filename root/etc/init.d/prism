@@ -237,10 +237,18 @@ start_service() {
 
 	# Promote the validated config over the live one. The rename is atomic
 	# (same tmpfs directory); procd's `file` watch hashes the content, so an
-	# unchanged config still yields no restart.
-	mv "$tmp_cfg" "$config_path"
+	# unchanged config still yields no restart. Compare before the rename to
+	# record which case applies — a Save that produces an identical config is
+	# otherwise indistinguishable from one that actually restarted sing-box.
+	if [ ! -f "$config_path" ]; then
+		prism_log notice "config: writing initial sing-box config ($mode mode)"
+	elif cmp -s "$tmp_cfg" "$config_path"; then
+		prism_log info "config: sing-box config unchanged, no restart"
+	else
+		prism_log notice "config: sing-box config changed, restarting sing-box"
+	fi
 
-	prism_log info "service: starting sing-box ($mode mode)"
+	mv "$tmp_cfg" "$config_path"
 	prism_declare_instance "$config_path"
 
 	# Install TPROXY nftables rules + policy routing. No-op for tun mode.
