@@ -67,9 +67,19 @@ var callGetLastLatency = rpc.declare({
 
 // Concurrent test_node calls — sing-box's clash API can handle parallel
 // probes, but we cap the worker pool so a 300-node "Test all" doesn't fork
-// 300 simultaneous TCP connections to gstatic.com. 4 is a balance between
-// throughput (4× faster than serial) and resource pressure.
-var TEST_CONCURRENCY = 4;
+// 300 simultaneous TCP connections to gstatic.com. 8 is the practical
+// ceiling: each in-flight call spawns one rpcd worker (its own Lua process,
+// ~5 MB) plus a uclient-fetch process — at 8 concurrent that's ~80 MB peak
+// memory burst, fine on any router that can run sing-box at all.
+var TEST_CONCURRENCY = 8;
+
+// Per-probe timeout passed to the clash API's delay endpoint. The default
+// sing-box uses internally is 5 s; we ask for less because (a) on a working
+// proxy a probe returns in well under a second, (b) a node that needs >3 s
+// to answer gstatic.com is unlikely to be a useful pick anyway, and (c) the
+// dominant time in "Test all" is the timeout per unreachable node. Cutting
+// it from 10 s to 3 s makes the worst-case batch ~3× shorter.
+var TEST_TIMEOUT_MS = 3000;
 
 // Color-coded latency badge. Maps a probe result `{ delay_ms?, error? }` to a
 // span styled with the same label-* classes the rest of Prism uses.
@@ -904,7 +914,7 @@ return baseclass.extend({
 		btn.style.width  = w + 'px';
 		btn.style.height = h + 'px';
 		btn.textContent  = '';
-		return callTestNode(tag, 10000).then(function(r) {
+		return callTestNode(tag, TEST_TIMEOUT_MS).then(function(r) {
 			self._latency[tag] = r || {};
 			self._refreshLatencyCell(tag);
 		}).catch(function() {
@@ -1012,7 +1022,7 @@ return baseclass.extend({
 		function next() {
 			if (idx >= tags.length) return Promise.resolve();
 			var tag = tags[idx++];
-			return callTestNode(tag, 10000).catch(function() {
+			return callTestNode(tag, TEST_TIMEOUT_MS).catch(function() {
 				return { error: 'rpc failed', tested_at: Math.floor(Date.now() / 1000) };
 			}).then(function(r) {
 				r = r || {};
