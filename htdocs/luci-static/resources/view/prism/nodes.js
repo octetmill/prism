@@ -1096,9 +1096,22 @@ return baseclass.extend({
 				self._testAllRunning = false;
 				if (banner && banner.parentNode)
 					banner.parentNode.removeChild(banner);
-				ui.addNotification(null, E('p',
-					_('Test all failed — check the Prism log on the Status page.')),
-					'error');
+				// Surface the actual error rather than a generic "check the
+				// log" — server-side has nothing to say when the failure is
+				// client-side (XHR abort, JSON parse, exception inside the
+				// .then handler). The error class/string is the most useful
+				// signal we have at this point.
+				var detail = '';
+				if (err) {
+					if (err.message) detail = err.message;
+					else if (typeof err === 'string') detail = err;
+					else detail = String(err);
+					if (err.name && err.name !== 'Error')
+						detail = err.name + ': ' + detail;
+				}
+				ui.addNotification(null, E('p', [
+					_('Test all failed: '), detail || _('unknown error')
+				]), 'error');
 			});
 	},
 
