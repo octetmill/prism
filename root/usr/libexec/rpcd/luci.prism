@@ -783,13 +783,17 @@ end
 -- so we can't read sing-box's "message" field for failures. We capture
 -- stderr to a tmpfs side-file and grep the status code back out — at least
 -- the UI can show "HTTP 404 (proxy not in running config)" instead of an
--- opaque "empty response".
+-- opaque "empty response".  Note: `-q` is intentionally NOT passed, because
+-- on this OpenWrt build `-q` suppresses the "HTTP error N" line too — we
+-- need that line to recover the status code (it's the only signal we get).
+-- The progress chatter ("Downloading X", "Connecting to Y") that comes with
+-- dropping -q is harmlessly filtered out below.
 local function clash_get(path_with_query, timeout_s)
 	local url = "http://" .. CLASH_HOST .. path_with_query
 	local safe_url = url:gsub("'", "'\\''")
 	local stderr_path = "/var/etc/prism/.uclient-fetch.stderr"
 	os.execute("mkdir -p /var/etc/prism 2>/dev/null")
-	local cmd = "uclient-fetch -q --timeout=" .. tostring(timeout_s)
+	local cmd = "uclient-fetch --timeout=" .. tostring(timeout_s)
 		.. " -O- '" .. safe_url .. "' 2>'" .. stderr_path
 		.. "'; echo __RC__$?"
 	local f = io.popen(cmd)
