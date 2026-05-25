@@ -15,6 +15,7 @@
 # cadence rather than giving up forever.
 
 . /lib/functions.sh
+. /usr/share/libubox/jshn.sh
 
 config_load prism
 config_get_bool enabled global enabled 0
@@ -29,16 +30,25 @@ config_get_bool enabled global enabled 0
 # and an enabled-but-paused service resumes naturally.
 [ -e /var/run/prism.paused ] && exit 0
 
-# procd's own view, scoped to the named `singbox` instance — mirrors
-# service_running() in the rpcd handler. Must be instance-scoped: the
-# prism service may also carry an `active_watch` instance, and an
-# unscoped grep for `"running": true` would match the watcher's status
-# and let the watchdog believe sing-box is alive when only the watcher
-# is — exactly the LAN-blackhole this watchdog exists to recover from.
-if ubus call service list '{"name":"prism","instance":"singbox"}' 2>/dev/null \
-		| grep -q '"running": *true'; then
-	exit 0
+# procd's own view, scoped to the named `singbox` instance. The prism
+# service also carries `active_watch` when clash API is enabled, so we
+# must walk the JSON to the specific instance — ubus's `instance`
+# parameter is accepted-but-ignored on some procd versions (the reply
+# still includes every instance), so a substring grep for
+# `"running": true` would happily match the watcher's status and let
+# the watchdog believe sing-box is alive when only the watcher is.
+# That's the LAN-blackhole this watchdog exists to recover from.
+ubus_out=$(ubus call service list '{"name":"prism"}' 2>/dev/null)
+running=
+if [ -n "$ubus_out" ]; then
+	json_load "$ubus_out"
+	if json_select prism >/dev/null 2>&1 && \
+	   json_select instances >/dev/null 2>&1 && \
+	   json_select singbox >/dev/null 2>&1; then
+		json_get_var running running
+	fi
 fi
+[ "$running" = "1" ] && exit 0
 
 logger -p daemon.err -t prism \
 	"watchdog: sing-box is enabled but not running — re-arming the service"

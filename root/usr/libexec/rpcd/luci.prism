@@ -930,20 +930,27 @@ local function ensure_nodes_dir()
 	os.execute("mkdir -p " .. NODES_DIR .. " 2>/dev/null")
 end
 
--- True when procd reports the sing-box instance of the prism service is
--- running. Scoped to the named `singbox` instance specifically — the prism
--- service may also carry an `active_watch` instance (when clash API is
--- enabled), so a substring match against `"running":true` in the unscoped
--- service list would happily return true when sing-box is dead but the
--- watcher is alive, defeating the LAN-blackhole recovery in watchdog.
--- This is authoritative (procd's own view) and distinct from the UCI
--- `enabled` autostart-at-boot flag.
+-- True when procd reports the named `singbox` procd instance is running.
+-- Must walk the parsed JSON to that specific instance: the prism service
+-- may also carry an `active_watch` instance when clash API is enabled,
+-- and a substring grep for `"running":true` would happily match either
+-- one — exactly the LAN-blackhole defeat from the code review. We can't
+-- rely on ubus's `instance` parameter to scope the response either: on
+-- some procd versions (observed on OpenWrt 24.10 builds) the parameter
+-- is accepted but ignored, and the reply still carries every instance.
+-- Authoritative (procd's own view), distinct from the UCI `enabled` flag.
 local function service_running()
-	local f = io.popen("ubus call service list '{\"name\":\"prism\",\"instance\":\"singbox\"}' 2>/dev/null")
+	local f = io.popen("ubus call service list '{\"name\":\"prism\"}' 2>/dev/null")
 	if not f then return false end
 	local out = f:read("*a") or ""
 	f:close()
-	return out:find('"running":%s*true') ~= nil
+	if out == "" or not _jsonc_ok then return false end
+	local ok, parsed = pcall(_jsonc.parse, out)
+	if not ok or type(parsed) ~= "table" then return false end
+	local svc = parsed.prism
+	if type(svc) ~= "table" or type(svc.instances) ~= "table" then return false end
+	local inst = svc.instances.singbox
+	return type(inst) == "table" and inst.running == true
 end
 
 -- Detect whether the active outbound set changed since sing-box was last
