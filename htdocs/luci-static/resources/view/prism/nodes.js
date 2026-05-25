@@ -76,13 +76,19 @@ var callTestGroupDelay = rpc.declare({
 	expect: { '': {} }
 });
 
-// Per-row Test button: timeout passed to the clash API's delay endpoint.
-// 3 s is a balance — a working proxy answers gstatic.com/generate_204 in
-// well under a second, and a node that needs longer is unlikely to be a
-// useful pick anyway. The bulk "Test all" path goes through the group
-// endpoint and uses its own larger timeout (the budget is shared across
-// all members, not per-probe).
+// Per-probe timeout passed to the clash API's delay endpoint. 3 s is a
+// balance — a working proxy answers gstatic.com/generate_204 in well under
+// a second, and a node that needs longer is unlikely to be a useful pick.
+// The dominant time in a batch is the per-unreachable-node timeout, so
+// shorter values here directly shorten the batch.
 var TEST_TIMEOUT_MS = 3000;
+
+// Pool size for "Test all" probes. Each in-flight test_node call holds
+// one rpcd worker (~5 MB Lua process) plus a uclient-fetch process; at 16
+// concurrent that's ~160 MB peak memory burst, which a router that runs
+// sing-box can absorb. Higher gives diminishing returns — fork+exec
+// overhead and uclient-fetch startup dominate beyond this.
+var TEST_CONCURRENCY = 16;
 
 // Color-coded latency badge. Maps a probe result `{ delay_ms?, error? }` to a
 // span styled with the same label-* classes the rest of Prism uses.
@@ -981,13 +987,11 @@ return baseclass.extend({
 		var self = this;
 		ui.showModal(_('Test all nodes'), [
 			E('p', {}, [
-				_('Probe latency for %d nodes? sing-box probes the members of ' +
-				  'a hidden test group in parallel internally, so the whole ' +
-				  'batch typically finishes in 10–30 seconds regardless of ' +
-				  'the count. A node that isn\'t in the running config — ' +
-				  'see Settings → Latency testing → "Include all nodes" — ' +
-				  'won\'t be in the test group and won\'t get a reading.')
-					.format(tags.length)
+				_('Probe latency for %d nodes? Tests run %d at a time and ' +
+				  'cells update as results arrive. A node that isn\'t in the ' +
+				  'running config — see Settings → Latency testing → "Include ' +
+				  'all nodes" — will report "proxy not in running config".')
+					.format(tags.length, TEST_CONCURRENCY)
 			]),
 			E('div', { 'class': 'right' }, [
 				E('button', { 'class': 'btn', 'click': ui.hideModal }, [ _('Cancel') ]),
@@ -1000,19 +1004,16 @@ return baseclass.extend({
 		]);
 	},
 
-	// Probe every node in one shot via sing-box's clash group-delay endpoint.
-	// build-config emits a hidden _prism_test_all selector group containing
-	// every concrete-endpoint outbound; sing-box probes the members in
-	// parallel goroutines internally and returns one JSON blob — far faster
-	// than JS issuing N test_node RPCs (no fork-storm of uclient-fetch + Lua
-	// processes, no per-probe rpcd round-trip overhead).
-	//
-	// For per-subscription "Test all in this subscription" we still want to
-	// scope to that subscription's tags; the response from the group endpoint
-	// covers every member of the hidden group, which is fine — we just only
-	// refresh the cells the caller cared about and ignore the rest (the
-	// cache file is updated with everything regardless, so other open views
-	// pick up the values on their own).
+	// Run a pool of concurrent test_node calls for the given tag list. Each
+	// RPC is fast (≤ TEST_TIMEOUT_MS), so we sidestep the long-running-RPC
+	// problem that broke the group-delay path — LuCI's XHR layer aborts
+	// calls past ~20 s, and even bumping L.env.rpctimeout didn't reliably
+	// keep that limit lifted on this LuCI build. The trade-off: rather
+	// than waiting ~50 s for one big response, we get progressive updates
+	// as each cell fills in. The hidden _prism_test_all group and the
+	// test_group_delay RPC stay in build-config / luci.prism for a future
+	// fire-and-forget rework where a background worker drives the group
+	// endpoint and the UI just polls.
 	_doTestAll: function(tags) {
 		if (this._testAllRunning) {
 			ui.addNotification(null,
@@ -1023,95 +1024,55 @@ return baseclass.extend({
 		this._testAllRunning = true;
 
 		var self = this;
+		var done = 0, errors = 0, total = tags.length;
 		ui.hideModal();
 
+		var progressEl = E('span', {}, [
+			_('Testing %d / %d…').format(0, total)
+		]);
 		var banner = ui.addNotification(_('Latency tests running'), [
-			E('p', {}, [ _('Probing %d nodes in parallel…').format(tags.length) ]),
+			E('p', {}, [ progressEl ]),
 			E('p', { 'style': 'opacity:0.7; font-size:0.9em; margin:0;' }, [
-				_('Tests run inside sing-box — you can switch tabs.')
+				_('Tests continue in the background — you can switch tabs.')
 			])
 		], 'info');
 
-		// 60 s budget is comfortable for ~300 nodes; sing-box's internal
-		// pool runs ~10 probes in parallel and an unreachable node takes
-		// up to ~5 s before timing out. The RPC clamps to 5 min anyway.
-		var GROUP_TIMEOUT_MS = 60000;
-
-		// LuCI's XHR-side RPC timeout defaults to 20 s (L.env.rpctimeout),
-		// which is well under our 60 s budget. Bump it before dispatching
-		// the call and only restore after the promise settles — restoring
-		// synchronously caused 'XHR request aborted by browser' because
-		// LuCI's Request.post defers the actual XHR setup to a microtask,
-		// by which time the variable was already back to 20.
-		var origRpcTimeout = L.env.rpctimeout;
-		L.env.rpctimeout = 120;
-		function restoreTimeout() { L.env.rpctimeout = origRpcTimeout; }
-
-		return callTestGroupDelay('_prism_test_all', '', GROUP_TIMEOUT_MS)
-			.then(function(res) {
-				restoreTimeout();
-				self._testAllRunning = false;
-				if (banner && banner.parentNode)
-					banner.parentNode.removeChild(banner);
-
-				if (res && res.error) {
-					ui.addNotification(null, E('p',
-						_('Test all failed: %s.').format(res.error)),
-						'error');
-					return;
-				}
-				// Merge the group result into our local cache and refresh
-				// every cell the caller asked about. Tags the response
-				// didn't mention are kept as-is — sing-box returns one
-				// entry per member of the hidden group, so any missing tag
-				// is one we shouldn't have asked to test (e.g. caller
-				// passed a stale list).
-				var results = (res && res.results) || {};
-				tags.forEach(function(tag) {
-					if (results[tag])
-						self._latency[tag] = results[tag];
-					self._refreshLatencyCell(tag);
-				});
-				// Also reflect any cells that exist in the DOM but weren't
-				// in the caller's tag list — keeps open subscription modals
-				// in sync after a global Test all.
-				for (var t in results) {
-					if (tags.indexOf(t) < 0) {
-						self._latency[t] = results[t];
-						self._refreshLatencyCell(t);
-					}
-				}
-
-				var tested = res.tested || 0;
-				var errors = res.errors || 0;
-				ui.addNotification(null, E('p',
-					errors > 0
-						? _('Tested %d nodes — %d unreachable.').format(tested + errors, errors)
-						: _('Tested %d nodes.').format(tested)),
-					'info');
-			})
-			.catch(function(err) {
-				restoreTimeout();
-				self._testAllRunning = false;
-				if (banner && banner.parentNode)
-					banner.parentNode.removeChild(banner);
-				// Surface the actual error rather than a generic "check the
-				// log" — server-side has nothing to say when the failure is
-				// client-side (XHR abort, JSON parse, exception inside the
-				// .then handler). The error class/string is the most useful
-				// signal we have at this point.
-				var detail = '';
-				if (err) {
-					if (err.message) detail = err.message;
-					else if (typeof err === 'string') detail = err;
-					else detail = String(err);
-					if (err.name && err.name !== 'Error')
-						detail = err.name + ': ' + detail;
-				}
-				ui.addNotification(null, E('p', [
-					_('Test all failed: '), detail || _('unknown error')
-				]), 'error');
+		var idx = 0;
+		function next() {
+			if (idx >= tags.length) return Promise.resolve();
+			var tag = tags[idx++];
+			return callTestNode(tag, TEST_TIMEOUT_MS).catch(function() {
+				return { error: 'rpc failed', tested_at: Math.floor(Date.now() / 1000) };
+			}).then(function(r) {
+				r = r || {};
+				self._latency[tag] = r;
+				self._refreshLatencyCell(tag);
+				done++;
+				if (r.error) errors++;
+				if (progressEl.parentNode)
+					progressEl.textContent =
+						_('Testing %d / %d…').format(done, total);
+				return next();
 			});
+		}
+
+		var workers = [];
+		for (var i = 0; i < Math.min(TEST_CONCURRENCY, tags.length); i++)
+			workers.push(next());
+		return Promise.all(workers).then(function() {
+			self._testAllRunning = false;
+			if (banner && banner.parentNode)
+				banner.parentNode.removeChild(banner);
+			ui.addNotification(null, E('p',
+				errors > 0
+					? _('Tested %d nodes — %d failed or unreachable.').format(total, errors)
+					: _('Tested %d nodes.').format(total)),
+				errors > 0 ? 'warning' : 'info');
+		}).catch(function() {
+			self._testAllRunning = false;
+			if (banner && banner.parentNode)
+				banner.parentNode.removeChild(banner);
+		});
 	},
 
 	_syncAll: function() {
