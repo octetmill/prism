@@ -115,6 +115,33 @@ local previous = load_snapshot()
 local primed   = next(previous) ~= nil
 local fail_streak = 0
 
+-- Emit one "active node is X" line per group. Used in two situations
+-- that both mean "the user just lost track of the live selection":
+--   - prime: daemon's first successful poll — they need to know what
+--     state we're attaching to, not just future flips.
+--   - recovery: clash API was unreachable for >=1 tick (sing-box
+--     likely restarted; procd needs a beat to stop the old process
+--     and start the new one, which fails at least one 10s poll).
+--     The selections may have changed across the restart; announce
+--     the current ones so the syslog has them on the record without
+--     the user having to dig into the Status page.
+-- Sorted by tag for stable output across runs.
+local function log_initial(current, context)
+	local tags = {}
+	for tag in pairs(current) do tags[#tags + 1] = tag end
+	table.sort(tags)
+	for _, tag in ipairs(tags) do
+		local entry = current[tag]
+		local msg = string.format(
+			"group '%s': %s with active node %s",
+			tag, context, entry.now)
+		if entry.delay_ms then
+			msg = msg .. string.format(" (%dms)", entry.delay_ms)
+		end
+		logmsg("info", msg)
+	end
+end
+
 while true do
 	local parsed = fetch_proxies()
 	if parsed then
@@ -123,11 +150,23 @@ while true do
 				"clash API reachable again after %d failed polls",
 				fail_streak))
 		end
+		local had_outage = (fail_streak > 0)
 		fail_streak = 0
 
 		local current = group_state(parsed)
 
-		if primed then
+		if (not primed) or had_outage then
+			-- Cold prime, or recovery after a fetch gap. Re-announce the
+			-- current selection of every group: the user wants to see
+			-- which node each urltest/selector landed on when sing-box
+			-- (re-)started, not just future flips. The diff loop is
+			-- skipped this tick — previous is either empty (prime) or
+			-- pre-restart-and-therefore-suspect (recovery); the next
+			-- tick's diff will be against the post-restart snapshot we
+			-- save below.
+			log_initial(current,
+				had_outage and "resuming" or "starting")
+		elseif primed then
 			-- Member changed within a still-existing group: the central
 			-- diagnostic — this is the "is my urltest flipping too
 			-- often" signal the user is hunting.
