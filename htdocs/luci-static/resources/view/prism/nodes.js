@@ -198,26 +198,21 @@ return baseclass.extend({
 		ordersave.install(m, 'node');
 
 		return m.render().then(function(node) {
-			// "Sync all now" sits next to the Add button of the
-			// subscriptions section — the first .cbi-section-create in
-			// document order, since subscriptions render before nodes.
+			// Both batch actions ("Sync all now" + "Test all") sit next to
+			// the Subscriptions section's Add button so they're visible
+			// without scrolling past a long node list. The first
+			// .cbi-section-create in document order is the subscriptions
+			// one since that section renders first.
+			var clashOn = (uci.get('prism', 'global', 'clash_api_enabled') === '1');
 			var subsCreate = node.querySelector('.cbi-section-create');
-			if (subsCreate)
+			if (subsCreate) {
 				subsCreate.appendChild(E('button', {
 					'class': 'btn cbi-button cbi-button-neutral',
 					'style': 'margin-left:0.4em',
 					'click': ui.createHandlerFn(self, '_syncAll')
 				}, [ _('Sync all now') ]));
-			// "Test all" sits next to the Add button of the manual-nodes
-			// section. Only shown when clash_api is on; without it every
-			// probe returns "clash API disabled" and the button would just
-			// flood the user with error notifications.
-			var clashOn = (uci.get('prism', 'global', 'clash_api_enabled') === '1');
-			if (clashOn) {
-				var nodeCreates = node.querySelectorAll('.cbi-section-create');
-				var nodeCreate = nodeCreates[nodeCreates.length - 1];
-				if (nodeCreate && nodeCreate !== subsCreate)
-					nodeCreate.appendChild(E('button', {
+				if (clashOn)
+					subsCreate.appendChild(E('button', {
 						'class': 'btn cbi-button cbi-button-neutral',
 						'style': 'margin-left:0.4em',
 						'click': ui.createHandlerFn(self, '_testAll')
