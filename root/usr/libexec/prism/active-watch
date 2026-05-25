@@ -132,6 +132,8 @@ end
 -- the next success, logging a recovery line so the gap is bracketed in
 -- the syslog timeline.
 local FAIL_WARN_AFTER = 6  -- ~one minute of failures at 10s ticks
+local POST_EVENT_WINDOW_S = 60  -- relabel-late-arrivals horizon, see below
+
 local previous = load_snapshot()
 local primed   = next(previous) ~= nil
 local fail_streak = 0
@@ -141,6 +143,20 @@ local fail_streak = 0
 -- transition (last and new are both numbers and they differ) as a
 -- restart, so a pid lookup failure can't synthesise a fake one.
 local last_pid = singbox_pid()
+
+-- Post-event relabel window. When an event (prime / sing-box restart /
+-- outage recovery) fires, sing-box's urltest hasn't necessarily settled
+-- the first probe of every member yet — groups with no `now` are
+-- filtered out by group_state() and arrive in /proxies one or two ticks
+-- later. Without this, those late arrivals get logged as `now tracked`
+-- (the "brand new group" branch in the diff loop), which is misleading:
+-- the group existed before the restart, it was just slow to probe. We
+-- snapshot the known tag set at each event and, for POST_EVENT_WINDOW_S
+-- afterwards, relabel any late-arriving pre-event tag with the same
+-- event context so the syslog reads consistently.
+local known_pre_event   = {}
+local event_context     = "starting"
+local post_event_until  = 0
 
 -- Emit one "active node is X" line per group. Used in two situations
 -- that both mean "the user just lost track of the live selection":
@@ -199,11 +215,24 @@ while true do
 			-- node each urltest/selector landed on after the event, not
 			-- just future flips. Diff loop skipped this tick; next
 			-- tick's diff runs against the snapshot we save below.
-			local context = (not primed) and "starting"
+			event_context = (not primed) and "starting"
 				or pid_changed and "after sing-box restart"
 				or "resuming"
-			log_initial(current, context)
+			-- Snapshot the union of last-known and currently-visible
+			-- tags for late-arrival relabeling. Two cases this covers:
+			-- (a) tags in `previous` not in `current` — group existed
+			--     before the event but its post-event probe hasn't
+			--     settled yet (sing-box's `now` is empty, filtered out);
+			-- (b) tags in `current` not in `previous` — group was
+			--     announced THIS tick, so future ticks shouldn't treat
+			--     it as a brand-new arrival either.
+			known_pre_event = {}
+			for tag in pairs(previous) do known_pre_event[tag] = true end
+			for tag in pairs(current)  do known_pre_event[tag] = true end
+			post_event_until = os.time() + POST_EVENT_WINDOW_S
+			log_initial(current, event_context)
 		elseif primed then
+			local in_window = (os.time() < post_event_until)
 			-- Member changed within a still-existing group: the central
 			-- diagnostic — this is the "is my urltest flipping too
 			-- often" signal the user is hunting.
@@ -218,23 +247,46 @@ while true do
 					end
 					logmsg("info", msg)
 				elseif not old then
-					-- Group appeared between ticks (user added it, or a
-					-- sing-box reload pulled it into the running config).
-					-- Useful as a "yes, the daemon sees your new group"
-					-- ack and as a timeline anchor for later flips.
-					logmsg("info", string.format(
-						"group '%s': now tracked, active node %s",
-						tag, entry.now))
+					-- Tag not in last tick's snapshot. Two cases that
+					-- need distinct labels:
+					if in_window and known_pre_event[tag] then
+						-- (1) The group existed before the most recent
+						-- event but its probe is only now reporting a
+						-- `now`. Relabel with the same context the
+						-- event was logged under so the syslog reads
+						-- consistently — the user sees one event line
+						-- per group regardless of whether sing-box's
+						-- internal probe order put it on tick N or N+1.
+						local msg = string.format(
+							"group '%s': %s with active node %s",
+							tag, event_context, entry.now)
+						if entry.delay_ms then
+							msg = msg .. string.format(" (%dms)", entry.delay_ms)
+						end
+						logmsg("info", msg)
+					else
+						-- (2) Genuinely new group: appeared in /proxies
+						-- since the last event (user added it, or a
+						-- reload pulled it into the running config).
+						logmsg("info", string.format(
+							"group '%s': now tracked, active node %s",
+							tag, entry.now))
+					end
 				end
 			end
-			-- Group disappeared between ticks (user removed it, or a
-			-- reload dropped it from the running config). Logged so the
-			-- user troubleshooting "why did my auto group stop working"
-			-- finds the removal event in the same log they use for flips.
+			-- Group disappeared between ticks. Suppress the line during
+			-- the post-event window for tags that were in the pre-event
+			-- set — they're more likely still mid-probe than truly gone,
+			-- and a transient "no longer present" / "now tracked" pair
+			-- on every restart would be pure noise. Genuine removals
+			-- (tag wasn't in pre-event set) and removals that persist
+			-- past the window are still logged.
 			for tag, _ in pairs(previous) do
 				if not current[tag] then
-					logmsg("info", string.format(
-						"group '%s': no longer present", tag))
+					if not (in_window and known_pre_event[tag]) then
+						logmsg("info", string.format(
+							"group '%s': no longer present", tag))
+					end
 				end
 			end
 		end
