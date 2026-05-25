@@ -283,6 +283,32 @@ return baseclass.extend({
 		oDetour.value('direct',  _('Direct (WAN)'));
 		oDetour['default'] = 'default';
 
+		// ── Latency testing ──────────────────────────────────────────────
+		// Whole section is Advanced (same prism-advanced wrapper-class
+		// trick as Logging). Both flags bind to `global` and feed
+		// build-config's experimental.clash_api emission and step-4 node
+		// filter respectively.
+		var sLatency = m.section(form.NamedSection, 'global', 'prism', _('Latency testing'),
+			_('Probe node round-trip time via sing-box\'s clash-compatible API. ' +
+			  'The API binds 127.0.0.1:9090 only — never exposed on the LAN.'));
+		sLatency.addremove = false;
+
+		var oClashApi = sLatency.option(form.Flag, 'clash_api_enabled',
+			_('Enable latency testing'),
+			_('Adds a loopback-only clash API listener to sing-box and a Test ' +
+			  'button next to each node on the Nodes tab.'));
+		oClashApi.rmempty = false;
+
+		var oIncludeAll = sLatency.option(form.Flag, 'include_all_nodes',
+			_('Include all nodes in the running config'),
+			_('Subscription nodes only reach sing-box (and become testable) when ' +
+			  'a routing rule or group member references them. Enable this to ' +
+			  'emit every known node into the generated config, regardless. ' +
+			  'Cost: a few hundred bytes per node on tmpfs; idle nodes are not ' +
+			  'dialed unless used.'));
+		oIncludeAll.rmempty = false;
+		oIncludeAll.depends('clash_api_enabled', '1');
+
 		// ── Logging ──────────────────────────────────────────────────────
 		// Entire section is Advanced — its wrapper div gets the
 		// prism-advanced class in _postRender, so individual rows do not
@@ -314,7 +340,7 @@ return baseclass.extend({
 		// Sections whose whole content is Advanced. _postRender tags their
 		// wrapper div with prism-advanced so the section header + every row
 		// hides as one unit when the toggle is off.
-		this._advSections = [sLogging];
+		this._advSections = [sLatency, sLogging];
 
 		return m.render().then(L.bind(this._postRender, this, extraText));
 	},
