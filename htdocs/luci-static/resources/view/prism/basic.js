@@ -77,6 +77,15 @@ return baseclass.extend({
 		// re-loading is cheap (cached) and keeps the panel self-contained if
 		// it is ever mounted standalone.
 		return uci.load('prism').then(function() {
+			// /etc/config/prism is a conffile preserved across upgrades, so
+			// pre-basic-mode installs are missing the `config prism 'basic'`
+			// section the new defaults ship. Without it form.NamedSection
+			// renders the section header but skips every option underneath.
+			// set_mode primes the section on the way into Basic; this is the
+			// belt-and-suspenders fallback for hand-edited UCI state.
+			if (uci.get('prism', 'basic') == null) {
+				uci.add('prism', 'prism', 'basic');
+			}
 			var subs = uci.sections('prism', 'subscription');
 			var calls = subs.map(function(sub) {
 				return callListSubNodes(sub['.name']).catch(function() {
