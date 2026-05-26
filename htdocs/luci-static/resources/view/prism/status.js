@@ -371,17 +371,26 @@ return baseclass.extend({
 
 		]);
 
-		this._scheduleStatusRefresh();
-		this._scheduleLogRefresh();
-		// Initial scroll-to-bottom for the rare case where lines wrap onto
-		// more rows than the box can show; deferred so the textareas are in
-		// the DOM (and have their scrollHeight) by the time we read them.
-		requestAnimationFrame(function() {
+		// Polling and scroll-to-bottom both have to wait until the panel's
+		// DOM is actually attached: render() builds a detached node and
+		// the host shell (main.js) appends it in a .then microtask after
+		// we return. requestAnimationFrame fires after that microtask, so
+		// at this point document.getElementById can finally see our IDs.
+		// Without this, _scheduleStatusRefresh's "is the panel mounted?"
+		// guard short-circuits the initial call and polling never starts
+		// on a fresh page load — only the user-action paths
+		// (handleStart/Stop/Restart/ToggleEnabled call _refreshStatusNow
+		// which then schedules) would resurrect it, which is why the
+		// freeze was easy to miss before live traffic numbers made it
+		// visible.
+		requestAnimationFrame(L.bind(function() {
+			this._scheduleStatusRefresh();
+			this._scheduleLogRefresh();
 			['prism-log-prism', 'prism-log-singbox'].forEach(function(id) {
 				var el = document.getElementById(id);
 				if (el) el.scrollTop = el.scrollHeight;
 			});
-		});
+		}, this));
 
 		return node;
 	},
