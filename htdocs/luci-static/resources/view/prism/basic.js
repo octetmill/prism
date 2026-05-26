@@ -265,17 +265,6 @@ return baseclass.extend({
 
 		var extras = [];
 
-		if (this._hasAdvanced) {
-			extras.push(E('div', {
-				'class': 'alert-message',
-				'style': 'margin-top:1em'
-			}, [
-				E('p', {}, [
-					_('Advanced configuration is present on this router (custom rules, manual nodes or extra.json overrides). It is kept on disk and will become active again if you switch to Expert mode.')
-				])
-			]));
-		}
-
 		extras.push(E('div', {
 			'class': 'cbi-section',
 			'style': 'margin-top:1em; text-align:right; font-size:0.9em'
