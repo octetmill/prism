@@ -213,6 +213,39 @@ function formatActiveNode(tag, outbounds) {
 	return tag;
 }
 
+// Active outbound + rules-row label for the runtime header. Branches on
+// prism.global.mode: Expert reads prism.routing.final_outbound and counts
+// enabled prism.rule sections; Basic synthesises the outbound from the
+// user's basic.server list (single tag, basic-auto for N>1, none for 0)
+// and replaces the rule count with a "Basic preset" badge — counting
+// dormant Expert rules in Basic mode misleads since they are kept on
+// disk but not compiled into the running config.
+function runtimeInfo(outbounds) {
+	var mode = uci.get('prism', 'global', 'mode');
+	if (mode !== 'basic' && mode !== 'expert') mode = 'expert';
+
+	if (mode === 'basic') {
+		var servers = uci.get('prism', 'basic', 'server');
+		if (!Array.isArray(servers))
+			servers = servers ? [ servers ] : [];
+		var tag = '';
+		if (servers.length === 1)      tag = servers[0];
+		else if (servers.length > 1)   tag = 'basic-auto';
+		return {
+			active:     formatActiveNode(tag, outbounds),
+			rulesLabel: _('Routing: Basic preset')
+		};
+	}
+
+	var ruleCount = uci.sections('prism', 'rule').filter(function(r) {
+		return r.enabled !== '0';
+	}).length;
+	return {
+		active:     formatActiveNode(uci.get('prism', 'routing', 'final_outbound') || '', outbounds),
+		rulesLabel: _('Active rules: %d').format(ruleCount)
+	};
+}
+
 // Trigger a browser download of the given JSON text as sing-box.json. Uses a
 // Blob URL rather than a data: URL — large configs would otherwise blow past
 // the data-URL length limit some browsers still enforce.
@@ -264,13 +297,10 @@ return baseclass.extend({
 		this._outbounds = outbounds;
 		this._running   = !!status.running;
 
-		var active = formatActiveNode(
-			uci.get('prism', 'routing', 'final_outbound') || '', outbounds);
-		var mode   = uci.get('prism', 'inbounds', 'mode') || 'tproxy';
+		var info     = runtimeInfo(outbounds);
+		var active   = info.active;
+		var mode     = uci.get('prism', 'inbounds', 'mode') || 'tproxy';
 		var subCount = uci.sections('prism', 'subscription').length;
-		var ruleCount = uci.sections('prism', 'rule').filter(function(r) {
-			return r.enabled !== '0';
-		}).length;
 
 		var self = this;
 
@@ -299,7 +329,7 @@ return baseclass.extend({
 				'id': 'prism-runtime-section',
 				'class': 'cbi-section',
 				'style': status.enabled ? '' : 'display:none;'
-			}, this._renderRuntime(status, active, subCount, ruleCount, mode)),
+			}, this._renderRuntime(status, active, subCount, info.rulesLabel, mode)),
 
 			// ── Traffic ────────────────────────────────────────────────
 			// One-row digest of /connections from the daemon snapshot:
@@ -613,7 +643,7 @@ return baseclass.extend({
 		];
 	},
 
-	_renderRuntime: function(status, active, subCount, ruleCount, mode) {
+	_renderRuntime: function(status, active, subCount, rulesLabel, mode) {
 		// The whole runtime section (badge row, counts, footer). Called
 		// from render() to build the initial DOM, and again from
 		// _updateStatus when the enable state flips on so the contents
@@ -647,7 +677,7 @@ return baseclass.extend({
 			E('div', { 'style': 'margin-top:0.5em;' }, [
 				_('Subscriptions: %d').format(subCount),
 				' · ',
-				_('Active rules: %d').format(ruleCount)
+				rulesLabel
 			]),
 			E('div', {
 				'id': 'prism-status-footer',
@@ -731,16 +761,12 @@ return baseclass.extend({
 			if (status.enabled) {
 				runtime.style.display = '';
 				if (!document.getElementById('prism-status-badge')) {
-					var active = formatActiveNode(
-						uci.get('prism', 'routing', 'final_outbound') || '',
-						this._outbounds);
-					var mode   = uci.get('prism', 'inbounds', 'mode') || 'tproxy';
+					var info     = runtimeInfo(this._outbounds);
+					var active   = info.active;
+					var mode     = uci.get('prism', 'inbounds', 'mode') || 'tproxy';
 					var subCount = uci.sections('prism', 'subscription').length;
-					var ruleCount = uci.sections('prism', 'rule').filter(function(r) {
-						return r.enabled !== '0';
-					}).length;
 					while (runtime.firstChild) runtime.removeChild(runtime.firstChild);
-					this._renderRuntime(status, active, subCount, ruleCount, mode)
+					this._renderRuntime(status, active, subCount, info.rulesLabel, mode)
 						.forEach(function(n) { runtime.appendChild(n); });
 					return;
 				}
