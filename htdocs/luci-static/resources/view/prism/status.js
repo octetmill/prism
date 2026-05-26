@@ -195,10 +195,21 @@ function formatRate(bps) {
 // appear in list_outbounds, so the lookup misses and falls through to the
 // raw tag — which is what we want, a group is a single named entity). Same
 // shape as the Routing tab's dropdown labels (routing.js:addServers).
+// Map an internal outbound tag to a friendlier label for the Status UI. The
+// only special case today is the Basic-mode synthesised urltest: its tag has
+// to stay stable (it appears in sing-box logs, the clash cache file and the
+// /proxies API), so the rename happens at display time only.
+var TAG_DISPLAY = { 'basic-auto': _('Auto') };
+
+function displayTag(tag) {
+	return (tag != null && TAG_DISPLAY[tag]) || tag;
+}
+
 function formatActiveNode(tag, outbounds) {
 	if (!tag) return '';
 	if (tag === 'direct') return _('direct (no proxy)');
 	if (tag === 'block')  return _('block (drop)');
+	if (TAG_DISPLAY[tag])  return TAG_DISPLAY[tag];
 	var subName = {};
 	uci.sections('prism', 'subscription').forEach(function(sub) {
 		subName[sub['.name']] = sub.name || sub['.name'];
@@ -609,7 +620,7 @@ return baseclass.extend({
 		var self = this;
 		groups.forEach(function(g) {
 			rows.push(E('tr', { 'class': 'tr cbi-section-table-row' }, [
-				E('td', { 'class': 'td', 'style': 'font-weight:bold;' }, [ g.tag ]),
+				E('td', { 'class': 'td', 'style': 'font-weight:bold;' }, [ displayTag(g.tag) ]),
 				E('td', { 'class': 'td', 'style': 'opacity:0.6;' }, [ '→' ]),
 				E('td', { 'class': 'td' }, [ g.now || E('span', { 'style': 'opacity:0.5;' }, [ '—' ]) ]),
 				E('td', { 'class': 'td' }, [ self._renderLatency(g.delay_ms) ]),
