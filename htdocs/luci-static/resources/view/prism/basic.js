@@ -252,6 +252,17 @@ return baseclass.extend({
 	_postRender: function(formNode) {
 		var self = this;
 
+		// Breathing room between sections — the four Basic stacks
+		// (Subscriptions / Default server(s) / Routing / Ports) sit on top
+		// of each other with the LuCI default 0.5em gap, which reads as one
+		// dense block. 2em margin-top on every .cbi-section pushes each
+		// title down so the visual rhythm matches the conceptual grouping.
+		// Scoped to .cbi-map.prism-basic to leave Expert layouts alone.
+		formNode.classList.add('prism-basic');
+		formNode.appendChild(E('style', {}, [
+			'.cbi-map.prism-basic .cbi-section{margin-top:2em}'
+		]));
+
 		var extras = [];
 
 		if (this._hasAdvanced) {
