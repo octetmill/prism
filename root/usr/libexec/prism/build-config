@@ -1310,13 +1310,21 @@ local function build_basic_route(c)
 	local cc           = string.lower(basic.bypass_country or "")
 	local ports_mode   = basic.ports   or "all"
 	local delivery     = c:get("prism", "global", "ruleset_delivery") or "github"
-	local detour       = c:get("prism", "global", "ruleset_download_detour") or "default"
 
+	-- Basic always fetches rule-sets directly via WAN, regardless of the
+	-- Expert ruleset_download_detour knob. The default-outbound path is a
+	-- chicken-and-egg trap at startup: sing-box initialises rule-sets before
+	-- the urltest has picked a member, so dialling through `basic-auto`
+	-- times out and the whole service aborts with a FATAL. WAN is always
+	-- reachable at this point (the prism init script gates start_service on
+	-- WAN being up); once one fetch succeeds, experimental.cache_file lets
+	-- subsequent boots load rule-sets from flash regardless of the network.
 	local rule_sets = {}
 	local function emit_rs(tag, url)
-		local rs = { type = "remote", tag = tag, format = "binary", url = url }
-		if detour == "direct" then rs.download_detour = "direct" end
-		rule_sets[#rule_sets + 1] = rs
+		rule_sets[#rule_sets + 1] = {
+			type = "remote", tag = tag, format = "binary", url = url,
+			download_detour = "direct"
+		}
 	end
 
 	-- Country bypass — geoip catches direct-IP destinations, geosite catches
