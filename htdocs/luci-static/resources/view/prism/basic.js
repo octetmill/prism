@@ -14,9 +14,8 @@
 //   - prism.basic.ports     — "all" | "common"
 //
 // Custom rules, manual outbounds and /etc/prism/extra.json are kept on disk
-// but not compiled while in Basic mode. The "advanced configuration present"
-// banner below the form surfaces that state so the user is not surprised when
-// switching back to Expert restores everything.
+// but not compiled while in Basic mode; switching back to Expert restores
+// them.
 
 'use strict';
 'require baseclass';
@@ -47,12 +46,6 @@ var callReloadIfChanged = rpc.declare({
 	expect: { '': {} }
 });
 
-var callHasAdvanced = rpc.declare({
-	object: 'luci.prism',
-	method: 'has_advanced_config',
-	expect: { '': {} }
-});
-
 var callSetMode = rpc.declare({
 	object: 'luci.prism',
 	method: 'set_mode',
@@ -72,10 +65,9 @@ var COUNTRIES = [
 
 return baseclass.extend({
 	load: function() {
-		// One UCI snapshot + one RPC per subscription for node listings + one
-		// RPC for the advanced-config probe. The host already loaded prism;
-		// re-loading is cheap (cached) and keeps the panel self-contained if
-		// it is ever mounted standalone.
+		// One UCI snapshot + one RPC per subscription for node listings. The
+		// host already loaded prism; re-loading is cheap (cached) and keeps
+		// the panel self-contained if it is ever mounted standalone.
 		return uci.load('prism').then(function() {
 			// /etc/config/prism is a conffile preserved across upgrades, so
 			// pre-basic-mode installs are missing the `config prism 'basic'`
@@ -113,19 +105,12 @@ return baseclass.extend({
 				});
 				return nodes;
 			});
-		}).then(function(nodes) {
-			return callHasAdvanced().catch(function() {
-				return { has: false };
-			}).then(function(adv) {
-				return { nodes: nodes, advanced: adv };
-			});
 		});
 	},
 
-	render: function(data) {
+	render: function(nodes) {
 		var self = this;
-		data = data || { nodes: [], advanced: { has: false } };
-		this._hasAdvanced = !!(data.advanced && data.advanced.has);
+		nodes = nodes || [];
 
 		var m = new form.Map('prism');
 
@@ -211,10 +196,10 @@ return baseclass.extend({
 		oServer.widget = 'select';
 		oServer.rmempty = true;
 		oServer.placeholder = _('— pick one or more —');
-		if (data.nodes.length === 0) {
+		if (nodes.length === 0) {
 			oServer.description = _('No nodes yet. Add a subscription and sync it first.');
 		} else {
-			data.nodes.forEach(function(n) {
+			nodes.forEach(function(n) {
 				oServer.value(n.tag, n.tag + '  (' + n.sub_name + ')');
 			});
 		}

@@ -1308,30 +1308,6 @@ local methods = {
 		end
 	},
 
-	-- Cheap "is anything Expert-only configured?" probe so the Basic panel can
-	-- surface a small notice — "advanced configuration is present and will
-	-- become active again if you switch to Expert mode." Counts manual nodes
-	-- and custom rules in UCI plus whether /etc/prism/extra.json carries
-	-- content. DNS / inbound tweaks are intentionally not flagged: they apply
-	-- in both modes.
-	has_advanced_config = {
-		call = function()
-			local c = uci_cursor()
-			local nodes, rules = 0, 0
-			c:foreach("prism", "node", function() nodes = nodes + 1 end)
-			c:foreach("prism", "rule", function() rules = rules + 1 end)
-			c:close()
-			local extra = read_file("/etc/prism/extra.json")
-			local has_extra = (extra and not extra:match("^%s*$")) and true or false
-			return {
-				has   = (nodes > 0 or rules > 0 or has_extra),
-				nodes = nodes,
-				rules = rules,
-				extra = has_extra
-			}
-		end
-	},
-
 	-- Return a fresh preview of the sing-box config built from the current UCI
 	-- state. The canonical file at prism.global.config_path is what sing-box
 	-- actually runs — we do NOT overwrite it here, so a stale "running" config
