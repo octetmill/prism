@@ -22,9 +22,10 @@ local jsonc = require "luci.jsonc"
 local lib   = dofile("/usr/libexec/prism/prismlib.lua")
 local read_file = lib.read_file
 
-local CLASH_HOST = "127.0.0.1:9090"
-local SNAPSHOT   = "/var/etc/prism/.active-nodes.json"
-local POLL_S     = 10
+local CLASH_HOST   = "127.0.0.1:9090"
+local SNAPSHOT     = "/var/etc/prism/.active-nodes.json"
+local STATS_SNAP   = "/var/etc/prism/.clash-stats.json"
+local POLL_S       = 10
 
 local function logmsg(level, msg)
 	-- Tag names ultimately come from URL-decoded subscription content, so a
@@ -51,6 +52,36 @@ local function fetch_proxies()
 	local ok, parsed = pcall(jsonc.parse, body)
 	if not ok or type(parsed) ~= "table" then return nil end
 	return parsed
+end
+
+-- One GET to /connections. Returns the parsed response (an object with
+-- `downloadTotal`, `uploadTotal`, optionally `memory`, and `connections`
+-- as an array), or nil on any failure. Same silent-retry contract as
+-- fetch_proxies — the daemon picks up next tick when sing-box is back.
+local function fetch_connections()
+	local f = io.popen("uclient-fetch --timeout=5 -qO- 'http://"
+		.. CLASH_HOST .. "/connections' 2>/dev/null")
+	if not f then return nil end
+	local body = f:read("*a") or ""
+	f:close()
+	if body == "" then return nil end
+	local ok, parsed = pcall(jsonc.parse, body)
+	if not ok or type(parsed) ~= "table" then return nil end
+	return parsed
+end
+
+-- Write the throughput / counters snapshot read by the Status page's
+-- Traffic row. Atomic via rename, same as save_snapshot. The Status
+-- page tolerates a missing file (renders dashes) so a write skip on
+-- malformed data is fine.
+local function save_clash_stats(stats)
+	os.execute("mkdir -p /var/etc/prism 2>/dev/null")
+	local tmp = STATS_SNAP .. ".tmp"
+	local f = io.open(tmp, "w")
+	if not f then return end
+	f:write(jsonc.stringify(stats))
+	f:close()
+	os.rename(tmp, STATS_SNAP)
 end
 
 -- Ask procd for sing-box's current pid. Returns the pid (a positive
@@ -157,6 +188,16 @@ local last_pid = singbox_pid()
 local known_pre_event   = {}
 local event_context     = "starting"
 local post_event_until  = 0
+
+-- Throughput state. /connections returns monotonic counters since
+-- sing-box started; we diff against the previous tick to get bytes/sec.
+-- Reset semantics: if the new total is *lower* than the previous one,
+-- sing-box restarted between ticks (the pid_changed branch covers the
+-- visible case, but we also defend against any unobserved restart). Set
+-- bps to 0 for that tick and re-baseline.
+local prev_total_up   = nil
+local prev_total_down = nil
+local prev_stats_ts   = nil
 
 -- Emit one "active node is X" line per group. Used in two situations
 -- that both mean "the user just lost track of the live selection":
@@ -294,6 +335,45 @@ while true do
 		save_snapshot(current)
 		previous = current
 		primed   = true
+
+		-- ── Throughput / connections snapshot ─────────────────────────
+		-- Same tick, second cheap HTTP call. Failure is non-fatal: we
+		-- skip the stats write rather than dropping the proxies work
+		-- we just did. A pid change in this tick or a counter regression
+		-- both mean "the previous baseline is invalid"; zero the rate
+		-- and re-baseline so the next tick's diff is honest.
+		local conns = fetch_connections()
+		if conns then
+			local total_up   = tonumber(conns.uploadTotal)   or 0
+			local total_down = tonumber(conns.downloadTotal) or 0
+			local cs = (type(conns.connections) == "table") and #conns.connections or 0
+			local mem = tonumber(conns.memory)
+			local now_ts = os.time()
+			local up_bps, down_bps = 0, 0
+			if prev_total_up and prev_total_down and prev_stats_ts
+				and not pid_changed
+				and total_up >= prev_total_up
+				and total_down >= prev_total_down
+			then
+				local dt = now_ts - prev_stats_ts
+				if dt > 0 then
+					up_bps   = math.floor((total_up   - prev_total_up)   / dt)
+					down_bps = math.floor((total_down - prev_total_down) / dt)
+				end
+			end
+			save_clash_stats({
+				up_bps     = up_bps,
+				down_bps   = down_bps,
+				total_up   = total_up,
+				total_down = total_down,
+				conn_count = cs,
+				mem_inuse  = mem,
+				updated_at = now_ts
+			})
+			prev_total_up   = total_up
+			prev_total_down = total_down
+			prev_stats_ts   = now_ts
+		end
 	else
 		fail_streak = fail_streak + 1
 		-- One warning at the threshold, not one per failed tick — the

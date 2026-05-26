@@ -1690,6 +1690,47 @@ local methods = {
 		end
 	},
 
+	-- Return the live throughput / connection-count snapshot the
+	-- active-watch daemon writes every 10s from /connections. Source is
+	-- the snapshot file, not a fresh GET — same reasoning as
+	-- get_active_groups: the Status page polls every 2s, and we don't
+	-- want to fan that out into a /connections fetch (which on a busy
+	-- router carries the full per-connection list) on every tick. The
+	-- daemon already pays that cost once per 10s and writes the summary.
+	--
+	-- Returns `error = "clash API disabled"` when the feature flag is
+	-- off; the UI hides the row in that case. Empty/missing snapshot
+	-- (first ten seconds after enabling, or daemon not yet started)
+	-- returns the same shape with zero values so the UI just renders
+	-- dashes rather than a special case.
+	get_clash_stats = {
+		call = function()
+			local c = uci_cursor()
+			local enabled = c:get("prism", "global", "clash_api_enabled")
+			c:close()
+			if enabled ~= "1" then
+				return { error = "clash API disabled" }
+			end
+			local snap = read_file("/var/etc/prism/.clash-stats.json")
+			if not snap or snap == "" or not _jsonc_ok then
+				return { updated_at = 0 }
+			end
+			local ok, parsed = pcall(_jsonc.parse, snap)
+			if not ok or type(parsed) ~= "table" then
+				return { updated_at = 0 }
+			end
+			return {
+				up_bps     = tonumber(parsed.up_bps)     or 0,
+				down_bps   = tonumber(parsed.down_bps)   or 0,
+				total_up   = tonumber(parsed.total_up)   or 0,
+				total_down = tonumber(parsed.total_down) or 0,
+				conn_count = tonumber(parsed.conn_count) or 0,
+				mem_inuse  = tonumber(parsed.mem_inuse),
+				updated_at = tonumber(parsed.updated_at) or 0
+			}
+		end
+	},
+
 	-- Probe one outbound's latency via the loopback clash API. The clash API
 	-- block must be enabled in Settings (UCI clash_api_enabled=1) so sing-box
 	-- is listening on 127.0.0.1:9090; otherwise we return error="clash API
