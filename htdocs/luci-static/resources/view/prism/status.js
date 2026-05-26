@@ -224,36 +224,35 @@ function formatActiveNode(tag, outbounds) {
 	return tag;
 }
 
-// Active outbound + rules-row label for the runtime header. Branches on
-// prism.global.mode: Expert reads prism.routing.final_outbound and counts
-// enabled prism.rule sections; Basic synthesises the outbound from the
-// user's basic.server list (single tag, basic-auto for N>1, none for 0)
-// and replaces the rule count with a "Basic preset" badge — counting
-// dormant Expert rules in Basic mode misleads since they are kept on
-// disk but not compiled into the running config.
+// Active outbound for the runtime header. Expert reads
+// prism.routing.final_outbound; Basic synthesises from prism.basic.server
+// (single tag, basic-auto for N>1, none for 0). Rule count stays plain in
+// both modes — Basic just hides the row that would display it (along with
+// the sing-box/mode footer), so showing a "preset" label is unnecessary.
 function runtimeInfo(outbounds) {
-	var mode = uci.get('prism', 'global', 'mode');
-	if (mode !== 'basic' && mode !== 'expert') mode = 'expert';
+	var uiMode = uci.get('prism', 'global', 'mode');
+	if (uiMode !== 'basic' && uiMode !== 'expert') uiMode = 'expert';
 
-	if (mode === 'basic') {
+	var tag;
+	if (uiMode === 'basic') {
 		var servers = uci.get('prism', 'basic', 'server');
 		if (!Array.isArray(servers))
 			servers = servers ? [ servers ] : [];
-		var tag = '';
 		if (servers.length === 1)      tag = servers[0];
 		else if (servers.length > 1)   tag = 'basic-auto';
-		return {
-			active:     formatActiveNode(tag, outbounds),
-			rulesLabel: _('Routing: Basic preset')
-		};
+		else                           tag = '';
+	} else {
+		tag = uci.get('prism', 'routing', 'final_outbound') || '';
 	}
 
 	var ruleCount = uci.sections('prism', 'rule').filter(function(r) {
 		return r.enabled !== '0';
 	}).length;
+
 	return {
-		active:     formatActiveNode(uci.get('prism', 'routing', 'final_outbound') || '', outbounds),
-		rulesLabel: _('Active rules: %d').format(ruleCount)
+		active:    formatActiveNode(tag, outbounds),
+		ruleCount: ruleCount,
+		uiMode:    uiMode
 	};
 }
 
@@ -340,7 +339,7 @@ return baseclass.extend({
 				'id': 'prism-runtime-section',
 				'class': 'cbi-section',
 				'style': status.enabled ? '' : 'display:none;'
-			}, this._renderRuntime(status, active, subCount, info.rulesLabel, mode)),
+			}, this._renderRuntime(status, active, subCount, info, mode)),
 
 			// ── Traffic ────────────────────────────────────────────────
 			// One-row digest of /connections from the daemon snapshot:
@@ -654,13 +653,17 @@ return baseclass.extend({
 		];
 	},
 
-	_renderRuntime: function(status, active, subCount, rulesLabel, mode) {
+	_renderRuntime: function(status, active, subCount, info, mode) {
 		// The whole runtime section (badge row, counts, footer). Called
 		// from render() to build the initial DOM, and again from
 		// _updateStatus when the enable state flips on so the contents
 		// appear without a full re-render.
 		var state = this._runtimeState(status);
-		return [
+		// Basic mode hides the subscriptions/rules count and the
+		// sing-box-version/network-mode footer — those signals are aimed at
+		// power users debugging a config, not the Basic audience.
+		var isBasic = (info.uiMode === 'basic');
+		var rows = [
 			E('div', {
 				'style': 'display:flex; flex-wrap:wrap; align-items:center; ' +
 				         'gap:0.7em; padding:0.2em 0; font-size:1.15em; line-height:1.3;'
@@ -684,19 +687,22 @@ return baseclass.extend({
 				'style': state === 'paused'
 					? 'margin-top:0.4em; font-size:0.9em; opacity:0.7;'
 					: 'display:none;'
-			}, [ _('Paused for testing — will resume on next reboot.') ]),
-			E('div', { 'style': 'margin-top:0.5em;' }, [
+			}, [ _('Paused for testing — will resume on next reboot.') ])
+		];
+		if (!isBasic) {
+			rows.push(E('div', { 'style': 'margin-top:0.5em;' }, [
 				_('Subscriptions: %d').format(subCount),
 				' · ',
-				rulesLabel
-			]),
-			E('div', {
+				_('Active rules: %d').format(info.ruleCount)
+			]));
+			rows.push(E('div', {
 				'id': 'prism-status-footer',
 				'style': 'margin-top:0.25em;'
 			}, [
 				this._renderFooter(status, mode)
-			])
-		];
+			]));
+		}
+		return rows;
 	},
 
 	// ── Status controls + polling ─────────────────────────────────────────
@@ -777,7 +783,7 @@ return baseclass.extend({
 					var mode     = uci.get('prism', 'inbounds', 'mode') || 'tproxy';
 					var subCount = uci.sections('prism', 'subscription').length;
 					while (runtime.firstChild) runtime.removeChild(runtime.firstChild);
-					this._renderRuntime(status, active, subCount, info.rulesLabel, mode)
+					this._renderRuntime(status, active, subCount, info, mode)
 						.forEach(function(n) { runtime.appendChild(n); });
 					return;
 				}
