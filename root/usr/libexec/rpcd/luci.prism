@@ -1214,11 +1214,17 @@ local methods = {
 			-- builds; a thrown error here would propagate through the outer
 			-- pcall, causing os.exit(1) and an UBUS_STATUS_NOT_FOUND reply.
 			local enabled = false
+			local mode = "expert"
 			local c_ok, c = pcall(uci_cursor)
 			if c_ok then
 				local val = c:get("prism", "global", "enabled")
+				local m   = c:get("prism", "global", "mode")
 				c:close()
 				enabled = (val == "1")
+				-- Unset on existing installs that pre-date the basic/expert
+				-- split → "expert" so today's configuration stays visible
+				-- (a fresh install defaults to "basic" via /etc/config/prism).
+				if m == "basic" or m == "expert" then mode = m end
 			end
 
 			local running = service_running()
@@ -1259,7 +1265,56 @@ local methods = {
 				enabled = enabled,
 				running = running,
 				paused = paused,
-				version = version
+				version = version,
+				mode    = mode
+			}
+		end
+	},
+
+	-- UI-mode switch. Basic mode hides Nodes / Routing / Settings and builds
+	-- the running config from `prism.basic` only; Expert is today's full UI.
+	-- The flag is purely a builder gate — switching modes does not touch any
+	-- other UCI section, so going Expert → Basic → Expert is non-destructive.
+	-- Routing through here (rather than a plain `uci set` from JS) keeps the
+	-- commit + service reload atomic so the running sing-box config always
+	-- matches the mode the UI is showing.
+	set_mode = {
+		args = { mode = "" },
+		call = function(args)
+			local m = args.mode
+			if m ~= "basic" and m ~= "expert" then
+				return { ok = false, error = "invalid mode" }
+			end
+			local c = uci_cursor()
+			c:set("prism", "global", "mode", m)
+			c:commit("prism")
+			c:close()
+			log_prism("notice", "ui: switched to " .. m .. " mode")
+			os.execute("/etc/init.d/prism reload >/dev/null 2>&1")
+			return { ok = true, mode = m }
+		end
+	},
+
+	-- Cheap "is anything Expert-only configured?" probe so the Basic panel can
+	-- surface a small notice — "advanced configuration is present and will
+	-- become active again if you switch to Expert mode." Counts manual nodes
+	-- and custom rules in UCI plus whether /etc/prism/extra.json carries
+	-- content. DNS / inbound tweaks are intentionally not flagged: they apply
+	-- in both modes.
+	has_advanced_config = {
+		call = function()
+			local c = uci_cursor()
+			local nodes, rules = 0, 0
+			c:foreach("prism", "node", function() nodes = nodes + 1 end)
+			c:foreach("prism", "rule", function() rules = rules + 1 end)
+			c:close()
+			local extra = read_file("/etc/prism/extra.json")
+			local has_extra = (extra and not extra:match("^%s*$")) and true or false
+			return {
+				has   = (nodes > 0 or rules > 0 or has_extra),
+				nodes = nodes,
+				rules = rules,
+				extra = has_extra
 			}
 		end
 	},
