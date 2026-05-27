@@ -136,4 +136,12 @@ decisions is in [`docs/decisions.md`](docs/decisions.md).
 
 ## License
 
-GPL-3.0-only
+GPL-3.0-only — see [`LICENSE`](LICENSE) for the full text.
+
+The packaged `.apk` / `.ipk` runs a comment-stripping pass over the
+source on its way into the install tree, so the on-router copy is
+about half the size of the repo source. The `SPDX-License-Identifier`
+and `Copyright` headers are preserved on every installed file, and
+the package's `license:` metadata field records `GPL-3.0-only`. The
+repo source is the canonical, fully-commented form — clone the repo
+if you want to read the code with its design notes intact.

@@ -759,6 +759,26 @@ sh .github/workflows/package.sh
 # → dist/luci-app-prism_<version>_noarch.ipk
 ```
 
+**Comment stripping:** `package.sh` runs a `strip_comments()` pass on the
+staged tree before assembling the package. Lines whose first non-whitespace
+run is the language's line-comment marker (Lua `--`, JS `//`, shell `#`)
+are dropped from the installed copy — roughly halves the compressed
+package size. The repo source is untouched. The stripper is conservative
+by design:
+
+- Inline comments (`code  # note`) are preserved.
+- Shell shebangs on line 1 are preserved (matches both `#!/bin/sh` and
+  `#!/bin/sh /etc/rc.common`).
+- Lines matching `SPDX-License-Identifier` or `Copyright` are kept — every
+  file in the installed tree retains its GPL-3.0 header, as §5(a) requires.
+- Multi-line block comments (`--[[ ]]`, `/* ... */`) are not stripped;
+  the repo currently has none worth touching, and a parser-free stripper
+  can't handle them safely.
+
+When adding a new source file, put the SPDX and Copyright lines at the
+top in the file's comment syntax, and the strip pass will preserve them
+automatically.
+
 **Versioning model:**
 
 - `PKG_VERSION` in the `Makefile` is the **next** release being worked toward, not the last one shipped. Bump it immediately after tagging a release. (`package.sh` parses it from the Makefile.)
