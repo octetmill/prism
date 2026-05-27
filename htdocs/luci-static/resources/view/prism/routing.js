@@ -22,6 +22,20 @@ var callListRulesets = rpc.declare({
 	expect: { '': {} }
 });
 
+var callRefreshRulesets = rpc.declare({
+	object: 'luci.prism',
+	method: 'refresh_rulesets',
+	expect: { '': {} }
+});
+
+// Catalog refresh is the once-a-week background fetch from GitHub. It used
+// to be implicit in list_rulesets (any read triggered the refresh on stale
+// cache), but that put outbound network requests on the ACL read side. Now
+// the load() call asks for the cached data, then explicitly requests a
+// refresh only when the cache is older than the TTL. The refresh is
+// fire-and-forget; the next page load picks up the new names.
+var RULESET_CACHE_TTL_S = 7 * 24 * 3600;
+
 var callListDhcpLeases = rpc.declare({
 	object: 'luci.prism',
 	method: 'list_dhcp_leases',
@@ -427,7 +441,15 @@ return baseclass.extend({
 			callListOutbounds().catch(function() { return {}; }),
 			callListRulesets().catch(function() { return {}; }),
 			callListDhcpLeases().catch(function() { return {}; })
-		]);
+		]).then(function(results) {
+			// Fire-and-forget catalog refresh if the cache is stale or absent.
+			// Returns immediately; the next render() picks up the new names.
+			var rs = results[2] || {};
+			if (rs.age == null || rs.age > RULESET_CACHE_TTL_S) {
+				callRefreshRulesets().catch(function() {});
+			}
+			return results;
+		});
 	},
 
 	render: function(data) {

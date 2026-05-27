@@ -1957,32 +1957,34 @@ local methods = {
 		end
 	},
 
+	-- Pure read of the rule-set catalog cache. Returns the cached names plus
+	-- the cache age so the UI can decide whether to call refresh_rulesets.
+	-- Side-effect-free so it can stay on the ACL read side. The actual
+	-- network fetch is the separate refresh_rulesets RPC (write side).
 	list_rulesets = {
 		call = function()
 			local CACHE = "/etc/prism/rulesets-cache.json"
-			local TTL   = 7 * 24 * 3600
-
-			local function load_cache()
-				local f = io.open(CACHE, "r")
-				if not f then return nil end
-				local s = f:read("*a")
-				f:close()
-				local ok, obj = pcall(json_parse, s)
-				return (ok and type(obj) == "table") and obj or nil
+			local f = io.open(CACHE, "r")
+			if not f then return { names = {}, age = nil } end
+			local s = f:read("*a")
+			f:close()
+			local ok, obj = pcall(json_parse, s)
+			if not (ok and type(obj) == "table") then
+				return { names = {}, age = nil }
 			end
+			local age = (type(obj.ts) == "number") and (os.time() - obj.ts) or nil
+			return { names = obj.names or {}, age = age }
+		end
+	},
 
-			local cache = load_cache()
-			local fresh = cache and type(cache.ts) == "number"
-			              and (os.time() - cache.ts) < TTL
-
-			-- Spawn a background refresh; fetch-catalog self-locks via
-			-- busybox `lock` and exits silently if one is already running.
-			if not fresh then
-				os.execute("/usr/libexec/prism/fetch-catalog >/dev/null 2>&1 &")
-			end
-
-			-- Return immediately — caller falls back to static list on empty.
-			return { names = (cache and cache.names) or {} }
+	-- Trigger a background catalog refresh via fetch-catalog (outbound HTTPS
+	-- to GitHub). Write-side so a read-only LuCI user cannot cause outbound
+	-- network requests or flash writes. fetch-catalog self-locks via busybox
+	-- `lock` and exits silently if one is already running.
+	refresh_rulesets = {
+		call = function()
+			os.execute("/usr/libexec/prism/fetch-catalog >/dev/null 2>&1 &")
+			return { started = true }
 		end
 	}
 }
