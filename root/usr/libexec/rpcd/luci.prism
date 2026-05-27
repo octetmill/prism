@@ -1214,11 +1214,17 @@ local methods = {
 			-- builds; a thrown error here would propagate through the outer
 			-- pcall, causing os.exit(1) and an UBUS_STATUS_NOT_FOUND reply.
 			local enabled = false
+			local mode = "advanced"
 			local c_ok, c = pcall(uci_cursor)
 			if c_ok then
 				local val = c:get("prism", "global", "enabled")
+				local m   = c:get("prism", "global", "mode")
 				c:close()
 				enabled = (val == "1")
+				-- Unset on existing installs that pre-date the basic/advanced
+				-- split → "advanced" so today's configuration stays visible
+				-- (a fresh install defaults to "basic" via /etc/config/prism).
+				if m == "basic" or m == "advanced" then mode = m end
 			end
 
 			local running = service_running()
@@ -1259,8 +1265,46 @@ local methods = {
 				enabled = enabled,
 				running = running,
 				paused = paused,
-				version = version
+				version = version,
+				mode    = mode
 			}
+		end
+	},
+
+	-- UI-mode switch. Basic mode hides Nodes / Routing / Settings and builds
+	-- the running config from `prism.basic` only; Advanced is today's full UI.
+	-- The flag is purely a builder gate — switching modes does not touch any
+	-- other UCI section, so going Advanced → Basic → Advanced is non-destructive.
+	-- Routing through here (rather than a plain `uci set` from JS) keeps the
+	-- commit + service reload atomic so the running sing-box config always
+	-- matches the mode the UI is showing.
+	set_mode = {
+		args = { mode = "" },
+		call = function(args)
+			local m = args.mode
+			if m ~= "basic" and m ~= "advanced" then
+				return { ok = false, error = "invalid mode" }
+			end
+			local c = uci_cursor()
+			c:set("prism", "global", "mode", m)
+			-- /etc/config/prism is a conffile preserved across upgrades, so
+			-- existing installs that pre-date the basic-mode flag never get
+			-- the default `config prism 'basic'` section the new shipping
+			-- file ships. Without it, form.NamedSection on the Basic panel
+			-- renders the section title but skips every option underneath.
+			-- Prime the section here on the way into Basic so the UI always
+			-- has something to bind to; idempotent (no-op when present).
+			if m == "basic" and not c:get("prism", "basic") then
+				c:set("prism", "basic", "prism")
+				c:set("prism", "basic", "routing", "all")
+				c:set("prism", "basic", "bypass_country", "cn")
+				c:set("prism", "basic", "ports", "all")
+			end
+			c:commit("prism")
+			c:close()
+			log_prism("notice", "ui: switched to " .. m .. " mode")
+			os.execute("/etc/init.d/prism reload >/dev/null 2>&1")
+			return { ok = true, mode = m }
 		end
 	},
 

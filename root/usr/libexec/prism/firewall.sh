@@ -248,6 +248,13 @@ start() {
 	inet6=$(uci_get inbounds inet6)
 	self=$(uci_get inbounds tproxy_self)
 	[ -n "$self" ] || self=1
+	# Basic mode never proxies router-originated traffic — that knob is an
+	# Advanced-tier debugging surface, and a Basic user's expectation is "only
+	# my LAN clients go through". Override the inbounds.tproxy_self flag so
+	# the OUTPUT-chain rules aren't installed in Basic mode regardless of
+	# what the saved (Advanced) value was.
+	ui_mode=$(uci_get global mode)
+	[ "$ui_mode" = "basic" ] && self=0
 	iface=$(lan_device)
 
 	# Fake-IP ranges must be TPROXY'd, not bypassed by the reserved-range
