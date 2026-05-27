@@ -1768,20 +1768,37 @@ local methods = {
 				return { groups = {}, updated_at = 0 }
 			end
 
+			-- Synthesised groups have no UCI section. basic-auto is the
+			-- Basic-mode urltest emitted by build-config when the user
+			-- picks more than one server; it carries fixed tuning, so
+			-- surface it with the same shape the urltest's UCI peers
+			-- would. _prism_test_all is filtered by active-watch's
+			-- underscore-prefix rule and never reaches the snapshot.
+			local SYNTHESISED = {
+				["basic-auto"] = { type = "urltest", interval = "5m", tolerance = "50" },
+			}
+
 			local out = {}
 			for tag, entry in pairs(parsed.groups) do
-				local u = uci_groups[tag] or {}
-				out[#out + 1] = {
-					tag       = tag,
-					type      = (entry.type == "URLTest") and "urltest"
-					            or (entry.type == "Selector") and "selector"
-					            or string.lower(tostring(entry.type or "")),
-					now       = entry.now or "",
-					delay_ms  = entry.delay_ms,
-					interval  = u.interval or "",
-					tolerance = u.tolerance or "",
-					default   = u.default or ""
-				}
+				local u = uci_groups[tag] or SYNTHESISED[tag]
+				-- Skip rows whose group has been deleted from UCI but
+				-- still lingers in the snapshot until sing-box's next
+				-- reload. Without this filter the UI would render a
+				-- confusing row with blank interval/tolerance/default
+				-- pointing at a group the user already removed.
+				if u then
+					out[#out + 1] = {
+						tag       = tag,
+						type      = (entry.type == "URLTest") and "urltest"
+						            or (entry.type == "Selector") and "selector"
+						            or string.lower(tostring(entry.type or "")),
+						now       = entry.now or "",
+						delay_ms  = entry.delay_ms,
+						interval  = u.interval or "",
+						tolerance = u.tolerance or "",
+						default   = u.default or ""
+					}
+				end
 			end
 			-- Stable order so the UI rows don't jump on each refresh —
 			-- pairs() over the snapshot is unordered. Sort by tag.
