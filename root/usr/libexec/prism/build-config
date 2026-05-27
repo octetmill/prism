@@ -66,15 +66,17 @@ end
 -- Used by build_dns to decide whether the `remote` DNS server is detoured
 -- through a proxy (so the lookup exits the same way the connection will) and
 -- whether the DNS `final` resolves via remote or local. Advanced reads it from
--- prism.routing.final_outbound; Basic derives it from prism.basic.server —
--- either the single selected node, or BASIC_AUTO_TAG when N>1 wraps them in
--- a urltest. With zero servers Basic has no proxy default so this returns
--- "direct" and DNS stays on the local resolver, same as Advanced with no rules.
+-- prism.routing.final_outbound; Basic derives it from prism.basic.server via
+-- resolve_basic_members so a stale selection (subscription removed, node
+-- renamed) is filtered out before it can leak into route.final as a dangling
+-- tag — defined below load_subscription_nodes so it can do the resolution.
+local resolve_basic_members  -- forward declaration, defined after load_subscription_nodes
+
 local function compute_default_outbound(c)
 	if read_mode(c) == "basic" then
-		local servers = uci_list_or_string(c:get_all("prism", "basic") or {}, "server")
-		if #servers == 0 then return "direct" end
-		if #servers == 1 then return servers[1] end
+		local members = resolve_basic_members(c)
+		if #members == 0 then return "direct" end
+		if #members == 1 then return members[1] end
 		return BASIC_AUTO_TAG
 	end
 	local fin = c:get("prism", "routing", "final_outbound") or ""
@@ -649,6 +651,32 @@ local function load_subscription_nodes(c, all_ordered, all_map, seen)
 	f:close()
 end
 
+-- Load subscriptions and resolve the Basic-mode server selection in one pass,
+-- memoized for the lifetime of the build. compute_default_outbound (called
+-- from build_dns and build_basic_route) and build_basic_outbounds all need
+-- the same filtered member list — without the shared filter, the default
+-- could refer to a tag that build_basic_outbounds drops, leaving route.final
+-- dangling and sing-box rejecting the config.
+local _basic_cache
+resolve_basic_members = function(c)
+	if _basic_cache then return _basic_cache.members, _basic_cache.all_map, _basic_cache.all_ordered end
+	local all_ordered, all_map, seen = {}, {}, {}
+	load_subscription_nodes(c, all_ordered, all_map, seen)
+	local basic = c:get_all("prism", "basic") or {}
+	local selected = uci_list_or_string(basic, "server")
+	-- Drop selections that no longer resolve (subscription removed, node
+	-- renamed) and dedupe. Stable order preserves the user's pick sequence.
+	local members, member_set = {}, {}
+	for _, t in ipairs(selected) do
+		if all_map[t] and not member_set[t] then
+			members[#members + 1] = t
+			member_set[t] = true
+		end
+	end
+	_basic_cache = { members = members, all_map = all_map, all_ordered = all_ordered }
+	return members, all_map, all_ordered
+end
+
 -- Basic mode: import subscription nodes + synthesise a default outbound from
 -- prism.basic.server (single → that node is the default, N>1 → wrap in a
 -- urltest tagged BASIC_AUTO_TAG, zero → no proxy default and build_route's
@@ -656,22 +684,7 @@ end
 -- (prism.rule) and group regexes are ignored — they stay on disk for an
 -- Advanced switch-back but are not compiled in.
 local function build_basic_outbounds(c)
-	local all_ordered, all_map, seen = {}, {}, {}
-	load_subscription_nodes(c, all_ordered, all_map, seen)
-
-	local basic = c:get_all("prism", "basic") or {}
-	local selected = uci_list_or_string(basic, "server")
-
-	-- Drop selections that no longer resolve (subscription removed, node
-	-- renamed) and dedupe. Stable order preserves the user's pick sequence.
-	local members = {}
-	local member_set = {}
-	for _, t in ipairs(selected) do
-		if all_map[t] and not member_set[t] then
-			members[#members + 1] = t
-			member_set[t] = true
-		end
-	end
+	local members, all_map, all_ordered = resolve_basic_members(c)
 
 	if #members > 1 then
 		local group = {

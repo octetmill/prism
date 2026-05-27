@@ -226,9 +226,11 @@ function formatActiveNode(tag, outbounds) {
 
 // Active outbound for the runtime header. Advanced reads
 // prism.routing.final_outbound; Basic synthesises from prism.basic.server
-// (single tag, basic-auto for N>1, none for 0). Rule count stays plain in
-// both modes — Basic just hides the row that would display it (along with
-// the sing-box/mode footer), so showing a "preset" label is unnecessary.
+// after filtering picks that no longer resolve against the live outbound
+// set (subscription removed, node renamed). Same filter the builder applies,
+// otherwise Status displays "via Auto" for a config that doesn't have a
+// basic-auto group. Rule count stays plain in both modes — Basic just hides
+// the row that would display it (along with the sing-box/mode footer).
 function runtimeInfo(outbounds) {
 	var uiMode = uci.get('prism', 'global', 'mode');
 	if (uiMode !== 'basic' && uiMode !== 'advanced') uiMode = 'advanced';
@@ -238,8 +240,15 @@ function runtimeInfo(outbounds) {
 		var servers = uci.get('prism', 'basic', 'server');
 		if (!Array.isArray(servers))
 			servers = servers ? [ servers ] : [];
-		if (servers.length === 1)      tag = servers[0];
-		else if (servers.length > 1)   tag = 'basic-auto';
+		var live = {};
+		(outbounds || []).forEach(function(ob) { if (ob && ob.tag) live[ob.tag] = true; });
+		var members = [];
+		var seen = {};
+		servers.forEach(function(t) {
+			if (live[t] && !seen[t]) { members.push(t); seen[t] = true; }
+		});
+		if (members.length === 1)      tag = members[0];
+		else if (members.length > 1)   tag = 'basic-auto';
 		else                           tag = '';
 	} else {
 		tag = uci.get('prism', 'routing', 'final_outbound') || '';
