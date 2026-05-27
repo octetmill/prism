@@ -931,8 +931,14 @@ local function build_outbounds(c)
 				local src_list = ob._outbound_regex_sources
 				ob._outbound_regex = nil  -- strip before handing to sing-box
 				ob._outbound_regex_sources = nil
-				-- Empty / nil source list means "match every source" — same
-				-- behaviour as before the urltest_regex_sources field existed.
+				-- Source restriction: when urltest_regex_sources is set,
+				-- subscription nodes from those subscription IDs are admitted.
+				-- When unset (or empty), subscription nodes are NOT admitted —
+				-- only manual nodes (_source == nil). A subscription provider
+				-- otherwise could ship nodes whose tags match the user's
+				-- regex and silently steer traffic through attacker-controlled
+				-- outbounds; requiring an explicit source allowlist forces
+				-- the user to opt each subscription in by hand.
 				local src_set = nil
 				if type(src_list) == "table" and #src_list > 0 then
 					src_set = {}
@@ -942,9 +948,13 @@ local function build_outbounds(c)
 					ob.outbounds = {}
 					for _, other in ipairs(all_ordered) do
 						if other.type ~= "urltest" and other.type ~= "selector"
-						   and match_any(other.tag, pattern)
-						   and (not src_set or src_set[other._source or ""]) then
-							ob.outbounds[#ob.outbounds + 1] = other.tag
+						   and match_any(other.tag, pattern) then
+							local source = other._source
+							local admit = (source == nil)  -- manual nodes always OK
+								or (src_set and src_set[source])
+							if admit then
+								ob.outbounds[#ob.outbounds + 1] = other.tag
+							end
 						end
 					end
 				end
