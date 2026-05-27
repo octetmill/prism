@@ -945,8 +945,18 @@ return baseclass.extend({
 
 	// Single-node probe. `btn` is the row's Test button; spin it in place
 	// (preserves width/height so the row doesn't jump) until the RPC settles.
+	// Refuses while a "Test all" batch is in flight — both write the same
+	// /var/etc/prism/latency.json with no coordination, and a per-row probe
+	// during a batch silently rolls back the runner's progress on its next
+	// atomic write.
 	_testOne: function(btn, tag) {
 		var self = this;
+		if (this._testAllRunning) {
+			ui.addNotification(null,
+				E('p', _('A latency test run is already in progress.')),
+				'info');
+			return Promise.resolve();
+		}
 		var label = btn.textContent;
 		var w = btn.offsetWidth, h = btn.offsetHeight;
 		btn.classList.add('spinning');
