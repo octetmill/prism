@@ -8,7 +8,7 @@ LUCI_DEPENDS:=+luci-base +luci-lib-jsonc +sing-box (>=1.12) +rpcd +rpcd-mod-rpcs
 LUCI_PKGARCH:=all
 
 PKG_NAME:=luci-app-prism
-PKG_VERSION:=0.5.1
+PKG_VERSION:=0.6.0
 PKG_RELEASE:=1
 PKG_MAINTAINER:=OctetMill
 PKG_LICENSE:=GPL-3.0-only
