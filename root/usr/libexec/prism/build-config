@@ -711,6 +711,40 @@ local function sanitize_subscription_node(p)
 	return out
 end
 
+-- Collect every outbound tag the user has typed by hand into a routing
+-- reference (rule.outbound, basic.server, routing.final_outbound, manual
+-- urltest member list, selector default). A subscription is then forbidden
+-- from claiming one of those tags: the user clearly meant a specific
+-- (manual) node and a hostile provider could otherwise hijack the
+-- reference by shipping a same-named node.
+local function collect_user_outbound_refs(c)
+	local refs = {}
+	c:foreach("prism", "rule", function(s)
+		if s.outbound and s.outbound ~= "" then refs[s.outbound] = true end
+	end)
+	c:foreach("prism", "node", function(s)
+		if s.selector_default and s.selector_default ~= "" then
+			refs[s.selector_default] = true
+		end
+		local lst = s.urltest_outbounds
+		if type(lst) == "table" then
+			for _, t in ipairs(lst) do if t ~= "" then refs[t] = true end end
+		elseif type(lst) == "string" and lst ~= "" then
+			refs[lst] = true
+		end
+	end)
+	local fin = c:get("prism", "routing", "final_outbound")
+	if fin and fin ~= "" then refs[fin] = true end
+	local basic = c:get_all("prism", "basic") or {}
+	local picks = basic.server
+	if type(picks) == "table" then
+		for _, t in ipairs(picks) do if t ~= "" then refs[t] = true end end
+	elseif type(picks) == "string" and picks ~= "" then
+		refs[picks] = true
+	end
+	return refs
+end
+
 -- Scan /etc/prism/nodes/*.json, prune any orphan file whose subscription
 -- section was deleted, and import the remaining nodes into all_ordered /
 -- all_map / seen (mutated in place). First-seen-wins, so manual nodes loaded
@@ -718,6 +752,13 @@ end
 -- calls this with empty tables. Each imported node is tagged with `_source`
 -- = the subscription section name.
 local function load_subscription_nodes(c, all_ordered, all_map, seen)
+	local user_refs = collect_user_outbound_refs(c)
+	-- A subscription node may not claim a tag the user has already typed
+	-- elsewhere — that reference belongs to the user's manual node (which
+	-- may not exist yet, may have been deleted, or may live elsewhere) and
+	-- letting a remote feed silently bind to it is a real attack vector.
+	-- Tags already in `seen` are similarly off-limits (manual nodes loaded
+	-- first take precedence over subscription tags).
 	local valid_subs = {}
 	c:foreach("prism", "subscription", function(s)
 		valid_subs[s[".name"]] = true
@@ -749,6 +790,10 @@ local function load_subscription_nodes(c, all_ordered, all_map, seen)
 							if OUTBOUND_RESERVED_TAGS[p.tag] then
 								io.stderr:write("prism build-config: subscription node "
 									.. "tag '" .. p.tag .. "' is reserved; skipping\n")
+							elseif user_refs[p.tag] then
+								io.stderr:write("prism build-config: subscription node "
+									.. "tag '" .. p.tag .. "' collides with a "
+									.. "manual outbound reference; skipping\n")
 							elseif not seen[p.tag] then
 								p._source      = sub_id
 								seen[p.tag]    = true
