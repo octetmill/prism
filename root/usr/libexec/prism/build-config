@@ -735,11 +735,19 @@ end
 -- all_map / seen (mutated in place). First-seen-wins, so manual nodes loaded
 -- before this call take precedence in Advanced mode; Basic skips manual and
 -- calls this with empty tables. Each imported node is tagged with `_source`
--- = the subscription section name.
+-- = the subscription's uid (matches the basename of its on-disk JSON file,
+-- and the value urltest_regex_sources stores to scope a regex group to
+-- specific subscriptions).
 local function load_subscription_nodes(c, all_ordered, all_map, seen)
+	-- Files are keyed by each subscription's `uid` (a stable random hex
+	-- string stored on the UCI section). The cfgXXXX section name is not
+	-- usable here — it's regenerated from a package-wide counter on every
+	-- UCI parse, so any structural change to /etc/config/prism could rotate
+	-- it. See decision-log entry on "subscription node files keyed by uid".
 	local valid_subs = {}
 	c:foreach("prism", "subscription", function(s)
-		valid_subs[s[".name"]] = true
+		local u = s.uid
+		if u and u ~= "" then valid_subs[u] = true end
 	end)
 	if not PREVIEW_MODE then
 		local lf = io.popen("find " .. NODES_DIR .. " -maxdepth 1 -name '*.json' 2>/dev/null")
@@ -757,7 +765,7 @@ local function load_subscription_nodes(c, all_ordered, all_map, seen)
 	local f = io.popen("find " .. NODES_DIR .. " -maxdepth 1 -name '*.json' 2>/dev/null | sort")
 	if not f then return end
 	for path in f:lines() do
-		local sub_id = path:match("/([^/]+)%.json$")
+		local uid = path:match("/([^/]+)%.json$")
 		local content = read_file(path)
 		if content and content ~= "" then
 			local ok, nodes = pcall(jsonc.parse, content)
@@ -789,7 +797,7 @@ local function load_subscription_nodes(c, all_ordered, all_map, seen)
 								-- basic.server, …) are EXPECTED to be filled
 								-- by subscription nodes; gating those would
 								-- break the primary urltest workflow.
-								p._source      = sub_id
+								p._source      = uid
 								seen[p.tag]    = true
 								all_map[p.tag] = p
 								all_ordered[#all_ordered + 1] = p

@@ -944,16 +944,54 @@ end
 --     server_port, uuid, password, transport_type, tls_*, etc.).
 --     build-config reconstructs the sing-box outbound JSON from these fields
 --     at config-generation time. form.Map handles all UCI CRUD automatically.
---   Subscription nodes: /etc/prism/nodes/<sub_id>.json (one file per sub).
+--   Subscription nodes: /etc/prism/nodes/<uid>.json (one file per sub).
 --     These come from remote URLs and can number in the hundreds, making UCI
 --     storage impractical. Each entry has a payload field with the full
 --     sing-box outbound JSON (needed by build-config).
+--
+-- `uid` is a per-subscription random hex string stored on the UCI subscription
+-- section. Files are keyed by uid instead of the cfgXXXX section name because
+-- anonymous UCI section names are not persisted in /etc/config/prism — they
+-- are regenerated from a package-wide section counter on every parse, so any
+-- structural change to the file (deleting a manual node ahead of the
+-- subscription block, dragging sections across each other, hand-editing) can
+-- rotate them and silently re-key every JSON file out from under its row.
+-- The uid is assigned once at create-time (UI handleAdd, or lazily on first
+-- sync_one for hand-rolled sections, or by the install-time migration for
+-- pre-uid configs) and never changes.
 
 local NODES_DIR = "/etc/prism/nodes"
 
-local function nodes_file(sub_id)
-	local safe = sub_id:gsub("[^%w%-_]", "_")
+local function nodes_file(uid)
+	local safe = uid:gsub("[^%w%-_]", "_")
 	return NODES_DIR .. "/" .. safe .. ".json"
+end
+
+-- 16 hex chars from /dev/urandom (= 64 bits). The collision space is
+-- comfortably oversized for a per-router list of ≤ a few subscriptions; the
+-- generator is also the same shape the migration script uses so an existing
+-- migrated uid and a freshly-generated one look identical.
+local function generate_uid()
+	local f = io.open("/dev/urandom", "rb")
+	if not f then return nil end
+	local bytes = f:read(8)
+	f:close()
+	if not bytes or #bytes < 8 then return nil end
+	return (bytes:gsub(".", function(c) return string.format("%02x", string.byte(c)) end))
+end
+
+-- Read/assign the subscription section's `uid`. Returns the uid on success,
+-- or nil if /dev/urandom is unreadable (extremely defensive — the caller
+-- should treat this as a sync failure rather than silently writing a file
+-- under a degenerate name).
+local function ensure_sub_uid(c, section_id)
+	local uid = c:get("prism", section_id, "uid")
+	if uid and uid ~= "" then return uid end
+	uid = generate_uid()
+	if not uid then return nil end
+	c:set("prism", section_id, "uid", uid)
+	c:commit("prism")
+	return uid
 end
 
 local function ensure_nodes_dir()
@@ -1019,9 +1057,9 @@ local function reload_if_config_changed()
 	return true
 end
 
-local function read_nodes_file(sub_id)
+local function read_nodes_file(uid)
 	if not _jsonc_ok then return {} end
-	local f = io.open(nodes_file(sub_id), "r")
+	local f = io.open(nodes_file(uid), "r")
 	if not f then return {} end
 	local content = f:read("*a")
 	f:close()
@@ -1031,10 +1069,10 @@ local function read_nodes_file(sub_id)
 	return parsed
 end
 
-local function write_nodes_file(sub_id, nodes)
+local function write_nodes_file(uid, nodes)
 	ensure_nodes_dir()
 	if not _jsonc_ok then return false end
-	local path = nodes_file(sub_id)
+	local path = nodes_file(uid)
 	local tmp  = path .. ".tmp"
 	local f = io.open(tmp, "w")
 	if not f then return false end
@@ -1047,31 +1085,35 @@ local function write_nodes_file(sub_id, nodes)
 	return os.rename(tmp, path) ~= nil
 end
 
--- Set of UCI section ids that are currently `subscription` sections. The node
--- file `<sub_id>.json` is only meaningful when sub_id is in this set; any file
--- not in it is an orphan from a since-deleted subscription and must not feed
--- into outbound dropdowns (its tags would silently appear alongside live ones,
--- with no subscription label to disambiguate them).
-local function valid_sub_ids()
-	local set = {}
+-- Map uid → section_name for every `subscription` section that has a uid set.
+-- The node file `<uid>.json` is only meaningful when its basename is a uid in
+-- this map; any file not in it is an orphan from a since-deleted subscription
+-- (or a hand-edited UCI section whose uid was wiped) and must not feed into
+-- outbound dropdowns — its tags would silently appear alongside live ones,
+-- with no subscription label to disambiguate them.
+local function valid_sub_uids()
+	local map = {}
 	local c = uci_cursor()
-	c:foreach("prism", "subscription", function(s) set[s[".name"]] = true end)
+	c:foreach("prism", "subscription", function(s)
+		local u = s.uid
+		if u and u ~= "" then map[u] = s[".name"] end
+	end)
 	c:close()
-	return set
+	return map
 end
 
--- Delete node files on disk whose sub_id no longer corresponds to a UCI
--- subscription section. Called from the write-path RPCs (sync_one /
+-- Delete node files on disk whose uid no longer corresponds to a current
+-- UCI subscription. Called from the write-path RPCs (sync_one /
 -- sync_all_subscriptions) so the directory is swept whenever a user runs a
 -- sync — manually or via the hourly cron — bounding the lag between deleting
 -- a subscription in the UI and its file being removed to at most one hour.
 local function prune_orphan_nodes()
-	local valid = valid_sub_ids()
+	local valid = valid_sub_uids()
 	local f = io.popen("find " .. NODES_DIR .. " -maxdepth 1 -name '*.json' 2>/dev/null")
 	if not f then return end
 	for filepath in f:lines() do
-		local sub_id = filepath:match("/([^/]+)%.json$")
-		if sub_id and not valid[sub_id] then
+		local uid = filepath:match("/([^/]+)%.json$")
+		if uid and not valid[uid] then
 			os.remove(filepath)
 			log_prism("info", "sync: pruned orphan nodes file " .. filepath)
 		end
@@ -1082,7 +1124,7 @@ end
 -- Return all nodes merged into a single ordered list.
 -- Manual nodes (UCI type="node") come first, sorted by their order field.
 -- Subscription nodes (JSON files) follow, one file per subscription.
--- Sets n.subscription = "" for manual nodes, sub_id for subscription nodes.
+-- Sets n.subscription = "" for manual nodes, uid for subscription nodes.
 local function list_all_nodes()
 	local all = {}
 
@@ -1109,22 +1151,22 @@ local function list_all_nodes()
 		all[#all + 1] = n
 	end
 
-	-- Subscription nodes from JSON files — skip any file whose sub_id is not
-	-- a current UCI subscription section. Such a file is an orphan: a sync
+	-- Subscription nodes from JSON files — skip any file whose uid is not
+	-- a current UCI subscription's uid. Such a file is an orphan: a sync
 	-- ran against a subscription that has since been deleted, and there is no
 	-- live UCI row to provide its display name. Loading it would surface its
 	-- tags in dropdowns with no prefix to identify the source, making them
 	-- indistinguishable from manual nodes — and worse, the prefix-less tags
 	-- can collide with valid subscription tags. Read-only here; the explicit
 	-- delete happens in prune_orphan_nodes().
-	local valid = valid_sub_ids()
+	local valid = valid_sub_uids()
 	local f = io.popen("find " .. NODES_DIR .. " -maxdepth 1 -name '*.json' 2>/dev/null | sort")
 	if not f then return all end
 	for filepath in f:lines() do
-		local sub_id = filepath:match("/([^/]+)%.json$")
-		if sub_id and valid[sub_id] then
-			for _, n in ipairs(read_nodes_file(sub_id)) do
-				n.subscription = sub_id
+		local uid = filepath:match("/([^/]+)%.json$")
+		if uid and valid[uid] then
+			for _, n in ipairs(read_nodes_file(uid)) do
+				n.subscription = uid
 				all[#all + 1] = n
 			end
 		end
@@ -1150,10 +1192,20 @@ local function sync_one(id)
 	local url        = c:get("prism", id, "url")        or ""
 	local sub_name   = c:get("prism", id, "name")       or id
 	local user_agent = c:get("prism", id, "user_agent") or ""
+	-- Lazy-allocate the uid for hand-rolled or pre-migration subscriptions.
+	-- The UI Add-button path assigns one synchronously, and the install-time
+	-- migration covers every existing section, so this is a defensive backstop
+	-- rather than the common path.
+	local uid = ensure_sub_uid(c, id)
 	c:close()
 
 	if url == "" then
 		log_prism("warn", "sync '" .. sub_name .. "': no URL configured")
+		return { status = "error", node_count = 0 }
+	end
+
+	if not uid then
+		log_prism("err", "sync '" .. sub_name .. "': could not allocate uid")
 		return { status = "error", node_count = 0 }
 	end
 
@@ -1207,9 +1259,9 @@ local function sync_one(id)
 			end
 			log_prism("info", "sync '" .. sub_name .. "' nodes: " .. listed)
 
-			if write_nodes_file(id, nodes) then
+			if write_nodes_file(uid, nodes) then
 				log_prism("info", string.format("sync '%s': %d nodes saved to %s",
-					sub_name, count, nodes_file(id)))
+					sub_name, count, nodes_file(uid)))
 			else
 				log_prism("err", "sync '" .. sub_name .. "': failed to write nodes file")
 			end
@@ -1704,8 +1756,17 @@ local methods = {
 			if not id:match("^[%w_%-]+$") then
 				return { nodes = {} }
 			end
+			-- The caller passes the UCI section name (cfgXXXX), not the uid:
+			-- the form GridSection's onclick handler hands the section id to
+			-- the row's Sync/View buttons, and downstream code (build-config,
+			-- sync-subscriptions cron) does the same. Resolve to the file's
+			-- uid here so the on-disk filename remains rotation-stable.
+			local c = uci_cursor()
+			local uid = c:get("prism", id, "uid") or ""
+			c:close()
+			if uid == "" then return { nodes = {} } end
 			local out = {}
-			for _, n in ipairs(read_nodes_file(id)) do
+			for _, n in ipairs(read_nodes_file(uid)) do
 				out[#out + 1] = {
 					tag         = n.tag or "",
 					type        = n.type or "",
