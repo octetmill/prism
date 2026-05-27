@@ -335,10 +335,15 @@ stop_service() {
 	# panel would show stale data with no "service is down" cue.
 	rm -f /var/etc/prism/.active-nodes.json
 
-	# Remove every Prism cron line — the hourly tick, the watchdog, and any
-	# legacy sync-subscriptions / fetch-rulesets lines from an older install.
-	sed -i '/usr\/libexec\/prism\//d' /etc/crontabs/root 2>/dev/null
-	/etc/init.d/cron reload 2>/dev/null
+	# Cron lines are left in place. The watchdog respects PAUSE_MARKER and
+	# the persistent `enabled` flag, so it self-suppresses for transient
+	# pauses and for an explicitly-disabled service. Removing the watchdog
+	# cron here defeats its purpose: a manually-stopped service with
+	# enabled=1 would have no path back to running until someone calls
+	# `start` again. The hourly tick is similarly safe — sync-subscriptions
+	# only updates the local cache, and reload_if_changed routes through
+	# reload_service which honours both gates. Package removal is the
+	# right place to delete the lines, not service stop.
 }
 
 reload_service() {
