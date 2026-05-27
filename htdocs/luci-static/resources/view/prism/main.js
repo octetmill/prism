@@ -53,6 +53,18 @@ var callSetMode = rpc.declare({
 	expect: { '': {} }
 });
 
+// Count the staged UCI operations in the dict uci.changes() resolves to.
+// Shape is { configName: [ [op, section, option, value?], … ] }; an empty
+// dict means nothing is staged. Defensive against null/undefined arms.
+function _changeCount(changes) {
+	var n = 0;
+	for (var k in changes) {
+		if (changes.hasOwnProperty(k) && Array.isArray(changes[k]))
+			n += changes[k].length;
+	}
+	return n;
+}
+
 return view.extend({
 	// The host owns its own footers per active panel; suppress the framework one.
 	handleSave:      null,
@@ -167,9 +179,18 @@ return view.extend({
 	_handleModeSwitch: function(target) {
 		// The switch finishes with window.location.reload(), which drops any
 		// staged-but-not-applied UCI changes on the floor. Warn the user
-		// rather than silently throwing their edits away.
-		var dirty = Object.keys(uci.changes() || {}).length > 0;
+		// rather than silently throwing their edits away. uci.changes() is
+		// an rpc.declare() in LuCI's JS API and returns a Promise resolving
+		// to { config: [ [op, section, option, value?], … ] } — calling
+		// Object.keys on the Promise itself silently yields [], so we have
+		// to await the resolution before counting.
+		var self = this;
+		return uci.changes().then(function(changes) {
+			return self._showModeSwitchModal(target, _changeCount(changes));
+		});
+	},
 
+	_showModeSwitchModal: function(target, dirty) {
 		if (target === 'advanced' && !dirty) {
 			return this._applyModeSwitch(target);
 		}
@@ -210,10 +231,10 @@ return view.extend({
 		// Drop any staged changes too: keeping them would re-trigger LuCI's
 		// "apply pending changes" banner on the freshly reloaded page in the
 		// other mode, where some of those changes may reference UCI sections
-		// the new mode's UI doesn't expose.
-		var p = (Object.keys(uci.changes() || {}).length > 0)
-			? ui.changes.revert() : Promise.resolve();
-		return p.then(function() {
+		// the new mode's UI doesn't expose. ui.changes.revert() is a no-op
+		// when there's nothing staged, so call it unconditionally — cheaper
+		// than another uci.changes() round-trip just to check.
+		return ui.changes.revert().then(function() {
 			return callSetMode(target);
 		}).then(function() {
 			// Drop the stored tab id so the new mode lands on its first tab
