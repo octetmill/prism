@@ -1528,6 +1528,20 @@ local methods = {
 
 	start = {
 		call = function()
+			-- Manual start is for clearing a transient pause and booting
+			-- the service back up; it deliberately does NOT auto-flip the
+			-- persistent `enabled` flag (set_enabled does that, exposed
+			-- via the Status Enable toggle). If the service is disabled
+			-- at the UCI level, start_service returns 1 silently and the
+			-- user has no signal that nothing happened — surface an
+			-- actionable error so the UI can guide them to the toggle.
+			local c = uci_cursor()
+			local enabled = c:get("prism", "global", "enabled")
+			c:close()
+			if enabled ~= "1" then
+				return { ok = false,
+					error = "Prism is disabled — flip the Enable toggle first." }
+			end
 			os.remove("/var/run/prism.paused")
 			log_prism("notice", "service: manual start")
 			local rc = os.execute("/etc/init.d/prism start >/dev/null 2>&1")
