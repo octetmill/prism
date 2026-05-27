@@ -57,9 +57,10 @@ emit_bypasses() {
 		[ -z "$value" ] && continue
 		case "$kind" in
 			mac)
-				# Reject anything that isn't a plausible MAC — nft errors on
-				# a malformed token would kill the whole ruleset load.
-				echo "$value" | grep -qE '^[0-9a-fA-F]{2}([:.-][0-9a-fA-F]{2}){5}$' \
+				# Reject anything that isn't a plausible MAC. nft accepts
+				# only colon-separated MACs, not dash- or dot-separated, so
+				# the regex is stricter than the JS validator.
+				echo "$value" | grep -qE '^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$' \
 					&& echo "		ether saddr $value accept"
 				;;
 			ip)
@@ -69,7 +70,12 @@ emit_bypasses() {
 							&& echo "		ip saddr $value accept"
 						;;
 					*:*)
-						echo "		ip6 saddr $value accept"
+						# Permissive IPv6 shape check: 2-7 colons, hex groups
+						# up to 4 chars, optional /prefix. Catches typos
+						# ("abc::", "fe80:gg::") before nft -f errors out on
+						# the whole ruleset.
+						echo "$value" | grep -qE '^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}(/[0-9]{1,3})?$' \
+							&& echo "		ip6 saddr $value accept"
 						;;
 				esac
 				;;
