@@ -1840,12 +1840,22 @@ local methods = {
 			end
 			-- If a previous runner is still alive (status file present
 			-- with running=true), refuse — two runners would race on the
-			-- cache file.
+			-- cache file. The runner also takes /var/lock/prism-test-all
+			-- so a SIGKILL'd runner cannot wedge future runs: even if its
+			-- status file still says running=true, the freshness check
+			-- below treats it as stale after 60s of no updated_at advance.
 			local raw = read_file("/var/etc/prism/.test-all-status")
 			if raw and raw ~= "" and _jsonc_ok then
 				local ok, st = pcall(_jsonc.parse, raw)
 				if ok and type(st) == "table" and st.running then
-					return { error = "test already running" }
+					local fresh = type(st.updated_at) == "number"
+						and (os.time() - st.updated_at) < 60
+					if fresh then
+						return { error = "test already running" }
+					end
+					log_prism("warn", "test_all: previous runner status stale ("
+						.. tostring(os.time() - (st.updated_at or 0))
+						.. "s), reclaiming")
 				end
 			end
 			-- Hand the runner an optional tag list. We write one tag per
