@@ -177,19 +177,25 @@ mkdir -p "$STAGE_DIR" "$OUT_DIR"
 #   sh:   ~15% byte reduction (init.d/prism, firewall.sh, …)
 strip_comments() {
 	local dst="$1"
+	# The {/SPDX\|Copyright/!d} dance keeps the SPDX-License-Identifier
+	# and Copyright lines required for GPL-3.0 redistribution: the inner
+	# address skips deletion for any comment line that mentions either
+	# keyword. The outer address scopes the rule to comment-only lines,
+	# so a code line that happens to contain "Copyright" as a string
+	# literal (none today, but future-proof) is unaffected.
 	case "$dst" in
 		*.js)
 			# JS: line comments only (no // mid-line strip — strings).
-			sed -i -e '/^[[:space:]]*\/\//d' "$dst"
+			sed -i -e '/^[[:space:]]*\/\//{/SPDX\|Copyright/!d;}' "$dst"
 			;;
 		*.lua|*/luci.prism|*/build-config|*/active-watch|*/test-all-runner|*/fetch-catalog|*/prismlib.lua)
 			# Lua: -- line comments. No --[[ ]] blocks in this repo.
-			sed -i -e '/^[[:space:]]*--/d' "$dst"
+			sed -i -e '/^[[:space:]]*--/{/SPDX\|Copyright/!d;}' "$dst"
 			;;
 		*/init.d/prism|*.sh|*/sync-subscriptions|*/watchdog|*/hourly|*/uci-defaults/*)
 			# Shell: # line comments, but preserve shebang on line 1
 			# (busybox-ash supports both #!/bin/sh and #!/bin/sh /etc/rc.common).
-			sed -i -e '1!{/^[[:space:]]*#/d;}' "$dst"
+			sed -i -e '1!{/^[[:space:]]*#/{/SPDX\|Copyright/!d;};}' "$dst"
 			;;
 	esac
 }
