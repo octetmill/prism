@@ -1895,6 +1895,11 @@ local function write_atomic(path, content)
 	if not f then return false, "cannot open " .. tmp end
 	f:write(content)
 	f:close()
+	-- 0600 before rename: sing-box.json contains every node's credentials
+	-- (uuid/password/uri), the dnsmasq drop-in shouldn't need to be readable
+	-- by anything but root either. Default umask 0022 would leave them
+	-- world-readable.
+	os.execute("chmod 0600 '" .. tmp:gsub("'", "'\\''") .. "' 2>/dev/null")
 	if not os.rename(tmp, path) then
 		os.remove(tmp)
 		return false, "rename failed for " .. path

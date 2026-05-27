@@ -1034,6 +1034,10 @@ local function write_nodes_file(sub_id, nodes)
 	if not f then return false end
 	f:write(_jsonc.stringify(nodes))
 	f:close()
+	-- 0600: nodes file contains every subscription node's payload, which
+	-- in turn carries uuid/password/uri for each proxy. Default umask 0022
+	-- would let any local non-root daemon read them.
+	os.execute("chmod 0600 '" .. tmp:gsub("'", "'\\''") .. "' 2>/dev/null")
 	return os.rename(tmp, path) ~= nil
 end
 
@@ -1409,7 +1413,7 @@ local methods = {
 				log_prism("warning", "config: extra.json rejected — invalid JSON object")
 				return { ok = false, error = "invalid JSON object" }
 			end
-			os.execute("mkdir -p /etc/prism 2>/dev/null")
+			os.execute("mkdir -p /etc/prism 2>/dev/null && chmod 0700 /etc/prism 2>/dev/null")
 			local tmp = "/etc/prism/extra.json.tmp"
 			local f = io.open(tmp, "w")
 			if not f then
@@ -1418,6 +1422,9 @@ local methods = {
 			end
 			f:write(raw)
 			f:close()
+			-- 0600: extra.json may contain overrides with credentials,
+			-- secret URLs, or per-protocol passwords.
+			os.execute("chmod 0600 '" .. tmp .. "' 2>/dev/null")
 			if not os.rename(tmp, "/etc/prism/extra.json") then
 				os.remove(tmp)
 				log_prism("warning", "config: extra.json rejected — rename failed")

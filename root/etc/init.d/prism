@@ -187,6 +187,16 @@ start_service() {
 	lock -n /var/lock/prism-start.lock 2>/dev/null || return 0
 	trap 'lock -u /var/lock/prism-start.lock 2>/dev/null' EXIT
 
+	# Ensure the directories that hold sensitive files (proxy credentials in
+	# /etc/prism/nodes/*.json and extra.json, runtime snapshots and the
+	# generated sing-box.json in /var/etc/prism) are 0700-owned by root.
+	# Default umask 0022 would leave them world-readable; this also tightens
+	# perms on existing installs upgrading from a pre-v0.5.0 build.
+	for d in /etc/prism /etc/prism/nodes /var/etc/prism; do
+		mkdir -p "$d"
+		chmod 0700 "$d"
+	done
+
 	local enabled config_path mode cfg_warn chk tmp_cfg config_ok level
 
 	config_load prism

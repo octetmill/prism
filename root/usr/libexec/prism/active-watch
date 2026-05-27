@@ -75,12 +75,13 @@ end
 -- page tolerates a missing file (renders dashes) so a write skip on
 -- malformed data is fine.
 local function save_clash_stats(stats)
-	os.execute("mkdir -p /var/etc/prism 2>/dev/null")
+	os.execute("mkdir -p /var/etc/prism 2>/dev/null && chmod 0700 /var/etc/prism 2>/dev/null")
 	local tmp = STATS_SNAP .. ".tmp"
 	local f = io.open(tmp, "w")
 	if not f then return end
 	f:write(jsonc.stringify(stats))
 	f:close()
+	os.execute("chmod 0600 '" .. tmp .. "' 2>/dev/null")
 	os.rename(tmp, STATS_SNAP)
 end
 
@@ -135,12 +136,13 @@ local function group_state(parsed)
 end
 
 local function save_snapshot(state)
-	os.execute("mkdir -p /var/etc/prism 2>/dev/null")
+	os.execute("mkdir -p /var/etc/prism 2>/dev/null && chmod 0700 /var/etc/prism 2>/dev/null")
 	local tmp = SNAPSHOT .. ".tmp"
 	local f = io.open(tmp, "w")
 	if not f then return end
 	f:write(jsonc.stringify({ groups = state, updated_at = os.time() }))
 	f:close()
+	os.execute("chmod 0600 '" .. tmp .. "' 2>/dev/null")
 	os.rename(tmp, SNAPSHOT)
 end
 

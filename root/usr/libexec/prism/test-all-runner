@@ -45,12 +45,16 @@ end
 
 local function write_atomic(path, content)
 	local dir = path:gsub("/[^/]+$", "")
-	if dir ~= "" then os.execute("mkdir -p '" .. dir .. "' 2>/dev/null") end
+	if dir ~= "" then
+		os.execute("mkdir -p '" .. dir .. "' 2>/dev/null"
+			.. " && chmod 0700 '" .. dir .. "' 2>/dev/null")
+	end
 	local tmp = path .. ".tmp"
 	local f = io.open(tmp, "w")
 	if not f then return false end
 	f:write(content)
 	f:close()
+	os.execute("chmod 0600 '" .. tmp .. "' 2>/dev/null")
 	return os.rename(tmp, path) ~= nil
 end
 
