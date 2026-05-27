@@ -1048,6 +1048,7 @@ return baseclass.extend({
 			return Promise.resolve();
 		}
 		this._testAllRunning = true;
+		this._testAllAborted = false;
 
 		var self = this;
 		ui.hideModal();
@@ -1079,7 +1080,8 @@ return baseclass.extend({
 
 	// Drive the poll loop while the background runner does its work.
 	// Each tick: ask for status, refresh cells from the cache, update
-	// the banner's elapsed counter. Stops when status.running flips off.
+	// the banner's elapsed counter. Stops when status.running flips off,
+	// when the safety timeout trips, or when the panel is torn down.
 	_pollTestAll: function(elapsedEl, banner) {
 		var self = this;
 		var startMs = Date.now();
@@ -1101,6 +1103,10 @@ return baseclass.extend({
 			}
 
 			function tick() {
+				if (self._testAllAborted) {
+					resolve({ aborted: true });
+					return;
+				}
 				if (Date.now() - startMs > MAX_ELAPSED_MS) {
 					reject(new Error(_('runner timed out (status file never cleared)')));
 					return;
@@ -1115,13 +1121,13 @@ return baseclass.extend({
 					if (status && !status.running) {
 						resolve(status);
 					} else {
-						setTimeout(tick, POLL_INTERVAL);
+						self._testAllTimer = setTimeout(tick, POLL_INTERVAL);
 					}
 				}).catch(function() {
-					setTimeout(tick, POLL_INTERVAL);
+					self._testAllTimer = setTimeout(tick, POLL_INTERVAL);
 				});
 			}
-			setTimeout(tick, POLL_INTERVAL);
+			self._testAllTimer = setTimeout(tick, POLL_INTERVAL);
 		}).then(function(status) {
 			self._testAllRunning = false;
 			if (banner && banner.parentNode)
@@ -1186,5 +1192,19 @@ return baseclass.extend({
 
 	handleSave:      function() { return formpanel.save(this); },
 	handleSaveApply: function() { return formpanel.saveApply(this); },
-	handleReset:     function() { return formpanel.resetGrid(this); }
+	handleReset:     function() { return formpanel.resetGrid(this); },
+
+	// Called by the host (main.js _activate) when the panel is being
+	// replaced. Stop the Test-all poll loop so it doesn't keep firing
+	// against a detached panel, and clear the running flag so a fresh
+	// mount can start a new Test-all instead of being silently inert
+	// until the 3-min MAX_ELAPSED_MS cap trips.
+	_teardown: function() {
+		this._testAllAborted = true;
+		if (this._testAllTimer) {
+			clearTimeout(this._testAllTimer);
+			this._testAllTimer = null;
+		}
+		this._testAllRunning = false;
+	}
 });
