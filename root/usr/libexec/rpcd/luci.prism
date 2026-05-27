@@ -584,6 +584,18 @@ end
 -- { tag, type, server, server_port, payload } node tables. parse_subscription
 -- routes a body to exactly one extractor, so the body is parsed a single time.
 
+-- Tags Prism synthesises or sing-box treats as built-ins. A subscription
+-- node carrying one of these would collide with the generated outbound
+-- and either break the config or silently shadow the builtin in UI
+-- dropdowns. Drop them at parse time so they never reach the nodes JSON
+-- or list_subscription_nodes. Mirrors build-config's OUTBOUND_RESERVED_TAGS.
+local RESERVED_TAGS = {
+	direct          = true,
+	block           = true,
+	["basic-auto"]  = true,
+	_prism_test_all = true,
+}
+
 -- SingBox JSON: the outbounds array, minus builtin and group outbounds.
 local function extract_singbox(body)
 	local nodes = {}
@@ -592,7 +604,8 @@ local function extract_singbox(body)
 	if not ok or not cfg or type(cfg.outbounds) ~= "table" then return nodes end
 	local SKIP = { direct=true, block=true, dns=true, selector=true, urltest=true }
 	for _, ob in ipairs(cfg.outbounds) do
-		if type(ob) == "table" and ob.tag and not SKIP[ob.type] then
+		if type(ob) == "table" and ob.tag and not SKIP[ob.type]
+		   and not RESERVED_TAGS[ob.tag] then
 			nodes[#nodes + 1] = {
 				tag         = ob.tag,
 				type        = ob.type or "",
@@ -611,6 +624,7 @@ local function extract_clash(body)
 	local in_proxies, fields = false, {}
 	local function flush()
 		local ob = build_clash_outbound(fields)
+		if ob and RESERVED_TAGS[ob.tag] then ob = nil end
 		if ob then
 			local payload
 			if _jsonc_ok then
@@ -670,7 +684,7 @@ local function extract_uris(text)
 	local nodes = {}
 	for line in (text .. "\n"):gmatch("([^\n]*)\n") do
 		local ob = parse_proxy_uri(line)
-		if ob and ob.server ~= "" then
+		if ob and ob.server ~= "" and not RESERVED_TAGS[ob.tag] then
 			-- Keep the full sing-box outbound as the payload — that's what
 			-- build-config later splices verbatim into route.outbounds.
 			nodes[#nodes + 1] = {
