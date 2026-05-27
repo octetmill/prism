@@ -1349,7 +1349,10 @@ local methods = {
 			c:close()
 
 			local preview_path = "/var/etc/prism/preview.json"
-			local hf = io.popen("/usr/libexec/prism/build-config '" .. preview_path .. "' 2>&1; echo __RC__$?")
+			-- --preview keeps build-config side-effect-free: no orphan node
+			-- file deletion, no dnsmasq drop-in rewrite. get_config is on
+			-- the read side of the ACL and must not mutate persistent state.
+			local hf = io.popen("/usr/libexec/prism/build-config --preview '" .. preview_path .. "' 2>&1; echo __RC__$?")
 			local output = ""
 			if hf then output = hf:read("*a") or ""; hf:close() end
 			local rc = tonumber(output:match("__RC__(%d+)") or "1") or 1
