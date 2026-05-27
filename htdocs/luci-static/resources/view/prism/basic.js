@@ -142,6 +142,20 @@ return baseclass.extend({
 		oSubUrl.rmempty      = false;
 		oSubUrl.placeholder  = 'https://example.com/sub';
 
+		// Silent 12h auto-refresh for any subscription created from Basic.
+		// sync-subscriptions skips subs with auto_update unset or 0, so without
+		// this default a Basic user would never get an automatic refresh — they
+		// would have to switch to Advanced and toggle it on, which defeats the
+		// "set it and forget it" promise. HiddenValue keeps the UI sparse;
+		// rmempty=false so the explicit '12' lands in UCI (rmempty=true would
+		// let LuCI drop the option when value == default, oscillating with the
+		// cron path). Existing subs imported from Advanced keep their saved
+		// value untouched.
+		var oSubAuto = sSubs.option(form.HiddenValue, 'auto_update');
+		oSubAuto["default"] = '12';
+		oSubAuto.rmempty    = false;
+		oSubAuto.modalonly  = true;
+
 		var oSubSync = sSubs.option(form.Button, '_sync', _('Sync'));
 		oSubSync.modalonly  = false;
 		oSubSync.editable   = true;
