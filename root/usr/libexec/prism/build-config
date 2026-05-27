@@ -1125,13 +1125,21 @@ local function build_outbounds(c)
 			else
 				if (ob.type == "urltest" or ob.type == "selector")
 				   and (type(ob.outbounds) ~= "table" or #ob.outbounds == 0) then
+					-- Skip the empty group rather than emit it: sing-box
+					-- rejects urltest/selector with no members and the
+					-- whole config goes back to the last working version.
+					-- Anywhere this tag was referenced (route rule,
+					-- dns detour, parent group member) gets pruned by
+					-- the validation pass / member-prune downstream and
+					-- falls back to direct, which is a sane no-op.
 					io.stderr:write("prism build-config: " .. ob.type ..
 						" '" .. ob.tag ..
-						"' has no usable members; sing-box will reject the config\n")
-				end
-				outbounds[#outbounds + 1] = ob
-				if not is_group then
-					testable_tags[#testable_tags + 1] = ob.tag
+						"' has no usable members; dropping the group\n")
+				else
+					outbounds[#outbounds + 1] = ob
+					if not is_group then
+						testable_tags[#testable_tags + 1] = ob.tag
+					end
 				end
 			end
 		end
