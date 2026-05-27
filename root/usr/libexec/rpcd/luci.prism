@@ -1841,9 +1841,18 @@ local methods = {
 		call = function(args)
 			local tag = type(args.tag) == "string" and args.tag or ""
 			local r = probe_node(tag, args.url, args.timeout_ms)
-			local cache = read_latency_cache()
-			cache.results[tag] = r
-			write_latency_cache(cache)
+			-- Only persist real probe results. probe_node returns
+			-- {error="clash API disabled"} / {error="tag required"}
+			-- before it ever hits the network — caching those would
+			-- overwrite the previous good delay_ms entry with a stale
+			-- error string that lingers until the next successful probe.
+			-- A real probe (success OR network-side failure) carries
+			-- `tested_at`, the discriminator.
+			if r.tested_at then
+				local cache = read_latency_cache()
+				cache.results[tag] = r
+				write_latency_cache(cache)
+			end
 			return r
 		end
 	},
