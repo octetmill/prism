@@ -27,20 +27,51 @@ local SNAPSHOT     = "/var/etc/prism/.active-nodes.json"
 local STATS_SNAP   = "/var/etc/prism/.clash-stats.json"
 local POLL_S       = 10
 
+-- Pending log lines accumulated during the current tick. Flushed at the
+-- end of each iteration via a single `logger` fork that reads them from
+-- stdin — important because a WAN flap can fan into dozens of group-flip
+-- events in one tick, and serial fork-per-line of busybox logger costs
+-- ~200ms each on MIPS, easily pushing the 10s poll cadence over the edge.
+local pending_log = {}
+
 local function logmsg(level, msg)
 	-- Tag names ultimately come from URL-decoded subscription content, so a
 	-- node tag may legitimately contain any byte including newlines, NULs
 	-- and other control chars (an attacker subscription could also craft
-	-- one deliberately). Scrub control chars to spaces BEFORE shell-quoting
-	-- so a literal `\n` in the message can't fan a single logger call out
-	-- into multiple syslog lines — which the Status page log split would
-	-- then mis-attribute as additional `prism`-tagged events.
-	-- Normalise the colloquial 'warn' to POSIX 'warning' so the
-	-- get_logs filter (which keys SEV by the canonical name) classifies
-	-- the line correctly. busybox logger accepts both spellings.
+	-- one deliberately). Scrub control chars to spaces so a literal `\n`
+	-- in the message can't fan one queued entry into multiple syslog lines.
+	-- Normalise the colloquial 'warn' to POSIX 'warning' so the get_logs
+	-- filter (which keys SEV by the canonical name) classifies the line
+	-- correctly. busybox logger accepts both spellings.
 	if level == "warn" then level = "warning" end
-	local safe = msg:gsub("[%c]", " "):gsub("'", "'\\''")
-	os.execute("logger -p daemon." .. level .. " -t prism '" .. safe .. "' 2>/dev/null")
+	local safe = msg:gsub("[%c]", " ")
+	pending_log[#pending_log + 1] = { level = level, msg = safe }
+end
+
+-- Flush queued log lines: group by level (logger uses one priority per
+-- invocation) and pipe each group's messages via stdin. Worst case is
+-- 4-5 forks per tick regardless of how many flips happened.
+local function flush_log()
+	if #pending_log == 0 then return end
+	local by_level = {}
+	for _, e in ipairs(pending_log) do
+		local b = by_level[e.level]
+		if not b then b = {}; by_level[e.level] = b end
+		b[#b + 1] = e.msg
+	end
+	pending_log = {}
+	for level, msgs in pairs(by_level) do
+		-- Single-quoted heredoc: literal-quoted body so the messages
+		-- need no further shell escaping. Use a sentinel unlikely to
+		-- appear in any message (control chars already stripped above
+		-- guarantee no embedded newline can break out).
+		local f = io.popen("logger -p daemon." .. level
+			.. " -t prism 2>/dev/null", "w")
+		if f then
+			for _, m in ipairs(msgs) do f:write(m, "\n") end
+			f:close()
+		end
+	end
 end
 
 -- One GET to the loopback clash API. Returns the parsed response object,
@@ -392,5 +423,9 @@ while true do
 				fail_streak, fail_streak * POLL_S))
 		end
 	end
+	-- Drain queued log lines before sleeping. One logger fork per
+	-- severity level instead of one per line — a flip burst over many
+	-- groups stays well inside the POLL_S budget.
+	flush_log()
 	os.execute("sleep " .. tostring(POLL_S))
 end
