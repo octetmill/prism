@@ -5,9 +5,10 @@ name: Snapshot
 #
 #   https://github.com/octetmill/prism/releases/download/snapshot/luci-app-prism-snapshot.apk
 #
-# The APK/IPK version inside the package is <PKG_VERSION>_pre<N>-r<R>, so
-# each commit produces a unique, monotonically-increasing version that
-# `apk upgrade` correctly recognises as newer.
+# The APK/IPK version inside the package is <last-v*-tag>_git<N>-r<R>
+# (N = commits since the tag), so each commit produces a unique,
+# monotonically-increasing version that `apk upgrade` correctly recognises
+# as newer — and stays bounded between the previous and next release.
 
 on:
   push:
