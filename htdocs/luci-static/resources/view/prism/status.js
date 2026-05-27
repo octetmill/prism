@@ -406,7 +406,14 @@ return baseclass.extend({
 					         'font-family:monospace; font-size:0.8em; ' +
 					         'line-height:1.35; background:rgba(128,128,128,0.05);'
 				}, [ singboxText ]),
-				E('div', { 'style': 'margin:0.5em 0 2em; display:flex; gap:0.4em;' }, [
+				// "View full log" and "View generated config" are debug
+				// surfaces hidden in Basic mode, consistent with hiding the
+				// Subscriptions/Rules count row and the sing-box version
+				// footer (commit 2afeb47).
+				E('div', {
+					'style': 'margin:0.5em 0 2em; display:flex; gap:0.4em;' +
+					         (info.uiMode === 'basic' ? ' display:none;' : '')
+				}, [
 					E('button', {
 						'class': 'btn cbi-button cbi-button-neutral',
 						'click': ui.createHandlerFn(self, '_showFullLog')
