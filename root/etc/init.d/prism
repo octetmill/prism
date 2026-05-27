@@ -176,6 +176,17 @@ prism_declare_active_watch() {
 }
 
 start_service() {
+	# Serialise concurrent invocations. set_enabled / start / restart /
+	# set_mode / set_extra_config all commit UCI and may also fork
+	# /etc/init.d/prism start explicitly, plus the procd reload trigger
+	# fires on every commit — so two start_service runs can race on the
+	# same ${config_path}.next file (build, validate, atomic rename).
+	# `lock -n` skips silently when held; the already-running invocation
+	# will produce the same final config anyway.
+	mkdir -p /var/lock
+	lock -n /var/lock/prism-start.lock 2>/dev/null || return 0
+	trap 'lock -u /var/lock/prism-start.lock 2>/dev/null' EXIT
+
 	local enabled config_path mode cfg_warn chk tmp_cfg config_ok level
 
 	config_load prism
