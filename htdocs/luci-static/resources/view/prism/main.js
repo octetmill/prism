@@ -290,6 +290,11 @@ return view.extend({
 		var gen = ++this._mountGen;
 
 		if (this._panel && typeof this._panel._teardown === 'function') {
+			// Swallowed by design: _teardown's job is to clear timers
+			// and abort polls. A throw here cannot meaningfully block
+			// the mode/tab switch the user just initiated — but it
+			// must not crash _activate either, leaving the host in
+			// an inconsistent state with the new panel half-mounted.
 			try { this._panel._teardown(); } catch (e) {}
 		}
 		this._panel = null;

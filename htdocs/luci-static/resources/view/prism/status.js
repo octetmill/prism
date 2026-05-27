@@ -964,6 +964,11 @@ return baseclass.extend({
 				this._updateGroups(r[1] || { groups: [] });
 				this._updateClashStats(r[2] || {});
 			}, this))
+				// Swallowed by design: a transient WAN outage or a brief
+				// rpcd hiccup should not pile error notifications onto the
+				// user every 2 seconds. The next tick retries — visible
+				// failure modes (sing-box stopped, clash disabled) come
+				// through as well-typed empty results.
 				.catch(function() {})
 				.finally(L.bind(this._scheduleStatusRefresh, this));
 		}, this), POLL_MS);
@@ -990,6 +995,9 @@ return baseclass.extend({
 		if (!document.getElementById('prism-log-singbox')) return;
 		this._logTimer = setTimeout(L.bind(function() {
 			this._refreshLogTail()
+				// Same swallow-and-retry pattern as the status poll:
+				// log fetch can blip during rpcd reload; the next tick
+				// will succeed and the textarea re-populates.
 				.catch(function() {})
 				.finally(L.bind(this._scheduleLogRefresh, this));
 		}, this), POLL_MS);
