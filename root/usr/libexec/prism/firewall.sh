@@ -249,10 +249,10 @@ start() {
 	self=$(uci_get inbounds tproxy_self)
 	[ -n "$self" ] || self=1
 	# Basic mode never proxies router-originated traffic — that knob is an
-	# Expert-tier debugging surface, and a Basic user's expectation is "only
+	# Advanced-tier debugging surface, and a Basic user's expectation is "only
 	# my LAN clients go through". Override the inbounds.tproxy_self flag so
 	# the OUTPUT-chain rules aren't installed in Basic mode regardless of
-	# what the saved (Expert) value was.
+	# what the saved (Advanced) value was.
 	ui_mode=$(uci_get global mode)
 	[ "$ui_mode" = "basic" ] && self=0
 	iface=$(lan_device)

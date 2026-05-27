@@ -47,29 +47,29 @@ local uci_list_or_string = lib.uci_list
 
 -- ─── mode ────────────────────────────────────────────────────────────────
 --
--- prism.global.mode = "basic" | "expert". "basic" hides Nodes / Routing /
+-- prism.global.mode = "basic" | "advanced". "basic" hides Nodes / Routing /
 -- Settings in the UI and synthesises a small running config from
 -- prism.basic + subscriptions only — manual nodes, prism.rule entries and
 -- /etc/prism/extra.json are kept on disk but not compiled in. An unset flag
--- on existing installs falls back to "expert" so a pre-mode-flag upgrade
+-- on existing installs falls back to "advanced" so a pre-mode-flag upgrade
 -- keeps every saved knob active.
 
 local BASIC_AUTO_TAG = "basic-auto"
 
 local function read_mode(c)
 	local m = c:get("prism", "global", "mode")
-	if m == "basic" or m == "expert" then return m end
-	return "expert"
+	if m == "basic" or m == "advanced" then return m end
+	return "advanced"
 end
 
 -- The tag of the outbound traffic falls back to when no earlier rule matched.
 -- Used by build_dns to decide whether the `remote` DNS server is detoured
 -- through a proxy (so the lookup exits the same way the connection will) and
--- whether the DNS `final` resolves via remote or local. Expert reads it from
+-- whether the DNS `final` resolves via remote or local. Advanced reads it from
 -- prism.routing.final_outbound; Basic derives it from prism.basic.server —
 -- either the single selected node, or BASIC_AUTO_TAG when N>1 wraps them in
 -- a urltest. With zero servers Basic has no proxy default so this returns
--- "direct" and DNS stays on the local resolver, same as Expert with no rules.
+-- "direct" and DNS stays on the local resolver, same as Advanced with no rules.
 local function compute_default_outbound(c)
 	if read_mode(c) == "basic" then
 		local servers = uci_list_or_string(c:get_all("prism", "basic") or {}, "server")
@@ -600,7 +600,7 @@ local OUTBOUND_RESERVED_TAGS = { direct = true, block = true }
 -- Scan /etc/prism/nodes/*.json, prune any orphan file whose subscription
 -- section was deleted, and import the remaining nodes into all_ordered /
 -- all_map / seen (mutated in place). First-seen-wins, so manual nodes loaded
--- before this call take precedence in Expert mode; Basic skips manual and
+-- before this call take precedence in Advanced mode; Basic skips manual and
 -- calls this with empty tables. Each imported node is tagged with `_source`
 -- = the subscription section name.
 local function load_subscription_nodes(c, all_ordered, all_map, seen)
@@ -654,7 +654,7 @@ end
 -- urltest tagged BASIC_AUTO_TAG, zero → no proxy default and build_route's
 -- `final` stays "direct"). Manual nodes (prism.node), custom rules
 -- (prism.rule) and group regexes are ignored — they stay on disk for an
--- Expert switch-back but are not compiled in.
+-- Advanced switch-back but are not compiled in.
 local function build_basic_outbounds(c)
 	local all_ordered, all_map, seen = {}, {}, {}
 	load_subscription_nodes(c, all_ordered, all_map, seen)
@@ -1078,7 +1078,7 @@ end
 
 local function build_dns(c, prepared)
 	local strategy         = c:get("prism", "dns", "strategy") or ""
-	-- Mode-aware: Expert reads the user's final-outbound knob, Basic derives
+	-- Mode-aware: Advanced reads the user's final-outbound knob, Basic derives
 	-- it from prism.basic.server so the remote DNS server still detours
 	-- through the active proxy.
 	local default_outbound = compute_default_outbound(c)
@@ -1312,7 +1312,7 @@ local function build_basic_route(c)
 	local delivery     = c:get("prism", "global", "ruleset_delivery") or "github"
 
 	-- Basic always fetches rule-sets directly via WAN, regardless of the
-	-- Expert ruleset_download_detour knob. The default-outbound path is a
+	-- Advanced ruleset_download_detour knob. The default-outbound path is a
 	-- chicken-and-egg trap at startup: sing-box initialises rule-sets before
 	-- the urltest has picked a member, so dialling through `basic-auto`
 	-- times out and the whole service aborts with a FATAL. WAN is always
@@ -1330,7 +1330,7 @@ local function build_basic_route(c)
 	-- Country bypass — geoip catches direct-IP destinations, geosite catches
 	-- domain-routed ones. `rule_set` on a route rule is OR-matched in
 	-- sing-box, so one rule with both tags suffices. Provider is hardcoded
-	-- to sagernet to match the rule-set Expert mode emits by default.
+	-- to sagernet to match the rule-set Advanced mode emits by default.
 	-- Known gap: with fakeip off, lookups for bypassed-country domains still
 	-- exit via the `remote` resolver — DNS routing rules are not synthesised
 	-- (prepare_rules returns {} in Basic). Resolution is over DoT and content
@@ -1640,7 +1640,7 @@ end
 
 local function apply_extra(c, config)
 	-- Basic mode ignores extra.json — the file is kept on disk for an
-	-- Expert switch-back, but the merge is a builder gate, not data.
+	-- Advanced switch-back, but the merge is a builder gate, not data.
 	if read_mode(c) == "basic" then return config end
 	local raw = read_file(EXTRA_PATH)
 	if not raw or raw:match("^%s*$") then return config end

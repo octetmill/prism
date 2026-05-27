@@ -4,7 +4,7 @@
 // Basic tab. Shown only when prism.global.mode = "basic"; the host view in
 // main.js does the gating. The form binds to:
 //
-//   - prism.subscription.*  — same UCI sections Expert's Nodes tab uses, so
+//   - prism.subscription.*  — same UCI sections Advanced's Nodes tab uses, so
 //                             subscriptions added here show up there.
 //   - prism.basic.server    — list of node tags the user selected; build-config's
 //                             basic path turns N=1 into the final outbound and
@@ -14,7 +14,7 @@
 //   - prism.basic.ports     — "all" | "common"
 //
 // Custom rules, manual outbounds and /etc/prism/extra.json are kept on disk
-// but not compiled while in Basic mode; switching back to Expert restores
+// but not compiled while in Basic mode; switching back to Advanced restores
 // them.
 
 'use strict';
@@ -54,7 +54,7 @@ var callSetMode = rpc.declare({
 });
 
 // Curated, alphabetical-by-English-name country list for the bypass picker.
-// Power users who need an obscure code switch to Expert mode.
+// Power users who need an obscure code switch to Advanced mode.
 var COUNTRIES = [
 	['br', 'Brazil'], ['ca', 'Canada'], ['cn', 'China'], ['fr', 'France'],
 	['de', 'Germany'], ['hk', 'Hong Kong'], ['in', 'India'], ['ir', 'Iran'],
@@ -115,9 +115,9 @@ return baseclass.extend({
 		var m = new form.Map('prism');
 
 		// ── Subscriptions ───────────────────────────────────────────────
-		// Minimal columns vs. Expert's Nodes tab — no auto-update / UA /
+		// Minimal columns vs. Advanced's Nodes tab — no auto-update / UA /
 		// last-sync clutter. Same UCI sections, so anything added here is
-		// visible from Expert too.
+		// visible from Advanced too.
 		var sSubs = m.section(form.GridSection, 'subscription', _('Subscriptions'),
 			_('Lists of nodes Prism downloads on a schedule.'));
 		sSubs.addremove   = true;
@@ -191,7 +191,7 @@ return baseclass.extend({
 
 		var oServer = sServer.option(form.MultiValue, 'server', _('Server'));
 		// 'select' renders LuCI's checkbox-multi-select dropdown — same widget
-		// Expert's urltest member picker uses, with a search field for long
+		// Advanced's urltest member picker uses, with a search field for long
 		// node lists.
 		oServer.widget = 'select';
 		oServer.rmempty = true;
@@ -232,7 +232,7 @@ return baseclass.extend({
 	},
 
 	// Append the advanced-present banner (when applicable) and the
-	// bottom-of-panel "Switch to Expert mode" link below the form, before
+	// bottom-of-panel "Switch to Advanced mode" link below the form, before
 	// the host's footer attaches.
 	_postRender: function(formNode) {
 		var self = this;
@@ -242,7 +242,7 @@ return baseclass.extend({
 		// of each other with the LuCI default 0.5em gap, which reads as one
 		// dense block. 2em margin-top on every .cbi-section pushes each
 		// title down so the visual rhythm matches the conceptual grouping.
-		// Scoped to .cbi-map.prism-basic to leave Expert layouts alone.
+		// Scoped to .cbi-map.prism-basic to leave Advanced layouts alone.
 		formNode.classList.add('prism-basic');
 		formNode.appendChild(E('style', {}, [
 			'.cbi-map.prism-basic .cbi-section{margin-top:2em}'
@@ -259,17 +259,17 @@ return baseclass.extend({
 				'href':  '#',
 				'click': function(ev) {
 					ev.preventDefault();
-					self._switchToExpert();
+					self._switchToAdvanced();
 				}
-			}, [ _('Switch to Expert mode →') ])
+			}, [ _('Switch to Advanced mode →') ])
 		]));
 
 		extras.forEach(function(el) { formNode.appendChild(el); });
 		return formNode;
 	},
 
-	_switchToExpert: function() {
-		return callSetMode('expert').then(function() {
+	_switchToAdvanced: function() {
+		return callSetMode('advanced').then(function() {
 			session.setLocalData('prism.activeTab', '');
 			window.location.reload();
 		}).catch(function(err) {

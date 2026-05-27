@@ -1214,17 +1214,17 @@ local methods = {
 			-- builds; a thrown error here would propagate through the outer
 			-- pcall, causing os.exit(1) and an UBUS_STATUS_NOT_FOUND reply.
 			local enabled = false
-			local mode = "expert"
+			local mode = "advanced"
 			local c_ok, c = pcall(uci_cursor)
 			if c_ok then
 				local val = c:get("prism", "global", "enabled")
 				local m   = c:get("prism", "global", "mode")
 				c:close()
 				enabled = (val == "1")
-				-- Unset on existing installs that pre-date the basic/expert
-				-- split → "expert" so today's configuration stays visible
+				-- Unset on existing installs that pre-date the basic/advanced
+				-- split → "advanced" so today's configuration stays visible
 				-- (a fresh install defaults to "basic" via /etc/config/prism).
-				if m == "basic" or m == "expert" then mode = m end
+				if m == "basic" or m == "advanced" then mode = m end
 			end
 
 			local running = service_running()
@@ -1272,9 +1272,9 @@ local methods = {
 	},
 
 	-- UI-mode switch. Basic mode hides Nodes / Routing / Settings and builds
-	-- the running config from `prism.basic` only; Expert is today's full UI.
+	-- the running config from `prism.basic` only; Advanced is today's full UI.
 	-- The flag is purely a builder gate — switching modes does not touch any
-	-- other UCI section, so going Expert → Basic → Expert is non-destructive.
+	-- other UCI section, so going Advanced → Basic → Advanced is non-destructive.
 	-- Routing through here (rather than a plain `uci set` from JS) keeps the
 	-- commit + service reload atomic so the running sing-box config always
 	-- matches the mode the UI is showing.
@@ -1282,7 +1282,7 @@ local methods = {
 		args = { mode = "" },
 		call = function(args)
 			local m = args.mode
-			if m ~= "basic" and m ~= "expert" then
+			if m ~= "basic" and m ~= "advanced" then
 				return { ok = false, error = "invalid mode" }
 			end
 			local c = uci_cursor()

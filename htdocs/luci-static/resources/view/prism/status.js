@@ -224,14 +224,14 @@ function formatActiveNode(tag, outbounds) {
 	return tag;
 }
 
-// Active outbound for the runtime header. Expert reads
+// Active outbound for the runtime header. Advanced reads
 // prism.routing.final_outbound; Basic synthesises from prism.basic.server
 // (single tag, basic-auto for N>1, none for 0). Rule count stays plain in
 // both modes — Basic just hides the row that would display it (along with
 // the sing-box/mode footer), so showing a "preset" label is unnecessary.
 function runtimeInfo(outbounds) {
 	var uiMode = uci.get('prism', 'global', 'mode');
-	if (uiMode !== 'basic' && uiMode !== 'expert') uiMode = 'expert';
+	if (uiMode !== 'basic' && uiMode !== 'advanced') uiMode = 'advanced';
 
 	var tag;
 	if (uiMode === 'basic') {

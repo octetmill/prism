@@ -35,7 +35,7 @@ var TABS_BASIC = [
 // ids. Anything else falls through to the first tab. The pre-2026-05-22 ids
 // subscriptions and outbounds were both rolled into one node-list tab.
 // `basic` exists only in Basic mode and `nodes / routing / settings` only in
-// Expert — the mode-specific filter at the call site re-maps the cross-mode
+// Advanced — the mode-specific filter at the call site re-maps the cross-mode
 // case (an id that exists in the old mode but not the new one) to the closest
 // equivalent in the current mode.
 var TAB_REDIRECT = {
@@ -88,7 +88,7 @@ return view.extend({
 
 	_readMode: function() {
 		var m = uci.get('prism', 'global', 'mode');
-		return (m === 'basic') ? 'basic' : 'expert';
+		return (m === 'basic') ? 'basic' : 'advanced';
 	},
 
 	// Tabs that don't exist in the current mode get folded onto the closest
@@ -140,20 +140,20 @@ return view.extend({
 
 	// Right-aligned mode toggle that lives inside the top tab bar (margin-left:
 	// auto pushes it past the regular tabs). Text changes per mode: in Basic
-	// it offers "Expert mode →", in Expert it offers "Basic mode →".
-	// Switching back to Expert is non-destructive (no confirm); switching to
+	// it offers "Advanced mode →", in Advanced it offers "Basic mode →".
+	// Switching back to Advanced is non-destructive (no confirm); switching to
 	// Basic is also non-destructive — advanced config is kept on disk — but a
 	// modal explains the new builder behaviour the first time the user flips
-	// it from Expert, so the change is never silent.
+	// it from Advanced, so the change is never silent.
 	_buildModeChip: function() {
 		var self = this;
-		var target = (this._mode === 'basic') ? 'expert' : 'basic';
-		var label  = (target === 'expert')
-			? _('Expert mode →') : _('Basic mode →');
+		var target = (this._mode === 'basic') ? 'advanced' : 'basic';
+		var label  = (target === 'advanced')
+			? _('Advanced mode →') : _('Basic mode →');
 		return E('li', { 'class': 'prism-mode-chip' }, [
 			E('a', {
 				'href':  '#',
-				'title': (target === 'expert')
+				'title': (target === 'advanced')
 					? _('Show every Prism setting (Nodes, Routing, Settings tabs).')
 					: _('Hide advanced settings. Your advanced configuration is kept on disk and returns when you switch back.'),
 				'click': function(ev) {
@@ -165,16 +165,16 @@ return view.extend({
 	},
 
 	_handleModeSwitch: function(target) {
-		if (target === 'expert') {
+		if (target === 'advanced') {
 			return this._applyModeSwitch(target);
 		}
-		// Expert → Basic: show the rules of the new mode once. The action
+		// Advanced → Basic: show the rules of the new mode once. The action
 		// itself is non-destructive but the running config will change shape.
 		ui.showModal(_('Switch to Basic mode?'), [
 			E('p', {}, [ _(
 				'Basic mode hides Nodes, Routing and Settings and builds the running ' +
 				'sing-box config from the Basic tab only. Your advanced configuration ' +
-				'is kept on disk and will be active again when you switch back to Expert.'
+				'is kept on disk and will be active again when you switch back to Advanced.'
 			) ]),
 			E('div', { 'class': 'right' }, [
 				E('button', {
