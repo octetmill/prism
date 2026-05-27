@@ -1291,10 +1291,12 @@ local methods = {
 			-- existing installs that pre-date the basic-mode flag never get
 			-- the default `config prism 'basic'` section the new shipping
 			-- file ships. Without it, form.NamedSection on the Basic panel
-			-- renders the section title but skips every option underneath.
-			-- Prime the section here on the way into Basic so the UI always
-			-- has something to bind to; idempotent (no-op when present).
-			if m == "basic" and not c:get("prism", "basic") then
+			-- renders the section title but skips every option underneath,
+			-- and build_basic_route reads all-empty defaults. Prime the
+			-- section unconditionally so a CLI `uci set prism.global.mode=basic`
+			-- (which doesn't go through set_mode) followed by a UI mode-switch
+			-- to advanced and back also lands in a sane state; idempotent.
+			if not c:get("prism", "basic") then
 				c:set("prism", "basic", "prism")
 				c:set("prism", "basic", "routing", "all")
 				c:set("prism", "basic", "bypass_country", "cn")
