@@ -272,11 +272,16 @@ start_service() {
 		fi
 		prism_log err "config: generated config was rejected, keeping sing-box on the last working config"
 		prism_declare_instance "$config_path"
-		# Intentionally NOT declaring active_watch here: the last-working
-		# config may pre-date the user's clash_api_enabled flip and have
-		# no clash listener bound. Polling 127.0.0.1:9090 every 10s
-		# against nothing is pure log/CPU noise. The daemon will come
-		# back on the next successful Save.
+		# Re-declare active_watch only if the last-working config (the one
+		# we're keeping running) actually has clash_api enabled. Without
+		# this re-declaration, procd reconciles a missing instance and
+		# kills the running watcher — even though the live sing-box is
+		# still serving its clash API. Don't trust the current UCI flag
+		# here: build-config may have changed clash_api_enabled in the
+		# rejected config, so we inspect the still-running file.
+		if grep -q '"clash_api"' "$config_path" 2>/dev/null; then
+			prism_declare_active_watch
+		fi
 		return 0
 	fi
 
