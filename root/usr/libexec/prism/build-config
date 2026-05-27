@@ -1603,11 +1603,42 @@ local function build_log(c)
 end
 
 
+-- Drop a dangling outbound reference (deleted manual node, renamed subscription
+-- tag) to "direct" with a warning to stderr. sing-box rejects the whole config
+-- on a route.final or dns.servers[].detour pointing at a missing outbound, and
+-- the init.d fall-back-to-last-working logic hides the failure from the user;
+-- this surfaces the cause and keeps the new save valid.
+local function validate_tag(label, tag, tagset)
+	if tag == nil or tag == "" or tag == "direct" or tag == "block" then return tag end
+	if tagset[tag] then return tag end
+	io.stderr:write("prism build-config: " .. label .. " references unknown outbound '"
+		.. tostring(tag) .. "', falling back to 'direct'\n")
+	return "direct"
+end
+
 local function build_config(c)
 	local prepared = prepare_rules(c)
 	local dns   = build_dns(c, prepared)
 	local route = build_route(c, prepared)
 	local outbounds, endpoints = build_outbounds(c)
+
+	-- Post-build validation: route.final and every dns.servers[].detour must
+	-- resolve to a tag that build_outbounds actually emitted (plus the
+	-- builtins direct/block). Stale Advanced final_outbound and DNS detour
+	-- references — surfaced by a deleted manual node or a renamed
+	-- subscription tag — would otherwise produce a config sing-box rejects,
+	-- and the init.d fallback would hide that from the user indefinitely.
+	local tagset = {}
+	for _, ob in ipairs(outbounds) do if ob.tag then tagset[ob.tag] = true end end
+	for _, ob in ipairs(endpoints) do if ob.tag then tagset[ob.tag] = true end end
+	route["final"] = validate_tag("route.final", route["final"], tagset)
+	if type(dns.servers) == "table" then
+		for _, s in ipairs(dns.servers) do
+			if s.detour then
+				s.detour = validate_tag("dns.servers[" .. (s.tag or "?") .. "].detour", s.detour, tagset)
+			end
+		end
+	end
 
 	local config = {
 		log       = build_log(c),
