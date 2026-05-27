@@ -1344,10 +1344,14 @@ local function build_basic_route(c)
 	-- domain-routed ones. `rule_set` on a route rule is OR-matched in
 	-- sing-box, so one rule with both tags suffices. Provider is hardcoded
 	-- to sagernet to match the rule-set Advanced mode emits by default.
-	-- Known gap: with fakeip off, lookups for bypassed-country domains still
-	-- exit via the `remote` resolver — DNS routing rules are not synthesised
-	-- (prepare_rules returns {} in Basic). Resolution is over DoT and content
-	-- is encrypted, so this is a mild correctness wart, not a leak.
+	-- Known gap: lookups for bypassed-country domains still exit via the
+	-- `remote` resolver — DNS routing rules are not synthesised in Basic
+	-- (prepare_rules returns {}). With fakeip off the resolution is over
+	-- DoT and content is encrypted, so it is a mild correctness wart but
+	-- not a leak. With fakeip on (an Advanced setting that persists in UCI
+	-- if a user crosses modes) `remote` returns a fake IP that still routes
+	-- direct via the geoip set after demap, but the resolver used was the
+	-- proxied one — same wart, different surface.
 	if routing_mode == "bypass_country" and cc ~= "" then
 		local geoip_name   = "geoip-"   .. cc
 		local geosite_name = "geosite-" .. cc
