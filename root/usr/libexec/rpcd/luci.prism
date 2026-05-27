@@ -753,7 +753,13 @@ end
 
 -- Log a Prism control-plane event to syslog. `level` is the severity
 -- (info/notice/warn/err) — mirrors the shell prism_log helper's convention.
+-- Normalise 'warn' to 'warning' before handing to logger: busybox logger
+-- accepts both, but the get_logs filter's SEV table only recognises the
+-- canonical POSIX spelling — so a syslog line tagged daemon.warn would
+-- otherwise classify as info (the SEV fallback) and a user-set
+-- prism_log_level=warning would silently fail to suppress info lines.
 local function log_prism(level, msg)
+	if level == "warn" then level = "warning" end
 	local safe = msg:gsub("'", "'\\''")
 	os.execute("logger -p daemon." .. level .. " -t prism '" .. safe .. "' 2>/dev/null")
 end

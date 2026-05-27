@@ -89,6 +89,7 @@ prism_log() {
 	local level
 	level="$1"
 	shift
+	[ "$level" = "warn" ] && level=warning
 	logger -p "daemon.$level" -t prism "$@"
 }
 

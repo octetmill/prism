@@ -23,6 +23,10 @@ prism_log() {
 	local level
 	level="$1"
 	shift
+	# Normalise 'warn' -> 'warning' so the Status-page log filter (which
+	# keys SEV by POSIX names) classifies it correctly. busybox logger
+	# accepts both spellings.
+	[ "$level" = "warn" ] && level=warning
 	logger -p "daemon.$level" -t prism "$@"
 }
 
