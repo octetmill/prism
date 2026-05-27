@@ -802,6 +802,14 @@ local function load_subscription_nodes(c, all_ordered, all_map, seen)
 		local content = read_file(path)
 		if content and content ~= "" then
 			local ok, nodes = pcall(jsonc.parse, content)
+			if not ok or type(nodes) ~= "table" then
+				-- Surface a corrupt subscription file (truncated write,
+				-- manual edit gone wrong) so the user sees *why* a
+				-- subscription's nodes vanished from the running config.
+				-- Without this every node from this sub silently disappears.
+				io.stderr:write("prism build-config: subscription nodes file "
+					.. path .. " failed to parse, dropping its nodes\n")
+			end
 			if ok and type(nodes) == "table" then
 				for _, n in ipairs(nodes) do
 					if type(n) == "table" and n.payload then
