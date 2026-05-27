@@ -228,19 +228,30 @@ return view.extend({
 
 	_applyModeSwitch: function(target) {
 		ui.hideModal();
-		// Drop any staged changes too: keeping them would re-trigger LuCI's
-		// "apply pending changes" banner on the freshly reloaded page in the
-		// other mode, where some of those changes may reference UCI sections
-		// the new mode's UI doesn't expose. ui.changes.revert() is a no-op
-		// when there's nothing staged, so call it unconditionally — cheaper
-		// than another uci.changes() round-trip just to check.
-		return ui.changes.revert().then(function() {
-			return callSetMode(target);
-		}).then(function() {
+		// ui.changes.revert() is fire-and-forget: it kicks off a UCI revert
+		// request, shows the "Changes have been reverted" toast, and reloads
+		// the page itself via window.location = … after L.env.apply_display
+		// seconds. It returns undefined, so chaining .then() on it either
+		// throws or races with the reload — which is why the old order
+		// (revert → set_mode) silently dropped the mode write and bounced
+		// the user back into Advanced.
+		//
+		// Commit the mode through rpcd first. Then, only if staged changes
+		// exist, hand off to ui.changes.revert() so the new mode's tab
+		// doesn't inherit the "apply pending changes" banner for sections
+		// it may not expose. Otherwise just reload — that keeps a misleading
+		// "Changes have been reverted" toast from appearing on a clean switch.
+		return callSetMode(target).then(function() {
 			// Drop the stored tab id so the new mode lands on its first tab
 			// cleanly instead of being redirected through the cross-mode map.
 			session.setLocalData('prism.activeTab', '');
-			window.location.reload();
+			return uci.changes();
+		}).then(function(changes) {
+			if (_changeCount(changes) > 0) {
+				ui.changes.revert();
+			} else {
+				window.location.reload();
+			}
 		}).catch(function(err) {
 			ui.addNotification(null, E('p', _('Mode switch failed: ') +
 				((err && err.message) ? err.message : err)), 'error');
