@@ -19,7 +19,7 @@
 'require view.prism.settings as settingsPanel';
 'require view.prism.basic as basicPanel';
 
-var TABS_EXPERT = [
+var TABS_ADVANCED = [
 	{ id: 'status',   label: _('Status'),   panel: statusPanel },
 	{ id: 'nodes',    label: _('Nodes'),    panel: nodesPanel },
 	{ id: 'routing',  label: _('Routing'),  panel: routingPanel },
@@ -69,7 +69,7 @@ return view.extend({
 	render: function() {
 		this._mountGen = 0;
 		this._mode = this._readMode();
-		this._tabs = (this._mode === 'basic') ? TABS_BASIC : TABS_EXPERT;
+		this._tabs = (this._mode === 'basic') ? TABS_BASIC : TABS_ADVANCED;
 		this._topMenu = E('ul', { 'class': 'cbi-tabmenu' }, []);
 		this._content = E('div', { 'class': 'prism-tab-content' }, []);
 		this._shell = E('div', { 'class': 'cbi-map' }, [
