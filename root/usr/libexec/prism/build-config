@@ -594,10 +594,17 @@ local function build_node_from_uci(s)
 	return ob
 end
 
--- direct / block are builtin outbounds added at emission. A node — manual
--- or from a (possibly hostile) subscription — carrying one of those tags
--- would collide and make sing-box reject the whole config, so drop it.
-local OUTBOUND_RESERVED_TAGS = { direct = true, block = true }
+-- direct / block are builtin outbounds added at emission. basic-auto and
+-- _prism_test_all are synthesised Basic-mode and clash-test groups; a node
+-- — manual or from a (possibly hostile) subscription — carrying one of
+-- those tags would collide and make sing-box reject the whole config, so
+-- drop it before it reaches all_map.
+local OUTBOUND_RESERVED_TAGS = {
+	direct           = true,
+	block            = true,
+	["basic-auto"]   = true,
+	_prism_test_all  = true,
+}
 
 -- Scan /etc/prism/nodes/*.json, prune any orphan file whose subscription
 -- section was deleted, and import the remaining nodes into all_ordered /
