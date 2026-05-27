@@ -730,40 +730,6 @@ local function sanitize_subscription_node(p)
 	return out
 end
 
--- Collect every outbound tag the user has typed by hand into a routing
--- reference (rule.outbound, basic.server, routing.final_outbound, manual
--- urltest member list, selector default). A subscription is then forbidden
--- from claiming one of those tags: the user clearly meant a specific
--- (manual) node and a hostile provider could otherwise hijack the
--- reference by shipping a same-named node.
-local function collect_user_outbound_refs(c)
-	local refs = {}
-	c:foreach("prism", "rule", function(s)
-		if s.outbound and s.outbound ~= "" then refs[s.outbound] = true end
-	end)
-	c:foreach("prism", "node", function(s)
-		if s.selector_default and s.selector_default ~= "" then
-			refs[s.selector_default] = true
-		end
-		local lst = s.urltest_outbounds
-		if type(lst) == "table" then
-			for _, t in ipairs(lst) do if t ~= "" then refs[t] = true end end
-		elseif type(lst) == "string" and lst ~= "" then
-			refs[lst] = true
-		end
-	end)
-	local fin = c:get("prism", "routing", "final_outbound")
-	if fin and fin ~= "" then refs[fin] = true end
-	local basic = c:get_all("prism", "basic") or {}
-	local picks = basic.server
-	if type(picks) == "table" then
-		for _, t in ipairs(picks) do if t ~= "" then refs[t] = true end end
-	elseif type(picks) == "string" and picks ~= "" then
-		refs[picks] = true
-	end
-	return refs
-end
-
 -- Scan /etc/prism/nodes/*.json, prune any orphan file whose subscription
 -- section was deleted, and import the remaining nodes into all_ordered /
 -- all_map / seen (mutated in place). First-seen-wins, so manual nodes loaded
@@ -771,13 +737,6 @@ end
 -- calls this with empty tables. Each imported node is tagged with `_source`
 -- = the subscription section name.
 local function load_subscription_nodes(c, all_ordered, all_map, seen)
-	local user_refs = collect_user_outbound_refs(c)
-	-- A subscription node may not claim a tag the user has already typed
-	-- elsewhere — that reference belongs to the user's manual node (which
-	-- may not exist yet, may have been deleted, or may live elsewhere) and
-	-- letting a remote feed silently bind to it is a real attack vector.
-	-- Tags already in `seen` are similarly off-limits (manual nodes loaded
-	-- first take precedence over subscription tags).
 	local valid_subs = {}
 	c:foreach("prism", "subscription", function(s)
 		valid_subs[s[".name"]] = true
@@ -819,11 +778,17 @@ local function load_subscription_nodes(c, all_ordered, all_map, seen)
 							if OUTBOUND_RESERVED_TAGS[p.tag] then
 								io.stderr:write("prism build-config: subscription node "
 									.. "tag '" .. p.tag .. "' is reserved; skipping\n")
-							elseif user_refs[p.tag] then
-								io.stderr:write("prism build-config: subscription node "
-									.. "tag '" .. p.tag .. "' collides with a "
-									.. "manual outbound reference; skipping\n")
 							elseif not seen[p.tag] then
+								-- seen{} was populated by build_outbounds with
+								-- every manual UCI node tag before we ran, so
+								-- this check transparently denies a subscription
+								-- from overwriting a tag the user has already
+								-- defined locally — the only realistic
+								-- tag-hijack vector. Tags merely referenced
+								-- elsewhere (urltest_outbounds, rule.outbound,
+								-- basic.server, …) are EXPECTED to be filled
+								-- by subscription nodes; gating those would
+								-- break the primary urltest workflow.
 								p._source      = sub_id
 								seen[p.tag]    = true
 								all_map[p.tag] = p
@@ -1005,31 +970,49 @@ local function build_outbounds(c)
 				local src_list = ob._outbound_regex_sources
 				ob._outbound_regex = nil  -- strip before handing to sing-box
 				ob._outbound_regex_sources = nil
-				-- Source restriction: when urltest_regex_sources is set,
-				-- subscription nodes from those subscription IDs are admitted.
-				-- When unset (or empty), subscription nodes are NOT admitted —
-				-- only manual nodes (_source == nil). A subscription provider
-				-- otherwise could ship nodes whose tags match the user's
-				-- regex and silently steer traffic through attacker-controlled
-				-- outbounds; requiring an explicit source allowlist forces
-				-- the user to opt each subscription in by hand.
+				-- Source restriction (optional, additive): when
+				-- urltest_regex_sources is set to a non-empty list, ONLY
+				-- subscriptions in that list contribute candidates (plus
+				-- manual nodes, always). When unset, every source is
+				-- considered — the original behaviour, and the only
+				-- non-breaking default for existing regex-mode groups.
+				-- An earlier attempt to reverse this default (SEC-3) was
+				-- reverted because it silently emptied every regex group
+				-- whose user hadn't yet typed an explicit source list,
+				-- in turn dropping the group, the routes pointing at it,
+				-- and finally the user's DNS.
 				local src_set = nil
 				if type(src_list) == "table" and #src_list > 0 then
 					src_set = {}
 					for _, sid in ipairs(src_list) do src_set[sid] = true end
 				end
+				-- Per-source admit counts for the SEC-3 audit log. A regex
+				-- group that auto-admits subscription nodes is the SEC-3
+				-- attack surface (hostile sub ships nodes matching the
+				-- user's pattern, slots itself into the auto-pool).
+				-- Logging each source's contribution lets the user notice
+				-- a new sub joining; gating is left to the optional
+				-- urltest_regex_sources whitelist.
+				local by_source = {}
 				if type(ob.outbounds) ~= "table" or #ob.outbounds == 0 then
 					ob.outbounds = {}
 					for _, other in ipairs(all_ordered) do
 						if other.type ~= "urltest" and other.type ~= "selector"
-						   and match_any(other.tag, pattern) then
-							local source = other._source
-							local admit = (source == nil)  -- manual nodes always OK
-								or (src_set and src_set[source])
-							if admit then
-								ob.outbounds[#ob.outbounds + 1] = other.tag
-							end
+						   and match_any(other.tag, pattern)
+						   and (not src_set or src_set[other._source or ""]) then
+							ob.outbounds[#ob.outbounds + 1] = other.tag
+							local src = other._source or "_manual"
+							by_source[src] = (by_source[src] or 0) + 1
 						end
+					end
+				end
+				-- Audit line per source that contributed. Skips "_manual" —
+				-- manual nodes by definition came from the user's own UCI.
+				for src, count in pairs(by_source) do
+					if src ~= "_manual" then
+						io.stderr:write("prism build-config: urltest '" .. ob.tag
+							.. "' regex admitted " .. count
+							.. " node(s) from subscription '" .. src .. "'\n")
 					end
 				end
 			end
@@ -1825,9 +1808,26 @@ end
 -- on a route.final or dns.servers[].detour pointing at a missing outbound, and
 -- the init.d fall-back-to-last-working logic hides the failure from the user;
 -- this surfaces the cause and keeps the new save valid.
-local function validate_tag(label, tag, tagset)
+--
+-- `originset[tag]` carries the origin info for that tag (one of "manual",
+-- "subscription <id>", "group"). Used to emit the SEC-4 audit line below:
+-- when a route or DNS reference resolves to a subscription LEAF node (not a
+-- group), it's unusual — the field is typically aimed at a group tag — and
+-- a hostile subscription that happened to ship a node matching the user's
+-- typed tag would silently fulfil the reference. We don't reject (the user
+-- may have intended it), but we surface it for audit.
+local function validate_tag(label, tag, tagset, originset)
 	if tag == nil or tag == "" or tag == "direct" or tag == "block" then return tag end
-	if tagset[tag] then return tag end
+	if tagset[tag] then
+		local origin = originset and originset[tag]
+		if origin and origin:sub(1, 13) == "subscription " then
+			io.stderr:write("prism build-config: " .. label .. " '"
+				.. tostring(tag) .. "' resolved to a " .. origin
+				.. " node — verify intent (route fields typically target groups, "
+				.. "not individual subscription nodes)\n")
+		end
+		return tag
+	end
 	io.stderr:write("prism build-config: " .. label .. " references unknown outbound '"
 		.. tostring(tag) .. "', falling back to 'direct'\n")
 	return "direct"
@@ -1845,14 +1845,24 @@ local function build_config(c)
 	-- references — surfaced by a deleted manual node or a renamed
 	-- subscription tag — would otherwise produce a config sing-box rejects,
 	-- and the init.d fallback would hide that from the user indefinitely.
-	local tagset = {}
-	for _, ob in ipairs(outbounds) do if ob.tag then tagset[ob.tag] = true end end
-	for _, ob in ipairs(endpoints) do if ob.tag then tagset[ob.tag] = true end end
-	route["final"] = validate_tag("route.final", route["final"], tagset)
+	local tagset    = {}
+	local originset = {}
+	local function classify(ob)
+		if ob.type == "urltest" or ob.type == "selector" then return "group" end
+		if ob._source == "_manual" or ob._source == nil then return "manual" end
+		return "subscription " .. tostring(ob._source)
+	end
+	for _, ob in ipairs(outbounds) do
+		if ob.tag then tagset[ob.tag] = true; originset[ob.tag] = classify(ob) end
+	end
+	for _, ob in ipairs(endpoints) do
+		if ob.tag then tagset[ob.tag] = true; originset[ob.tag] = classify(ob) end
+	end
+	route["final"] = validate_tag("route.final", route["final"], tagset, originset)
 	if type(dns.servers) == "table" then
 		for _, s in ipairs(dns.servers) do
 			if s.detour then
-				s.detour = validate_tag("dns.servers[" .. (s.tag or "?") .. "].detour", s.detour, tagset)
+				s.detour = validate_tag("dns.servers[" .. (s.tag or "?") .. "].detour", s.detour, tagset, originset)
 			end
 		end
 	end
