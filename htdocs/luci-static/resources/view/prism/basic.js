@@ -73,7 +73,11 @@ return baseclass.extend({
 			var subs = uci.sections('prism', 'subscription');
 			var calls = subs.map(function(sub) {
 				return callListSubNodes(sub['.name']).catch(function() {
-					return { nodes: [] };
+					// Mark the failure so the panel can surface it
+					// instead of silently dropping the sub's servers
+					// from the picker (which previously looked
+					// indistinguishable from "this sub has no nodes").
+					return { nodes: [], _failed: true };
 				});
 			});
 			return Promise.all(calls).then(function(results) {
@@ -86,15 +90,24 @@ return baseclass.extend({
 				// so the dropdown only offers real endpoints.
 				var GROUP_TYPES = { urltest: true, selector: true };
 				var nodes = [];
+				var failed = [];
 				results.forEach(function(r, i) {
 					var subId   = subs[i]['.name'];
 					var subName = subs[i].name || subId;
+					if (r._failed) { failed.push(subName); return; }
 					(r.nodes || []).forEach(function(n) {
 						if (n.tag && !GROUP_TYPES[n.type]) nodes.push({
 							tag: n.tag, sub_id: subId, sub_name: subName
 						});
 					});
 				});
+				if (failed.length) {
+					ui.addNotification(null, E('p',
+						_('Could not load nodes from %d subscription(s): %s. ' +
+						  'Try syncing them on the Subscriptions section.')
+							.format(failed.length, failed.join(', '))),
+						'warning');
+				}
 				return nodes;
 			});
 		});
