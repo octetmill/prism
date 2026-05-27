@@ -597,15 +597,24 @@ local RESERVED_TAGS = {
 }
 
 -- SingBox JSON: the outbounds array, minus builtin and group outbounds.
+-- ALLOWED_PROTOCOL is the same whitelist build-config's sanitiser enforces;
+-- having it here too means an unsupported type (notably `ssh`, `tor`, or
+-- a future sing-box outbound that takes a filesystem path argument) is
+-- rejected at parse time and never written to /etc/prism/nodes/*.json.
 local function extract_singbox(body)
 	local nodes = {}
 	if not _jsonc_ok then return nodes end
 	local ok, cfg = pcall(_jsonc.parse, body)
 	if not ok or not cfg or type(cfg.outbounds) ~= "table" then return nodes end
-	local SKIP = { direct=true, block=true, dns=true, selector=true, urltest=true }
+	local ALLOWED_PROTOCOL = {
+		vless = true, vmess = true, trojan = true, shadowsocks = true,
+		hysteria2 = true, tuic = true, anytls = true, socks = true,
+		wireguard = true,
+	}
 	for _, ob in ipairs(cfg.outbounds) do
-		if type(ob) == "table" and ob.tag and not SKIP[ob.type]
-		   and not RESERVED_TAGS[ob.tag] then
+		if type(ob) == "table" and ob.tag and ALLOWED_PROTOCOL[ob.type]
+		   and not RESERVED_TAGS[ob.tag]
+		   and not ob.tag:find("[%c]") then
 			nodes[#nodes + 1] = {
 				tag         = ob.tag,
 				type        = ob.type or "",
@@ -624,7 +633,7 @@ local function extract_clash(body)
 	local in_proxies, fields = false, {}
 	local function flush()
 		local ob = build_clash_outbound(fields)
-		if ob and RESERVED_TAGS[ob.tag] then ob = nil end
+		if ob and (RESERVED_TAGS[ob.tag] or ob.tag:find("[%c]")) then ob = nil end
 		if ob then
 			local payload
 			if _jsonc_ok then
@@ -684,7 +693,8 @@ local function extract_uris(text)
 	local nodes = {}
 	for line in (text .. "\n"):gmatch("([^\n]*)\n") do
 		local ob = parse_proxy_uri(line)
-		if ob and ob.server ~= "" and not RESERVED_TAGS[ob.tag] then
+		if ob and ob.server ~= "" and not RESERVED_TAGS[ob.tag]
+		   and not ob.tag:find("[%c]") then
 			-- Keep the full sing-box outbound as the payload — that's what
 			-- build-config later splices verbatim into route.outbounds.
 			nodes[#nodes + 1] = {

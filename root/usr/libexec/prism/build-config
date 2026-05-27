@@ -606,6 +606,111 @@ local OUTBOUND_RESERVED_TAGS = {
 	_prism_test_all  = true,
 }
 
+-- ─── subscription payload sanitiser ─────────────────────────────────────
+--
+-- Subscription bodies are remote, untrusted JSON. The legacy path spliced
+-- the parsed payload table verbatim into all_map[tag] = p, so a hostile
+-- provider could ship arbitrary sing-box outbound keys — tls.insecure to
+-- disable cert verification, detour to bypass the user's routing intent,
+-- ssh.private_key_path to read router host keys, etc. Mitigate with a
+-- per-type field whitelist that mirrors what build_node_from_uci accepts
+-- from manual nodes. Anything not on the list is dropped at load time.
+--
+-- Adding a new sing-box protocol means adding it here AND in build_node_from_uci.
+
+local SUB_ALLOWED_TYPES = {
+	vless       = true,
+	vmess       = true,
+	trojan      = true,
+	shadowsocks = true,
+	hysteria2   = true,
+	tuic        = true,
+	anytls      = true,
+	socks       = true,
+	-- wireguard requires an explicit private_key + peer block; safe to
+	-- accept here since the only attacker-controlled paths are inside
+	-- well-typed fields (no path/cert references), and it lands as an
+	-- endpoint after the build_outbounds split.
+	wireguard   = true,
+}
+
+local function copy_subset(src, allowed)
+	if type(src) ~= "table" then return nil end
+	local out = {}
+	for _, k in ipairs(allowed) do
+		local v = src[k]
+		if v ~= nil then out[k] = v end
+	end
+	return out
+end
+
+local SUB_TLS_KEYS = {
+	"enabled", "server_name", "alpn", "min_version", "max_version",
+	"cipher_suites", "utls", "ech", "reality",
+}
+local SUB_TRANSPORT_KEYS = {
+	"type", "path", "host", "headers", "method", "service_name",
+	"idle_timeout", "ping_timeout", "max_early_data", "early_data_header_name",
+	"permit_without_stream",
+}
+local SUB_OBFS_KEYS  = { "type", "password" }
+local SUB_PEER_KEYS  = { "address", "port", "public_key", "pre_shared_key", "allowed_ips", "reserved" }
+
+local SUB_TYPE_KEYS = {
+	vless       = { "tag", "type", "server", "server_port", "uuid", "flow", "packet_encoding", "network" },
+	vmess       = { "tag", "type", "server", "server_port", "uuid", "security", "alter_id",
+	                "global_padding", "authenticated_length", "packet_encoding", "network" },
+	trojan      = { "tag", "type", "server", "server_port", "password", "network" },
+	shadowsocks = { "tag", "type", "server", "server_port", "method", "password", "network", "udp_over_tcp" },
+	hysteria2   = { "tag", "type", "server", "server_port", "password", "network",
+	                "up_mbps", "down_mbps", "brutal" },
+	tuic        = { "tag", "type", "server", "server_port", "uuid", "password",
+	                "congestion_control", "udp_relay_mode", "zero_rtt_handshake", "network" },
+	anytls      = { "tag", "type", "server", "server_port", "password", "network",
+	                "idle_session_check_interval", "idle_session_timeout", "min_idle_session" },
+	socks       = { "tag", "type", "server", "server_port", "version", "username", "password",
+	                "network", "udp_over_tcp" },
+	wireguard   = { "tag", "type", "address", "private_key", "mtu", "system_interface", "workers" },
+}
+
+local function sanitize_subscription_node(p)
+	if type(p) ~= "table" then return nil end
+	local t = p.type
+	if type(t) ~= "string" or not SUB_ALLOWED_TYPES[t] then return nil end
+	if type(p.tag) ~= "string" or p.tag == "" then return nil end
+	-- Reject control characters in tag — these would corrupt the
+	-- .test-all-tags newline-delimited file and stderr log lines.
+	if p.tag:find("[%c]") then return nil end
+
+	local out = copy_subset(p, SUB_TYPE_KEYS[t])
+	if not out then return nil end
+
+	-- Sub-objects whose attacker-controlled fields must be stripped (tls.insecure,
+	-- tls.disable_sni, transport.tls — anything that weakens cryptographic
+	-- guarantees the user thinks they have).
+	if type(p.tls) == "table" then
+		out.tls = copy_subset(p.tls, SUB_TLS_KEYS)
+	end
+	if type(p.transport) == "table" then
+		out.transport = copy_subset(p.transport, SUB_TRANSPORT_KEYS)
+	end
+	if type(p.obfs) == "table" then
+		out.obfs = copy_subset(p.obfs, SUB_OBFS_KEYS)
+	end
+	-- WireGuard: peers carry the dialled endpoint, must be sanitised in turn.
+	if t == "wireguard" and type(p.peers) == "table" then
+		local peers = {}
+		for _, peer in ipairs(p.peers) do
+			local sp = copy_subset(peer, SUB_PEER_KEYS)
+			if sp and sp.address and sp.port then peers[#peers + 1] = sp end
+		end
+		if #peers > 0 then out.peers = peers end
+		out._is_endpoint = true
+	end
+
+	return out
+end
+
 -- Scan /etc/prism/nodes/*.json, prune any orphan file whose subscription
 -- section was deleted, and import the remaining nodes into all_ordered /
 -- all_map / seen (mutated in place). First-seen-wins, so manual nodes loaded
@@ -638,8 +743,9 @@ local function load_subscription_nodes(c, all_ordered, all_map, seen)
 			if ok and type(nodes) == "table" then
 				for _, n in ipairs(nodes) do
 					if type(n) == "table" and n.payload then
-						local ok2, p = pcall(jsonc.parse, n.payload)
-						if ok2 and type(p) == "table" and p.tag then
+						local ok2, raw = pcall(jsonc.parse, n.payload)
+						local p = ok2 and sanitize_subscription_node(raw) or nil
+						if p then
 							if OUTBOUND_RESERVED_TAGS[p.tag] then
 								io.stderr:write("prism build-config: subscription node "
 									.. "tag '" .. p.tag .. "' is reserved; skipping\n")
@@ -649,6 +755,11 @@ local function load_subscription_nodes(c, all_ordered, all_map, seen)
 								all_map[p.tag] = p
 								all_ordered[#all_ordered + 1] = p
 							end
+						elseif ok2 and type(raw) == "table" and raw.type then
+							io.stderr:write("prism build-config: subscription node "
+								.. "tag '" .. tostring(raw.tag) .. "' rejected: "
+								.. "unsupported type '" .. tostring(raw.type)
+								.. "' or unsafe fields\n")
 						end
 					end
 				end
