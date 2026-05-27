@@ -321,6 +321,12 @@ start_service() {
 		prism_log info "config: sing-box config unchanged, no restart"
 	else
 		prism_log notice "config: sing-box config changed, restarting sing-box"
+		# procd's file watch will restart sing-box on the rename below;
+		# its cumulative clash counters reset in-process. Clear the
+		# stale snapshots so the Status traffic row doesn't show
+		# pre-restart totals for the ~10s it takes active-watch to
+		# write fresh values.
+		rm -f /var/etc/prism/.active-nodes.json /var/etc/prism/.clash-stats.json
 	fi
 
 	mv "$tmp_cfg" "$config_path"
@@ -359,11 +365,14 @@ stop_service() {
 	# Return dnsmasq to its own resolvers before sing-box's dns-in goes away.
 	remove_dns_dropin
 
-	# Clear the active-node snapshot so the Status page's Groups panel
-	# doesn't keep displaying last-known members and latencies after the
-	# daemon writing them has been killed by procd. Without this the
-	# panel would show stale data with no "service is down" cue.
-	rm -f /var/etc/prism/.active-nodes.json
+	# Clear the active-node and clash-stats snapshots so the Status page
+	# doesn't keep displaying last-known members, latencies, or traffic
+	# counters after the daemon writing them has been killed by procd.
+	# Without this the panels would show stale data with no "service is
+	# down" cue, and after a service restart the cumulative totals would
+	# carry over from the previous instance for up to one active-watch
+	# tick (~10s).
+	rm -f /var/etc/prism/.active-nodes.json /var/etc/prism/.clash-stats.json
 
 	# Cron lines are left in place. The watchdog respects PAUSE_MARKER and
 	# the persistent `enabled` flag, so it self-suppresses for transient
