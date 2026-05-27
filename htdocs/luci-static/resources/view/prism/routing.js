@@ -477,10 +477,13 @@ return baseclass.extend({
 		// the listing order must match the Servers tab's Subscriptions
 		// section. Manual nodes (subscription === '') sort to the top, in
 		// section order.
+		// Keyed by uid — that is what `ob.subscription` carries (the stable
+		// file key the rpcd handler emits for every subscription node).
 		var subName = {}, subOrder = {};
 		uci.sections('prism', 'subscription').forEach(function(sub, idx) {
-			subName[sub['.name']]  = sub.name || sub['.name'];
-			subOrder[sub['.name']] = idx;
+			if (!sub.uid) return;
+			subName[sub.uid]  = sub.name || sub.uid;
+			subOrder[sub.uid] = idx;
 		});
 		function groupKey(sub_id) {
 			if (!sub_id) return 0;

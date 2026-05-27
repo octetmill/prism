@@ -142,6 +142,18 @@ function relTime(ts) {
 var SERVER_TYPES    = ['vless','vmess','trojan','shadowsocks','hysteria2','tuic','anytls','wireguard','socks'];
 var TRANSPORT_TYPES = ['vless','vmess','trojan','anytls'];
 
+// 16 hex chars from getRandomValues. Same shape as the install-time migration
+// script's /dev/urandom output, so a migrated uid and a UI-generated one are
+// indistinguishable in storage.
+function generateSubUid() {
+	var bytes = new Uint8Array(8);
+	(window.crypto || window.msCrypto).getRandomValues(bytes);
+	var s = '';
+	for (var i = 0; i < bytes.length; i++)
+		s += ('0' + bytes[i].toString(16)).slice(-2);
+	return s;
+}
+
 // Add one depends() clause per accepted value (LuCI ORs separate calls).
 // `extra` keys are ANDed into every clause.
 function depAny(o, field, values, extra) {
@@ -231,6 +243,22 @@ return baseclass.extend({
 		s.anonymous = true;
 		s.addbtntitle = _('Add');
 		s.modaltitle = function() { return _('Subscription'); };
+
+		// Stamp every new subscription section with a stable `uid` UCI option.
+		// Files in /etc/prism/nodes/ are keyed by this uid, not by the volatile
+		// cfgXXXX section name (which libuci regenerates from a package-wide
+		// counter on every parse — see the install-time migration script for
+		// the full rationale). GridSection.handleAdd sets `this.addedSection`
+		// synchronously before the modal opens, so we can attach the uid in
+		// the same staging batch as the section itself.
+		var gridHandleAdd = s.handleAdd;
+		s.handleAdd = function(ev, name) {
+			var ret = gridHandleAdd.call(this, ev, name);
+			var sid = this.addedSection;
+			if (sid && !uci.get('prism', sid, 'uid'))
+				uci.set('prism', sid, 'uid', generateSubUid());
+			return ret;
+		};
 
 		var oEnabled = s.option(form.Flag, 'enabled', _('Enabled'));
 		oEnabled['default'] = '1';
@@ -329,15 +357,18 @@ return baseclass.extend({
 		// renderer already consumes, just kept available across handlers.
 		this._outbounds = outbounds;
 
-		// Map sub_id → human-readable name and display order. Two subscriptions
+		// Map uid → human-readable name and display order. Two subscriptions
 		// can carry nodes with identical tags; the label shown in the dropdown
 		// must make clear which subscription a tag comes from. Manual nodes
 		// (no subscription) and orphan tags (saved member whose source is
-		// gone) get their own ordering buckets.
+		// gone) get their own ordering buckets. The map is keyed by `uid`
+		// because that is what `n.subscription` carries (the stable file key,
+		// not the volatile cfgXXXX section name).
 		var subName = {}, subOrder = {};
 		uci.sections('prism', 'subscription').forEach(function(sub, idx) {
-			subName[sub['.name']]  = sub.name || sub['.name'];
-			subOrder[sub['.name']] = idx;
+			if (!sub.uid) return;
+			subName[sub.uid]  = sub.name || sub.uid;
+			subOrder[sub.uid] = idx;
 		});
 		function labelFor(tag, sub_id) {
 			if (sub_id && subName[sub_id])
@@ -682,8 +713,9 @@ return baseclass.extend({
 		// Restrict regex matching to nodes from selected sources. Empty =
 		// match across every source (the behaviour before this field existed).
 		// Sentinel `_manual` covers UCI-defined manual nodes; remaining values
-		// are subscription section names. Subscriptions are anonymous
-		// (cfgXXXX), so `_manual` cannot collide with a real subscription id.
+		// are subscription uids. `_manual` is non-hex and cannot collide with
+		// a uid; the install-time migration rewrites any pre-uid stored values
+		// (which used to be cfgXXXX section names) to the matching new uid.
 		o = s.taboption('group', form.MultiValue, 'urltest_regex_sources', _('Sources'),
 			_('Subscriptions whose nodes are evaluated against the pattern. ' +
 			  'Leave empty to match nodes from every source (current and future). ' +
@@ -695,7 +727,8 @@ return baseclass.extend({
 		o.widget = 'select';
 		o.value('_manual', _('Manual nodes'));
 		uci.sections('prism', 'subscription').forEach(function(sub) {
-			o.value(sub['.name'], sub.name || sub['.name']);
+			if (!sub.uid) return;
+			o.value(sub.uid, sub.name || sub.uid);
 		});
 		o.modalonly = true;
 		o.optional = true;
