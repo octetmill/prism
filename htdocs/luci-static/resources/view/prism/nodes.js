@@ -94,16 +94,18 @@ var TEST_TIMEOUT_MS = 3000;
 
 // Color-coded latency badge. Maps a probe result `{ delay_ms?, error? }` to a
 // span styled with the same label-* classes the rest of Prism uses.
-//  green   < 150 ms   (close / direct path)
-//  yellow  < 500 ms   (workable but slow)
-//  red     ≥ 500 ms   or any error
+// Thresholds match status.js _renderLatency so the Nodes Latency column and
+// the Status Groups Latency column agree on what 'yellow' means.
+//  green   < 300 ms   (workable proxy path)
+//  yellow  < 600 ms   (degraded)
+//  red     ≥ 600 ms   or any error
 function formatLatency(result) {
 	if (!result)
 		return E('span', { 'style': 'opacity:0.45;' }, [ '—' ]);
 	if (typeof result.delay_ms === 'number') {
 		var ms = result.delay_ms;
-		var cls = (ms < 150) ? 'label-success'
-		        : (ms < 500) ? 'label-warning'
+		var cls = (ms < 300) ? 'label-success'
+		        : (ms < 600) ? 'label-warning'
 		        :              'label-danger';
 		return E('span', {
 			'class': cls,

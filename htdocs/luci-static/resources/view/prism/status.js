@@ -538,15 +538,14 @@ return baseclass.extend({
 		];
 	},
 
-	// Compact latency badge, mirroring the nodes panel's colour bands
-	// (the constants there are private to that module; the bands are
-	// repeated here verbatim because shipping a shared utils module just
-	// for one function isn't worth a new require for the status page).
+	// Compact latency badge. Thresholds mirror nodes.js formatLatency
+	// (300/600 ms green→yellow→red) so the Status Groups column and the
+	// Nodes Latency column agree on what 'yellow' means.
 	_renderLatency: function(ms) {
 		if (typeof ms !== 'number' || ms <= 0)
 			return E('span', { 'style': 'opacity:0.5;' }, [ '—' ]);
 		var cls = 'label-success';
-		if (ms >= 800)      cls = 'label-danger';
+		if (ms >= 600)      cls = 'label-danger';
 		else if (ms >= 300) cls = 'label-warning';
 		return E('span', {
 			'class': cls,
