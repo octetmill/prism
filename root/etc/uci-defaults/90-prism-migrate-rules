@@ -17,7 +17,6 @@ set -f
 
 changed=0
 fakeip_seen=0
-provider_seen=""
 
 _copy_value() {
 	uci add_list "prism.$_sid.$_rtype=$1"
@@ -28,7 +27,7 @@ _copy_ruleset_provider() {
 }
 
 migrate_rule() {
-	local sid rtype uf nm src url label cs cc csrc opt
+	local sid rtype uf nm src url label cs cc opt
 	sid="$1"
 
 	config_get rtype "$sid" type ""
@@ -69,9 +68,7 @@ migrate_rule() {
 		;;
 	country)
 		config_get cc "$sid" country_code ""
-		config_get csrc "$sid" country_source "sagernet"
 		[ -n "$cc" ] && uci add_list "prism.$sid.country=$cc"
-		[ -n "$provider_seen" ] || provider_seen="$csrc"
 		;;
 	esac
 
@@ -93,7 +90,5 @@ config_foreach migrate_rule rule
 	uci -q get prism.dns >/dev/null 2>&1 || uci set prism.dns=dns
 	uci set prism.dns.fakeip_enabled=1
 }
-[ -n "$provider_seen" ] && uci set prism.global.country_provider="$provider_seen"
-
 uci commit prism
 exit 0
