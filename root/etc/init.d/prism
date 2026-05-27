@@ -254,6 +254,17 @@ start_service() {
 	config_get config_path global config_path /var/etc/prism/sing-box.json
 	config_get mode inbounds mode tproxy
 
+	# Several safety nets rely on config_path living on tmpfs (/var/etc/prism):
+	# the "refuse to start with no working config after reboot" gate at line
+	# 327, and the fact that a saved-broken config can't persist across a
+	# reboot. A user who points config_path at flash storage (e.g.
+	# /etc/sing-box/config.json) loses both guarantees. Warn once per start
+	# so the implication is visible in the Prism log without being noisy.
+	case "$config_path" in
+		/var/etc/prism/*|/var/run/prism/*|/tmp/*) ;;
+		*) prism_log warn "config: config_path '$config_path' is not on tmpfs — a broken config may persist across reboots and the no-working-config safety net is disabled" ;;
+	esac
+
 	# Regenerate the sing-box JSON to a side path and validate it there, then
 	# promote it over the live config_path only once it is known good. A
 	# rejected config therefore never overwrites the last working one — and,
