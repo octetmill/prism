@@ -119,9 +119,13 @@ function acGetPopup() {
 		if (acPopup.contains(ev.target) || ev.target === acState.input) return;
 		acClose();
 	});
-	// Reposition on scroll (popup uses fixed positioning, so a scroll under
-	// the modal would otherwise leave it stranded).
-	window.addEventListener('scroll', acClose, true);
+	// Close on scroll of any ancestor — the popup is fixed-positioned so a
+	// scroll underneath would otherwise leave it stranded. Scrolls inside
+	// the popup itself (its own overflow container) must NOT trigger this.
+	window.addEventListener('scroll', function(ev) {
+		if (acPopup && acPopup.contains(ev.target)) return;
+		acClose();
+	}, true);
 	window.addEventListener('resize', acClose);
 	return acPopup;
 }
