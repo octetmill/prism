@@ -26,19 +26,26 @@ set -f
 changed=0
 order=0
 
+_add_value() {
+	uci add_list "prism.$_cs.value=$1"
+}
+
 emit_condition() {
-	local sid kind op cs val
+	local sid kind op
 	sid="$1"; kind="$2"; op="$3"
 
-	cs=$(uci add prism condition)
-	uci set "prism.$cs.rule=$sid"
-	uci set "prism.$cs.order=$order"
-	uci set "prism.$cs.kind=$kind"
+	_cs=$(uci add prism condition)
+	uci set "prism.$_cs.rule=$sid"
+	uci set "prism.$_cs.order=$order"
+	uci set "prism.$_cs.kind=$kind"
 	# The first condition has no predecessor, so it carries no operator.
-	[ "$order" = "0" ] || uci set "prism.$cs.op=$op"
-	for val in $(uci -q get "prism.$sid.$kind" 2>/dev/null); do
-		uci add_list "prism.$cs.value=$val"
-	done
+	[ "$order" = "0" ] || uci set "prism.$_cs.op=$op"
+	# config_list_foreach respects UCI's quoting, so a domain_regex value
+	# like '^foo bar$' (legal regex with embedded whitespace) stays intact.
+	# The old $(uci get) word-splitting silently corrupted it into two
+	# entries '^foo' and 'bar$' — a one-shot migration only the user could
+	# notice after the fact.
+	config_list_foreach "$sid" "$kind" _add_value
 	order=$((order + 1))
 }
 
