@@ -447,6 +447,14 @@ local function build_node_from_uci(s)
 	if typ ~= "wireguard" and typ ~= "direct" and s.server and s.server ~= "" then
 		ob.server      = s.server
 		ob.server_port = tonumber(s.server_port) or 0
+		-- Warn loudly when the port is missing or non-numeric: sing-box
+		-- accepts port 0 in the config but every connect attempt then
+		-- hangs at dial time with no diagnostic trail. Surfacing the
+		-- cause here points the user at the offending node directly.
+		if ob.server_port == 0 then
+			io.stderr:write("prism build-config: node '" .. tag
+				.. "' has no valid server_port; dial attempts will fail\n")
+		end
 	end
 
 	if typ == "vless" then
@@ -539,6 +547,10 @@ local function build_node_from_uci(s)
 		if s.server and s.server ~= "" then
 			peer.address = s.server
 			peer.port    = tonumber(s.server_port) or 0
+			if peer.port == 0 then
+				io.stderr:write("prism build-config: WireGuard node '" .. tag
+					.. "' has no valid server_port; dial attempts will fail\n")
+			end
 		end
 		if s.wg_peer_public_key and s.wg_peer_public_key ~= "" then
 			peer.public_key = s.wg_peer_public_key
