@@ -43,20 +43,26 @@ ssh root@192.168.1.1 'apk add --allow-untrusted /tmp/luci-app-prism_*.apk && ser
 
 ## Versioning
 
-`PKG_VERSION` in the `Makefile` is the **next** release being worked
-toward, not the last one shipped. Bump it immediately after tagging a
+The git tag is the single source of truth for releases. Snapshots are
+derived from the most recent `v*` tag plus a commit-since-tag count, so
+the snapshot version is always honest about which release it follows.
+
+| Situation                                       | Example version |
+|---|---|
+| Snapshot, N commits past `v0.1.0`               | `0.1.0_git7-r1` |
+| Snapshot, no `v*` tag yet (bootstrap)           | `0.1.0_pre7-r1` |
+| Tag build (CI from `v0.1.0`)                    | `0.1.0-r1`      |
+| Tag build (CI from `v0.1.0-r2`)                 | `0.1.0-r2`      |
+
+APK suffix order puts `<tag>` < `<tag>_git<N>` < `<next-tag>`, so
+`apk upgrade` picks newer snapshots and never downgrades past the tag.
+`_git` is Alpine's conventional suffix for VCS snapshots taken after a
 release.
 
-| Situation | Example version |
-|---|---|
-| Snapshot build (any branch, no `v*` tag at HEAD) | `0.1.0_pre7-r1` |
-| Tag build (CI from `v0.1.0`)                     | `0.1.0-r1`      |
-| Tag build (CI from `v0.1.0-r2`)                  | `0.1.0-r2`      |
-
-Snapshots are `<PKG_VERSION>_pre<N>` where N = commits since the last
-`v*` tag. `PKG_RELEASE` resets to `1` when `PKG_VERSION` changes;
-increment it for packaging-only fixes (release as a `v<VERSION>-r<N>`
-tag).
+`PKG_VERSION` in the `Makefile` is **not** consulted by the standalone
+builder once any `v*` tag exists — it's only used by the OpenWrt SDK
+build path. Keep it set to a sensible value (typically the next planned
+release).
 
 ## Releasing
 
@@ -64,14 +70,14 @@ Releases are an explicit, deliberate act — pushing a `v*` tag is the
 release decision. Merges to `main` do not trigger releases.
 
 ```sh
-# 1. After merging the changes that constitute the release to main:
+# After merging the changes that constitute the release to main:
 git checkout main && git pull
 git tag -a v0.2.0 -m "Release 0.2.0"
 git push origin v0.2.0
-
-# 2. Bump PKG_VERSION in the Makefile to the next planned version
-#    and commit. Snapshots from then on will be <next>_pre<N>-r1.
 ```
+
+No Makefile edit is required. Snapshots from the next commit on will be
+`0.2.0_git<N>-r1` automatically.
 
 ## CI
 

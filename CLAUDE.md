@@ -162,10 +162,11 @@ endef
 APK enforces its own versioning rules. The version must follow `<major>.<minor>.<patch>` format.
 
 - Valid: `0.1.0`, `1.2.3`, `1.2.3.4`
-- Pre-release / git snapshot: use `_pre<N>` suffix (digits only) → `0.1.0_pre3`
+- Post-release git snapshot: use `_git<N>` suffix (digits only) → `0.1.0_git3` (= 3 commits past `v0.1.0`)
+- Pre-first-release bootstrap: `_pre<N>` suffix → `0.1.0_pre3`
 - Invalid: `~` character, hex hashes, date strings without dots, arbitrary strings — APK will reject these.
 
-The `~` character is **not** valid in APK version strings (unlike Debian). Use `_pre`, `_alpha`, `_beta`, `_rc`, or `_git` suffixes followed by digits only.
+The `~` character is **not** valid in APK version strings (unlike Debian). Use `_pre`, `_alpha`, `_beta`, `_rc` (pre-release, sort lower than the bare version) or `_git`, `_p` (post-release, sort higher) followed by digits only.
 
 **Architecture**: use `noarch` for architecture-independent packages — **not** `all` (which is Debian/opkg convention). `arch = all` in `.PKGINFO` causes APK to reject the package as invalid format.
 
@@ -781,17 +782,18 @@ automatically.
 
 **Versioning model:**
 
-- `PKG_VERSION` in the `Makefile` is the **next** release being worked toward, not the last one shipped. Bump it immediately after tagging a release. (`package.sh` parses it from the Makefile.)
-- Git tags (`v<VERSION>` or `v<VERSION>-r<N>`) record releases after the fact and are the source of truth for `release.yml`.
-- Snapshots are `<PKG_VERSION>_pre<N>-r<PKG_RELEASE>` where `N` = commits since the last `v*` tag (or total commits if no tag exists). Monotonic per commit; sorts before the eventual stable release in APK's ordering.
+- Git tags (`v<VERSION>` or `v<VERSION>-r<N>`) are the single source of truth for releases. The tag drives `release.yml`, which sets `PRISM_VERSION` and rebuilds the package at exactly that version.
+- Snapshots are derived from the most recent `v*` tag plus a commit-since-tag count: `<last-tag>_git<N>-r<PKG_RELEASE>`. APK suffix order puts `<tag>` < `<tag>_git<N>` < `<next-tag>`, so the version is always honest about which release it follows, monotonic per commit, and bounded by the previous and next releases.
+- `PKG_VERSION` in the `Makefile` is **not** part of the snapshot pipeline once a `v*` tag exists. The standalone builder consults it only in the bootstrap path (no tags yet). The OpenWrt SDK build path still reads it verbatim, so keep it set to a sensible value — typically the next planned release.
 
 **Version detection** (in priority order):
 
 1. `PRISM_VERSION` env var — set by `release.yml` from the pushed tag. `PRISM_RELEASE` may also be set for `-r<N>` packaging revisions.
-2. Otherwise (snapshot path): `PKG_VERSION` from the `Makefile` is suffixed with `_pre<N>` where `N` = commits since the last `v*` tag. Falls back to total commit count if no tag exists.
+2. Otherwise, with at least one `v*` tag in the repository: `<last-tag>_git<N>` where `N` = commits since that tag. `N = 0` (sitting on the tag) drops the suffix so a local build at the tag matches the tagged release.
+3. Otherwise (no `v*` tag yet — bootstrap): `<PKG_VERSION>_pre<N>` where `N` = total commits.
 
-The final package version is always `<version>-r<release>` (e.g. `0.1.0-r1` stable, `0.1.0_pre7-r1` snapshot).
-`PKG_RELEASE` resets to `1` when `PKG_VERSION` changes; increment it for packaging-only fixes (released as a `v<VERSION>-r<N>` tag).
+The final package version is always `<version>-r<release>` (e.g. `0.1.0-r1` stable, `0.1.0_git7-r1` snapshot, `0.1.0_pre7-r1` bootstrap).
+`PKG_RELEASE` is bumped only for packaging-only re-releases (released as a `v<VERSION>-r<N>` tag).
 
 ### Using the OpenWrt SDK
 
@@ -819,7 +821,7 @@ Both workflows live in `.github/workflows/` alongside `package.sh`.
 
 - Checks out with full history so `git rev-list` can count commits since the last tag.
 - Builds apk-tools 3.x from source (alpinelinux/apk-tools, pinned commit) so `apk mkpkg` is available.
-- Runs `package.sh` without `PRISM_VERSION` → version uses `_pre<N>` suffix (e.g. `0.1.0_pre7-r1`).
+- Runs `package.sh` without `PRISM_VERSION` → version uses `_git<N>` suffix off the last `v*` tag (e.g. `0.1.0_git7-r1`).
 - Publishes to a **rolling GitHub pre-release** tagged `snapshot`, with stable asset filenames so the install URL never changes:
   - `https://github.com/octetmill/prism/releases/download/snapshot/luci-app-prism-snapshot.apk`
   - `https://github.com/octetmill/prism/releases/download/snapshot/luci-app-prism-snapshot.ipk`
@@ -837,14 +839,18 @@ Releases are an explicit, deliberate act: pushing a `v*` tag is the release deci
 **Release procedure** (manual, two commands):
 
 ```sh
-# 1. After merging the changes that constitute the release to main:
+# After merging the changes that constitute the release to main:
 git checkout main && git pull
 git tag -a v0.2.0 -m "Release 0.2.0"
 git push origin v0.2.0
-
-# 2. Bump PKG_VERSION in the Makefile to the next planned version (e.g. 0.3.0)
-#    and commit. Snapshots from then on will be 0.3.0_pre<N>-r1.
 ```
+
+No Makefile edit is required — the tag drives the released version, and
+snapshots from the next commit on will be `0.2.0_git<N>-r1` automatically.
+
+`PKG_VERSION` in the `Makefile` is independent of releases now; bump it
+when you want the OpenWrt SDK build path to label its package with a
+different number (typically the next planned release).
 
 Requires `permissions: contents: write` — provided by the default `GITHUB_TOKEN`.
 

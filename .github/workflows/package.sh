@@ -111,17 +111,30 @@ done
 # ---------------------------------------------------------------------------
 # Version detection
 #
-# PKG_VERSION (from the Makefile) is the *next* release being worked toward. The git tag
-# records a release after the fact. The two coincide only at the moment of
-# tagging.
+# Releases are driven by the git tag: release.yml parses the v<X.Y.Z> tag and
+# sets PRISM_VERSION, which fully overrides whatever is in the Makefile.
+#
+# Snapshots are derived from the most recent v* tag plus a post-release
+# counter, so the snapshot version is always honest about which release it
+# follows. APK suffix ordering puts <tag> < <tag>_git<N> < <next-tag>, so
+# apk-upgrade picks newer snapshots and never downgrades past the tag.
+# (_git is Alpine's conventional suffix for VCS snapshots taken after a
+# release; _p reads as "upstream patch level" and would be misleading here.)
+#
+# PKG_VERSION from the Makefile is consulted only for the bootstrap path
+# below — no v* tag in the repository yet. Once the first tag is pushed,
+# the standalone builder ignores PKG_VERSION; only the OpenWrt SDK build
+# path still uses it as the package version verbatim.
 #
 # Priority:
 #   1. PRISM_VERSION env var — CI sets this when building from a v* tag.
 #      Value is the bare version (e.g. "0.1.0"); PRISM_RELEASE may also be
 #      provided to override PKG_RELEASE for -r<N> packaging revisions.
-#   2. Otherwise — snapshot: <PKG_VERSION>_pre<N>-r<PKG_RELEASE>
-#      where N = commits since the last v* tag (total commits if no tag).
-#      Monotonic per commit, sorts before the eventual stable release.
+#   2. Otherwise, with at least one v* tag — <last-tag>_git<N>-r<PKG_RELEASE>
+#      where N = commits since that tag. N=0 (HEAD is on the tag) drops the
+#      suffix so a local build at the tag matches the tagged release exactly.
+#   3. Otherwise (no v* tag yet) — <PKG_VERSION>_pre<N>-r<PKG_RELEASE>
+#      bootstrap before the first release; sorts before any 0.x.y tag.
 
 if [ -n "${PRISM_VERSION:-}" ]; then
 	PKG_VERSION="$PRISM_VERSION"
@@ -129,12 +142,19 @@ if [ -n "${PRISM_VERSION:-}" ]; then
 elif command -v git >/dev/null 2>&1 && git -C "$REPO_DIR" rev-parse --git-dir >/dev/null 2>&1; then
 	LAST_TAG=$(git -C "$REPO_DIR" describe --tags --match 'v[0-9]*' --abbrev=0 2>/dev/null || true)
 	if [ -n "$LAST_TAG" ]; then
-		PRE_N=$(git -C "$REPO_DIR" rev-list --count "${LAST_TAG}..HEAD")
+		POST_N=$(git -C "$REPO_DIR" rev-list --count "${LAST_TAG}..HEAD")
+		[ -n "$POST_N" ] || die "could not compute snapshot commit count (shallow clone?)"
+		BASE_VER="${LAST_TAG#v}"
+		if [ "$POST_N" -eq 0 ]; then
+			PKG_VERSION="$BASE_VER"
+		else
+			PKG_VERSION="${BASE_VER}_git${POST_N}"
+		fi
 	else
 		PRE_N=$(git -C "$REPO_DIR" rev-list --count HEAD)
+		[ -n "$PRE_N" ] || die "could not compute snapshot commit count (shallow clone?)"
+		PKG_VERSION="${PKG_VERSION}_pre${PRE_N}"
 	fi
-	[ -n "$PRE_N" ] || die "could not compute snapshot commit count (shallow clone?)"
-	PKG_VERSION="${PKG_VERSION}_pre${PRE_N}"
 fi
 
 # apk's release convention is <version>-r<release>; opkg/ipk uses
