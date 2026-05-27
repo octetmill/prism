@@ -704,6 +704,18 @@ return baseclass.extend({
 					: 'display:none;'
 			}, [ _('Paused for testing — will resume on next reboot.') ])
 		];
+		// Basic-mode first-run trap: service is enabled and running, but
+		// no servers are picked. compute_default_outbound returns "direct"
+		// so sing-box runs as a transparent forwarder and no traffic is
+		// actually proxied — the user has no signal that nothing is
+		// happening. Show an inline pointer to the Basic tab.
+		if (isBasic && state === 'running' && !active) {
+			rows.push(E('div', {
+				'class': 'alert-message warning',
+				'style': 'margin-top:0.6em;'
+			}, [ _('No server selected — open the Basic tab and pick at least ' +
+			       'one server, otherwise traffic bypasses the proxy.') ]));
+		}
 		if (!isBasic) {
 			rows.push(E('div', { 'style': 'margin-top:0.5em;' }, [
 				_('Subscriptions: %d').format(subCount),
