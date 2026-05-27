@@ -986,6 +986,14 @@ local function build_outbounds(c)
 					src_set = {}
 					for _, sid in ipairs(src_list) do src_set[sid] = true end
 				end
+				-- Per-source admit counts for the SEC-3 audit log. A regex
+				-- group that auto-admits subscription nodes is the SEC-3
+				-- attack surface (hostile sub ships nodes matching the
+				-- user's pattern, slots itself into the auto-pool).
+				-- Logging each source's contribution lets the user notice
+				-- a new sub joining; gating is left to the optional
+				-- urltest_regex_sources whitelist.
+				local by_source = {}
 				if type(ob.outbounds) ~= "table" or #ob.outbounds == 0 then
 					ob.outbounds = {}
 					for _, other in ipairs(all_ordered) do
@@ -993,7 +1001,18 @@ local function build_outbounds(c)
 						   and match_any(other.tag, pattern)
 						   and (not src_set or src_set[other._source or ""]) then
 							ob.outbounds[#ob.outbounds + 1] = other.tag
+							local src = other._source or "_manual"
+							by_source[src] = (by_source[src] or 0) + 1
 						end
+					end
+				end
+				-- Audit line per source that contributed. Skips "_manual" —
+				-- manual nodes by definition came from the user's own UCI.
+				for src, count in pairs(by_source) do
+					if src ~= "_manual" then
+						io.stderr:write("prism build-config: urltest '" .. ob.tag
+							.. "' regex admitted " .. count
+							.. " node(s) from subscription '" .. src .. "'\n")
 					end
 				end
 			end
@@ -1789,9 +1808,26 @@ end
 -- on a route.final or dns.servers[].detour pointing at a missing outbound, and
 -- the init.d fall-back-to-last-working logic hides the failure from the user;
 -- this surfaces the cause and keeps the new save valid.
-local function validate_tag(label, tag, tagset)
+--
+-- `originset[tag]` carries the origin info for that tag (one of "manual",
+-- "subscription <id>", "group"). Used to emit the SEC-4 audit line below:
+-- when a route or DNS reference resolves to a subscription LEAF node (not a
+-- group), it's unusual — the field is typically aimed at a group tag — and
+-- a hostile subscription that happened to ship a node matching the user's
+-- typed tag would silently fulfil the reference. We don't reject (the user
+-- may have intended it), but we surface it for audit.
+local function validate_tag(label, tag, tagset, originset)
 	if tag == nil or tag == "" or tag == "direct" or tag == "block" then return tag end
-	if tagset[tag] then return tag end
+	if tagset[tag] then
+		local origin = originset and originset[tag]
+		if origin and origin:sub(1, 13) == "subscription " then
+			io.stderr:write("prism build-config: " .. label .. " '"
+				.. tostring(tag) .. "' resolved to a " .. origin
+				.. " node — verify intent (route fields typically target groups, "
+				.. "not individual subscription nodes)\n")
+		end
+		return tag
+	end
 	io.stderr:write("prism build-config: " .. label .. " references unknown outbound '"
 		.. tostring(tag) .. "', falling back to 'direct'\n")
 	return "direct"
@@ -1809,14 +1845,24 @@ local function build_config(c)
 	-- references — surfaced by a deleted manual node or a renamed
 	-- subscription tag — would otherwise produce a config sing-box rejects,
 	-- and the init.d fallback would hide that from the user indefinitely.
-	local tagset = {}
-	for _, ob in ipairs(outbounds) do if ob.tag then tagset[ob.tag] = true end end
-	for _, ob in ipairs(endpoints) do if ob.tag then tagset[ob.tag] = true end end
-	route["final"] = validate_tag("route.final", route["final"], tagset)
+	local tagset    = {}
+	local originset = {}
+	local function classify(ob)
+		if ob.type == "urltest" or ob.type == "selector" then return "group" end
+		if ob._source == "_manual" or ob._source == nil then return "manual" end
+		return "subscription " .. tostring(ob._source)
+	end
+	for _, ob in ipairs(outbounds) do
+		if ob.tag then tagset[ob.tag] = true; originset[ob.tag] = classify(ob) end
+	end
+	for _, ob in ipairs(endpoints) do
+		if ob.tag then tagset[ob.tag] = true; originset[ob.tag] = classify(ob) end
+	end
+	route["final"] = validate_tag("route.final", route["final"], tagset, originset)
 	if type(dns.servers) == "table" then
 		for _, s in ipairs(dns.servers) do
 			if s.detour then
-				s.detour = validate_tag("dns.servers[" .. (s.tag or "?") .. "].detour", s.detour, tagset)
+				s.detour = validate_tag("dns.servers[" .. (s.tag or "?") .. "].detour", s.detour, tagset, originset)
 			end
 		end
 	end

@@ -686,7 +686,12 @@ return baseclass.extend({
 		// (cfgXXXX), so `_manual` cannot collide with a real subscription id.
 		o = s.taboption('group', form.MultiValue, 'urltest_regex_sources', _('Sources'),
 			_('Subscriptions whose nodes are evaluated against the pattern. ' +
-			  'Leave empty to match nodes from every source.'));
+			  'Leave empty to match nodes from every source (current and future). ' +
+			  'Restrict to specific subscriptions if you want a new feed to require ' +
+			  'an explicit opt-in before its tags can join this group — useful when ' +
+			  'the pattern is broad (e.g. country names) and a future provider ' +
+			  'might ship matching tags. The Prism log records which sources ' +
+			  'contributed members on each build.'));
 		o.widget = 'select';
 		o.value('_manual', _('Manual nodes'));
 		uci.sections('prism', 'subscription').forEach(function(sub) {
