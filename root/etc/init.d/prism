@@ -104,8 +104,14 @@ install_dns_dropin() {
 	confdir=$(dnsmasq_confdir)
 	dropin="$confdir/prism.conf"
 
-	# Sweep a drop-in left in the wrong directory by an older Prism.
-	[ "$confdir" = /tmp/dnsmasq.d ] || rm -f /tmp/dnsmasq.d/prism.conf
+	# Sweep drop-ins left in stale directories: the old fixed
+	# /tmp/dnsmasq.d location, plus every /tmp/dnsmasq.*.d the user's
+	# dnsmasq instance(s) may have used previously (e.g. after a UCI
+	# section rename). Glob may match nothing on a fresh system; the
+	# stray-files trap suppresses that case.
+	for stale in /tmp/dnsmasq.d/prism.conf /tmp/dnsmasq.*.d/prism.conf; do
+		[ -f "$stale" ] && [ "$stale" != "$dropin" ] && rm -f "$stale"
+	done
 
 	mkdir -p "$confdir"
 	cmp -s "$DNSMASQ_DROPIN_SRC" "$dropin" 2>/dev/null && return 0
@@ -116,10 +122,13 @@ install_dns_dropin() {
 }
 
 remove_dns_dropin() {
-	local confdir dropin removed
-	confdir=$(dnsmasq_confdir)
-	removed=0
-	for dropin in "$confdir/prism.conf" /tmp/dnsmasq.d/prism.conf; do
+	# Sweep every possible drop-in location, not just the dnsmasq section
+	# that currently resolves at @dnsmasq[0]: a UCI section rename or
+	# instance removal between start and stop would otherwise leave an
+	# orphan prism.conf that the renamed dnsmasq instance still picks up
+	# on next restart.
+	local dropin removed=0
+	for dropin in /tmp/dnsmasq.d/prism.conf /tmp/dnsmasq.*.d/prism.conf; do
 		[ -f "$dropin" ] && { rm -f "$dropin"; removed=1; }
 	done
 	[ "$removed" = 1 ] || return 0
