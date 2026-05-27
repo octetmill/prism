@@ -263,7 +263,28 @@ local function log_initial(current, context)
 	end
 end
 
+-- Lightweight UCI peek so the daemon notices a clash_api_enabled flip
+-- between procd reconciliations. Without it the loop keeps polling 9090
+-- after the user disables clash, eventually logging 'clash API
+-- unreachable for N polls' for a feature they explicitly turned off.
+local function clash_enabled()
+	local f = io.popen("uci -q get prism.global.clash_api_enabled 2>/dev/null")
+	if not f then return true end  -- can't tell → keep polling
+	local v = f:read("*a") or ""
+	f:close()
+	return (v:match("^%s*(%S*)") == "1")
+end
+
 while true do
+	if not clash_enabled() then
+		-- Reset transient state so a re-enable doesn't surface a stale
+		-- 'reachable again' on the first successful fetch.
+		fail_streak = 0
+		primed      = false
+		last_pid    = nil
+		flush_log()
+		os.execute("sleep " .. tostring(POLL_S))
+	else
 	local parsed = fetch_proxies()
 	if parsed then
 		if fail_streak >= FAIL_WARN_AFTER then
@@ -428,4 +449,5 @@ while true do
 	-- groups stays well inside the POLL_S budget.
 	flush_log()
 	os.execute("sleep " .. tostring(POLL_S))
+	end  -- else (clash_enabled)
 end
