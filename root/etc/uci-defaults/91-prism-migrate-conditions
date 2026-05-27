@@ -27,7 +27,8 @@ changed=0
 order=0
 
 emit_condition() {
-	local sid="$1" kind="$2" op="$3" cs val
+	local sid kind op cs val
+	sid="$1"; kind="$2"; op="$3"
 
 	cs=$(uci add prism condition)
 	uci set "prism.$cs.rule=$sid"
@@ -42,8 +43,9 @@ emit_condition() {
 }
 
 migrate_rule() {
-	local sid="$1"
-	local dk fk opt dest_kinds="" filter_kinds="" has_old=0
+	local sid dk fk opt dest_kinds filter_kinds has_old
+	sid="$1"
+	dest_kinds=""; filter_kinds=""; has_old=0
 
 	for opt in domain domain_suffix domain_keyword domain_regex \
 	           ip_cidr ruleset country protocol port; do

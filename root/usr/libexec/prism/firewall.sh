@@ -80,7 +80,8 @@ emit_bypasses() {
 # Log a Prism control-plane event to syslog. $1 is the severity
 # (info/notice/warn/err); the remaining args form the message.
 prism_log() {
-	local level="$1"
+	local level
+	level="$1"
 	shift
 	logger -p "daemon.$level" -t prism "$@"
 }
@@ -93,7 +94,8 @@ lan_device() {
 }
 
 apply_iprules() {
-	local inet6="$1"
+	local inet6
+	inet6="$1"
 
 	ip rule del fwmark "$MARK" table "$TABLE" 2>/dev/null
 	ip rule add fwmark "$MARK" table "$TABLE"
@@ -114,8 +116,9 @@ remove_iprules() {
 }
 
 build_nft() {
-	local port="$1" iface="$2" inet6="$3" self="$4"
-	local fakeip="$5" fakeip_v4="$6" fakeip_v6="$7"
+	local port iface inet6 self fakeip fakeip_v4 fakeip_v6
+	port="$1"; iface="$2"; inet6="$3"; self="$4"
+	fakeip="$5"; fakeip_v4="$6"; fakeip_v6="$7"
 
 	mkdir -p /var/etc/prism
 	{

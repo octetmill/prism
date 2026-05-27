@@ -15,8 +15,8 @@ fakeip_seen=0
 provider_seen=""
 
 migrate_rule() {
-	local sid="$1"
-	local rtype uf nm src url label cs n v cc csrc opt
+	local sid rtype uf nm src url label cs n v cc csrc opt
+	sid="$1"
 
 	config_get rtype "$sid" type ""
 	[ -n "$rtype" ] || return 0

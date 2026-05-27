@@ -20,7 +20,8 @@ PAUSE_MARKER=/var/run/prism.paused
 # Log a Prism control-plane event to syslog. $1 is the severity
 # (info/notice/warn/err); the remaining args form the message.
 prism_log() {
-	local level="$1"
+	local level
+	level="$1"
 	shift
 	logger -p "daemon.$level" -t prism "$@"
 }
@@ -30,7 +31,8 @@ install_crons() {
 	# maintenance tick (/usr/libexec/prism/hourly — subscription auto-update
 	# and the daily rule-set refresh, each self-gated inside that script) and
 	# one */5 recovery watchdog. Grep-gated, so this is a no-op once present.
-	local changed=0
+	local changed
+	changed=0
 
 	# Sweep the pre-consolidation sync-subscriptions / fetch-rulesets lines
 	# (and the pre-jitter fixed `0 * * * *` sync line) left by an older Prism;
@@ -42,9 +44,13 @@ install_crons() {
 	fi
 
 	# Hourly tick. Random minute 0–59 so a fleet of routers doesn't all hit
-	# the subscription / rule-set providers at the same instant.
+	# the subscription / rule-set providers at the same instant. awk (always
+	# present on OpenWrt) gives a POSIX-portable PRNG; $RANDOM is a bashism
+	# that busybox ash happens to support but POSIX does not.
 	grep -qsF "prism/hourly" /etc/crontabs/root 2>/dev/null || {
-		echo "$((RANDOM % 60)) * * * * /usr/libexec/prism/hourly" >> /etc/crontabs/root
+		local minute
+		minute=$(awk 'BEGIN{srand();print int(rand()*60)}')
+		echo "$minute * * * * /usr/libexec/prism/hourly" >> /etc/crontabs/root
 		changed=1
 	}
 
