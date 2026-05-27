@@ -722,6 +722,16 @@ return baseclass.extend({
 
 	// ── Status controls + polling ─────────────────────────────────────────
 
+	// Surface transport-level RPC failures (rpcd reload, network error,
+	// JSON parse) as a notification instead of letting them disappear
+	// into ui.createHandlerFn's generic handler. Without a .catch,
+	// _refreshStatusNow also doesn't run and the post-action refresh is
+	// silently skipped.
+	_notifyRpcError: function(label, err) {
+		var msg = (err && err.message) ? err.message : String(err);
+		ui.addNotification(null, E('p', label + ': ' + msg), 'error');
+	},
+
 	handleToggleEnabled: function(ev) {
 		var self = this;
 		var cb = document.getElementById('prism-enable-checkbox');
@@ -736,6 +746,9 @@ return baseclass.extend({
 					on ? _('Prism enabled.') : _('Prism disabled.')), 'info');
 			}
 			return self._refreshStatusNow();
+		}).catch(function(err) {
+			self._notifyRpcError(on ? _('Enable failed') : _('Disable failed'), err);
+			return self._refreshStatusNow();
 		});
 	},
 
@@ -743,10 +756,15 @@ return baseclass.extend({
 		var self = this;
 		return callStart().then(function(res) {
 			if (res && res.ok === false) {
-				ui.addNotification(null, E('p', _('Start failed — check the log below.')), 'error');
+				ui.addNotification(null, E('p',
+					res.error ? _('Start failed: ') + res.error
+					          : _('Start failed — check the log below.')), 'error');
 			} else {
 				ui.addNotification(null, E('p', _('Service started.')), 'info');
 			}
+			return self._refreshStatusNow();
+		}).catch(function(err) {
+			self._notifyRpcError(_('Start failed'), err);
 			return self._refreshStatusNow();
 		});
 	},
@@ -756,6 +774,9 @@ return baseclass.extend({
 		return callStop().then(function() {
 			ui.addNotification(null, E('p',
 				_('Service stopped — will resume on next reboot.')), 'info');
+			return self._refreshStatusNow();
+		}).catch(function(err) {
+			self._notifyRpcError(_('Stop failed'), err);
 			return self._refreshStatusNow();
 		});
 	},
@@ -768,6 +789,9 @@ return baseclass.extend({
 			} else {
 				ui.addNotification(null, E('p', _('Service restarted.')), 'info');
 			}
+			return self._refreshStatusNow();
+		}).catch(function(err) {
+			self._notifyRpcError(_('Restart failed'), err);
 			return self._refreshStatusNow();
 		});
 	},
