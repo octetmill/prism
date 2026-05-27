@@ -1930,10 +1930,21 @@ local methods = {
 			else
 				os.remove(tag_path)
 			end
+			-- Pre-flight: the fork-and-forget below loses any exec failure
+			-- (missing or non-executable runner after a partial upgrade)
+			-- because the shell only reports back the fork exit, not the
+			-- child's. Test executability synchronously so the UI gets a
+			-- clear error instead of spinning forever waiting for a
+			-- status file no runner will ever write.
+			local runner = "/usr/libexec/prism/test-all-runner"
+			if os.execute("test -x " .. runner) ~= 0 then
+				log_prism("err", "test_all: runner is missing or non-executable at " .. runner)
+				return { error = "runner unavailable" }
+			end
 			-- Fork-and-forget: redirect all FDs so the parent rpcd worker
 			-- can exit without waiting on the child's pipes. The Lua
 			-- runner then survives this RPC's return.
-			os.execute("/usr/libexec/prism/test-all-runner </dev/null >/dev/null 2>&1 &")
+			os.execute(runner .. " </dev/null >/dev/null 2>&1 &")
 			return { started = true }
 		end
 	},
