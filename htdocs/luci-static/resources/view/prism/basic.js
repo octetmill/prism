@@ -241,6 +241,21 @@ return baseclass.extend({
 		oPorts.value('common', _('Proxy only common ports (SSH, mail, DNS, web, messengers)'));
 		oPorts["default"] = 'all';
 
+		// Surface the single Advanced flag worth exposing in Basic: the
+		// clash API drives the Status panel's Traffic row and the per-group
+		// active-node display. Without this control, a user who enabled it
+		// in Advanced and then switched to Basic would have no way to turn
+		// it off (Settings tab is hidden). Bound to prism.global like the
+		// Advanced version, so toggling in either mode shows the other.
+		var sStats = m.section(form.NamedSection, 'global', 'prism', _('Status panel'));
+		sStats.addremove = false;
+		var oClash = sStats.option(form.Flag, 'clash_api_enabled',
+			_('Show traffic and active-node stats'),
+			_('Adds a loopback-only listener to sing-box (127.0.0.1:9090, ' +
+			  'never on the LAN) so the Status panel can display live ' +
+			  'throughput and which proxy node is currently active.'));
+		oClash.rmempty = false;
+
 		this.map = m;
 		return m.render().then(L.bind(this._postRender, this));
 	},
