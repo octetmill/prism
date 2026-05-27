@@ -45,12 +45,16 @@ end
 
 local function write_atomic(path, content)
 	local dir = path:gsub("/[^/]+$", "")
-	if dir ~= "" then os.execute("mkdir -p '" .. dir .. "' 2>/dev/null") end
+	if dir ~= "" then
+		os.execute("mkdir -p '" .. dir .. "' 2>/dev/null"
+			.. " && chmod 0700 '" .. dir .. "' 2>/dev/null")
+	end
 	local tmp = path .. ".tmp"
 	local f = io.open(tmp, "w")
 	if not f then return false end
 	f:write(content)
 	f:close()
+	os.execute("chmod 0600 '" .. tmp .. "' 2>/dev/null")
 	return os.rename(tmp, path) ~= nil
 end
 
@@ -67,6 +71,18 @@ local function bail(msg)
 	})
 	os.exit(1)
 end
+
+-- Cooperative lock so concurrent runners cannot race on STATUS / LATENCY /
+-- TMPDIR. Releases automatically when this process exits (any signal,
+-- including SIGKILL), so a previously-killed runner does not jam future
+-- runs the way a stale .test-all-status file on its own would. The lock
+-- supersedes the status file as the busy gate.
+local LOCK = "/var/lock/prism-test-all.lock"
+os.execute("mkdir -p /var/lock 2>/dev/null")
+if os.execute("lock -n " .. LOCK .. " 2>/dev/null") ~= 0 then
+	os.exit(0)
+end
+local function release_lock() os.execute("lock -u " .. LOCK .. " 2>/dev/null") end
 
 -- ─── start ───────────────────────────────────────────────────────────────
 local started_at = os.time()
@@ -243,3 +259,4 @@ update_status({
 
 -- Cleanup
 os.execute("rm -rf '" .. TMPDIR .. "' 2>/dev/null")
+release_lock()

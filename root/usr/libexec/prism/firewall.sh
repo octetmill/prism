@@ -57,9 +57,10 @@ emit_bypasses() {
 		[ -z "$value" ] && continue
 		case "$kind" in
 			mac)
-				# Reject anything that isn't a plausible MAC — nft errors on
-				# a malformed token would kill the whole ruleset load.
-				echo "$value" | grep -qE '^[0-9a-fA-F]{2}([:.-][0-9a-fA-F]{2}){5}$' \
+				# Reject anything that isn't a plausible MAC. nft accepts
+				# only colon-separated MACs, not dash- or dot-separated, so
+				# the regex is stricter than the JS validator.
+				echo "$value" | grep -qE '^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$' \
 					&& echo "		ether saddr $value accept"
 				;;
 			ip)
@@ -69,7 +70,12 @@ emit_bypasses() {
 							&& echo "		ip saddr $value accept"
 						;;
 					*:*)
-						echo "		ip6 saddr $value accept"
+						# Permissive IPv6 shape check: 2-7 colons, hex groups
+						# up to 4 chars, optional /prefix. Catches typos
+						# ("abc::", "fe80:gg::") before nft -f errors out on
+						# the whole ruleset.
+						echo "$value" | grep -qE '^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}(/[0-9]{1,3})?$' \
+							&& echo "		ip6 saddr $value accept"
 						;;
 				esac
 				;;
@@ -80,8 +86,10 @@ emit_bypasses() {
 # Log a Prism control-plane event to syslog. $1 is the severity
 # (info/notice/warn/err); the remaining args form the message.
 prism_log() {
-	local level="$1"
+	local level
+	level="$1"
 	shift
+	[ "$level" = "warn" ] && level=warning
 	logger -p "daemon.$level" -t prism "$@"
 }
 
@@ -93,7 +101,8 @@ lan_device() {
 }
 
 apply_iprules() {
-	local inet6="$1"
+	local inet6
+	inet6="$1"
 
 	ip rule del fwmark "$MARK" table "$TABLE" 2>/dev/null
 	ip rule add fwmark "$MARK" table "$TABLE"
@@ -114,8 +123,9 @@ remove_iprules() {
 }
 
 build_nft() {
-	local port="$1" iface="$2" inet6="$3" self="$4"
-	local fakeip="$5" fakeip_v4="$6" fakeip_v6="$7"
+	local port iface inet6 self fakeip fakeip_v4 fakeip_v6
+	port="$1"; iface="$2"; inet6="$3"; self="$4"
+	fakeip="$5"; fakeip_v4="$6"; fakeip_v6="$7"
 
 	mkdir -p /var/etc/prism
 	{

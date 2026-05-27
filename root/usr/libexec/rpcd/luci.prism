@@ -584,15 +584,37 @@ end
 -- { tag, type, server, server_port, payload } node tables. parse_subscription
 -- routes a body to exactly one extractor, so the body is parsed a single time.
 
+-- Tags Prism synthesises or sing-box treats as built-ins. A subscription
+-- node carrying one of these would collide with the generated outbound
+-- and either break the config or silently shadow the builtin in UI
+-- dropdowns. Drop them at parse time so they never reach the nodes JSON
+-- or list_subscription_nodes. Mirrors build-config's OUTBOUND_RESERVED_TAGS.
+local RESERVED_TAGS = {
+	direct          = true,
+	block           = true,
+	["basic-auto"]  = true,
+	_prism_test_all = true,
+}
+
 -- SingBox JSON: the outbounds array, minus builtin and group outbounds.
+-- ALLOWED_PROTOCOL is the same whitelist build-config's sanitiser enforces;
+-- having it here too means an unsupported type (notably `ssh`, `tor`, or
+-- a future sing-box outbound that takes a filesystem path argument) is
+-- rejected at parse time and never written to /etc/prism/nodes/*.json.
 local function extract_singbox(body)
 	local nodes = {}
 	if not _jsonc_ok then return nodes end
 	local ok, cfg = pcall(_jsonc.parse, body)
 	if not ok or not cfg or type(cfg.outbounds) ~= "table" then return nodes end
-	local SKIP = { direct=true, block=true, dns=true, selector=true, urltest=true }
+	local ALLOWED_PROTOCOL = {
+		vless = true, vmess = true, trojan = true, shadowsocks = true,
+		hysteria2 = true, tuic = true, anytls = true, socks = true,
+		wireguard = true,
+	}
 	for _, ob in ipairs(cfg.outbounds) do
-		if type(ob) == "table" and ob.tag and not SKIP[ob.type] then
+		if type(ob) == "table" and ob.tag and ALLOWED_PROTOCOL[ob.type]
+		   and not RESERVED_TAGS[ob.tag]
+		   and not ob.tag:find("[%c]") then
 			nodes[#nodes + 1] = {
 				tag         = ob.tag,
 				type        = ob.type or "",
@@ -611,6 +633,7 @@ local function extract_clash(body)
 	local in_proxies, fields = false, {}
 	local function flush()
 		local ob = build_clash_outbound(fields)
+		if ob and (RESERVED_TAGS[ob.tag] or ob.tag:find("[%c]")) then ob = nil end
 		if ob then
 			local payload
 			if _jsonc_ok then
@@ -670,7 +693,8 @@ local function extract_uris(text)
 	local nodes = {}
 	for line in (text .. "\n"):gmatch("([^\n]*)\n") do
 		local ob = parse_proxy_uri(line)
-		if ob and ob.server ~= "" then
+		if ob and ob.server ~= "" and not RESERVED_TAGS[ob.tag]
+		   and not ob.tag:find("[%c]") then
 			-- Keep the full sing-box outbound as the payload — that's what
 			-- build-config later splices verbatim into route.outbounds.
 			nodes[#nodes + 1] = {
@@ -729,7 +753,13 @@ end
 
 -- Log a Prism control-plane event to syslog. `level` is the severity
 -- (info/notice/warn/err) — mirrors the shell prism_log helper's convention.
+-- Normalise 'warn' to 'warning' before handing to logger: busybox logger
+-- accepts both, but the get_logs filter's SEV table only recognises the
+-- canonical POSIX spelling — so a syslog line tagged daemon.warn would
+-- otherwise classify as info (the SEV fallback) and a user-set
+-- prism_log_level=warning would silently fail to suppress info lines.
 local function log_prism(level, msg)
+	if level == "warn" then level = "warning" end
 	local safe = msg:gsub("'", "'\\''")
 	os.execute("logger -p daemon." .. level .. " -t prism '" .. safe .. "' 2>/dev/null")
 end
@@ -1010,6 +1040,10 @@ local function write_nodes_file(sub_id, nodes)
 	if not f then return false end
 	f:write(_jsonc.stringify(nodes))
 	f:close()
+	-- 0600: nodes file contains every subscription node's payload, which
+	-- in turn carries uuid/password/uri for each proxy. Default umask 0022
+	-- would let any local non-root daemon read them.
+	os.execute("chmod 0600 '" .. tmp:gsub("'", "'\\''") .. "' 2>/dev/null")
 	return os.rename(tmp, path) ~= nil
 end
 
@@ -1291,10 +1325,12 @@ local methods = {
 			-- existing installs that pre-date the basic-mode flag never get
 			-- the default `config prism 'basic'` section the new shipping
 			-- file ships. Without it, form.NamedSection on the Basic panel
-			-- renders the section title but skips every option underneath.
-			-- Prime the section here on the way into Basic so the UI always
-			-- has something to bind to; idempotent (no-op when present).
-			if m == "basic" and not c:get("prism", "basic") then
+			-- renders the section title but skips every option underneath,
+			-- and build_basic_route reads all-empty defaults. Prime the
+			-- section unconditionally so a CLI `uci set prism.global.mode=basic`
+			-- (which doesn't go through set_mode) followed by a UI mode-switch
+			-- to advanced and back also lands in a sane state; idempotent.
+			if not c:get("prism", "basic") then
 				c:set("prism", "basic", "prism")
 				c:set("prism", "basic", "routing", "all")
 				c:set("prism", "basic", "bypass_country", "cn")
@@ -1323,7 +1359,10 @@ local methods = {
 			c:close()
 
 			local preview_path = "/var/etc/prism/preview.json"
-			local hf = io.popen("/usr/libexec/prism/build-config '" .. preview_path .. "' 2>&1; echo __RC__$?")
+			-- --preview keeps build-config side-effect-free: no orphan node
+			-- file deletion, no dnsmasq drop-in rewrite. get_config is on
+			-- the read side of the ACL and must not mutate persistent state.
+			local hf = io.popen("/usr/libexec/prism/build-config --preview '" .. preview_path .. "' 2>&1; echo __RC__$?")
 			local output = ""
 			if hf then output = hf:read("*a") or ""; hf:close() end
 			local rc = tonumber(output:match("__RC__(%d+)") or "1") or 1
@@ -1380,7 +1419,7 @@ local methods = {
 				log_prism("warning", "config: extra.json rejected — invalid JSON object")
 				return { ok = false, error = "invalid JSON object" }
 			end
-			os.execute("mkdir -p /etc/prism 2>/dev/null")
+			os.execute("mkdir -p /etc/prism 2>/dev/null && chmod 0700 /etc/prism 2>/dev/null")
 			local tmp = "/etc/prism/extra.json.tmp"
 			local f = io.open(tmp, "w")
 			if not f then
@@ -1389,6 +1428,9 @@ local methods = {
 			end
 			f:write(raw)
 			f:close()
+			-- 0600: extra.json may contain overrides with credentials,
+			-- secret URLs, or per-protocol passwords.
+			os.execute("chmod 0600 '" .. tmp .. "' 2>/dev/null")
 			if not os.rename(tmp, "/etc/prism/extra.json") then
 				os.remove(tmp)
 				log_prism("warning", "config: extra.json rejected — rename failed")
@@ -1512,6 +1554,20 @@ local methods = {
 
 	start = {
 		call = function()
+			-- Manual start is for clearing a transient pause and booting
+			-- the service back up; it deliberately does NOT auto-flip the
+			-- persistent `enabled` flag (set_enabled does that, exposed
+			-- via the Status Enable toggle). If the service is disabled
+			-- at the UCI level, start_service returns 1 silently and the
+			-- user has no signal that nothing happened — surface an
+			-- actionable error so the UI can guide them to the toggle.
+			local c = uci_cursor()
+			local enabled = c:get("prism", "global", "enabled")
+			c:close()
+			if enabled ~= "1" then
+				return { ok = false,
+					error = "Prism is disabled — flip the Enable toggle first." }
+			end
 			os.remove("/var/run/prism.paused")
 			log_prism("notice", "service: manual start")
 			local rc = os.execute("/etc/init.d/prism start >/dev/null 2>&1")
@@ -1712,20 +1768,37 @@ local methods = {
 				return { groups = {}, updated_at = 0 }
 			end
 
+			-- Synthesised groups have no UCI section. basic-auto is the
+			-- Basic-mode urltest emitted by build-config when the user
+			-- picks more than one server; it carries fixed tuning, so
+			-- surface it with the same shape the urltest's UCI peers
+			-- would. _prism_test_all is filtered by active-watch's
+			-- underscore-prefix rule and never reaches the snapshot.
+			local SYNTHESISED = {
+				["basic-auto"] = { type = "urltest", interval = "5m", tolerance = "50" },
+			}
+
 			local out = {}
 			for tag, entry in pairs(parsed.groups) do
-				local u = uci_groups[tag] or {}
-				out[#out + 1] = {
-					tag       = tag,
-					type      = (entry.type == "URLTest") and "urltest"
-					            or (entry.type == "Selector") and "selector"
-					            or string.lower(tostring(entry.type or "")),
-					now       = entry.now or "",
-					delay_ms  = entry.delay_ms,
-					interval  = u.interval or "",
-					tolerance = u.tolerance or "",
-					default   = u.default or ""
-				}
+				local u = uci_groups[tag] or SYNTHESISED[tag]
+				-- Skip rows whose group has been deleted from UCI but
+				-- still lingers in the snapshot until sing-box's next
+				-- reload. Without this filter the UI would render a
+				-- confusing row with blank interval/tolerance/default
+				-- pointing at a group the user already removed.
+				if u then
+					out[#out + 1] = {
+						tag       = tag,
+						type      = (entry.type == "URLTest") and "urltest"
+						            or (entry.type == "Selector") and "selector"
+						            or string.lower(tostring(entry.type or "")),
+						now       = entry.now or "",
+						delay_ms  = entry.delay_ms,
+						interval  = u.interval or "",
+						tolerance = u.tolerance or "",
+						default   = u.default or ""
+					}
+				end
 			end
 			-- Stable order so the UI rows don't jump on each refresh —
 			-- pairs() over the snapshot is unordered. Sort by tag.
@@ -1785,9 +1858,18 @@ local methods = {
 		call = function(args)
 			local tag = type(args.tag) == "string" and args.tag or ""
 			local r = probe_node(tag, args.url, args.timeout_ms)
-			local cache = read_latency_cache()
-			cache.results[tag] = r
-			write_latency_cache(cache)
+			-- Only persist real probe results. probe_node returns
+			-- {error="clash API disabled"} / {error="tag required"}
+			-- before it ever hits the network — caching those would
+			-- overwrite the previous good delay_ms entry with a stale
+			-- error string that lingers until the next successful probe.
+			-- A real probe (success OR network-side failure) carries
+			-- `tested_at`, the discriminator.
+			if r.tested_at then
+				local cache = read_latency_cache()
+				cache.results[tag] = r
+				write_latency_cache(cache)
+			end
 			return r
 		end
 	},
@@ -1824,12 +1906,22 @@ local methods = {
 			end
 			-- If a previous runner is still alive (status file present
 			-- with running=true), refuse — two runners would race on the
-			-- cache file.
+			-- cache file. The runner also takes /var/lock/prism-test-all
+			-- so a SIGKILL'd runner cannot wedge future runs: even if its
+			-- status file still says running=true, the freshness check
+			-- below treats it as stale after 60s of no updated_at advance.
 			local raw = read_file("/var/etc/prism/.test-all-status")
 			if raw and raw ~= "" and _jsonc_ok then
 				local ok, st = pcall(_jsonc.parse, raw)
 				if ok and type(st) == "table" and st.running then
-					return { error = "test already running" }
+					local fresh = type(st.updated_at) == "number"
+						and (os.time() - st.updated_at) < 60
+					if fresh then
+						return { error = "test already running" }
+					end
+					log_prism("warn", "test_all: previous runner status stale ("
+						.. tostring(os.time() - (st.updated_at or 0))
+						.. "s), reclaiming")
 				end
 			end
 			-- Hand the runner an optional tag list. We write one tag per
@@ -1855,10 +1947,21 @@ local methods = {
 			else
 				os.remove(tag_path)
 			end
+			-- Pre-flight: the fork-and-forget below loses any exec failure
+			-- (missing or non-executable runner after a partial upgrade)
+			-- because the shell only reports back the fork exit, not the
+			-- child's. Test executability synchronously so the UI gets a
+			-- clear error instead of spinning forever waiting for a
+			-- status file no runner will ever write.
+			local runner = "/usr/libexec/prism/test-all-runner"
+			if os.execute("test -x " .. runner) ~= 0 then
+				log_prism("err", "test_all: runner is missing or non-executable at " .. runner)
+				return { error = "runner unavailable" }
+			end
 			-- Fork-and-forget: redirect all FDs so the parent rpcd worker
 			-- can exit without waiting on the child's pipes. The Lua
 			-- runner then survives this RPC's return.
-			os.execute("/usr/libexec/prism/test-all-runner </dev/null >/dev/null 2>&1 &")
+			os.execute(runner .. " </dev/null >/dev/null 2>&1 &")
 			return { started = true }
 		end
 	},
@@ -1904,32 +2007,34 @@ local methods = {
 		end
 	},
 
+	-- Pure read of the rule-set catalog cache. Returns the cached names plus
+	-- the cache age so the UI can decide whether to call refresh_rulesets.
+	-- Side-effect-free so it can stay on the ACL read side. The actual
+	-- network fetch is the separate refresh_rulesets RPC (write side).
 	list_rulesets = {
 		call = function()
 			local CACHE = "/etc/prism/rulesets-cache.json"
-			local TTL   = 7 * 24 * 3600
-
-			local function load_cache()
-				local f = io.open(CACHE, "r")
-				if not f then return nil end
-				local s = f:read("*a")
-				f:close()
-				local ok, obj = pcall(json_parse, s)
-				return (ok and type(obj) == "table") and obj or nil
+			local f = io.open(CACHE, "r")
+			if not f then return { names = {}, age = nil } end
+			local s = f:read("*a")
+			f:close()
+			local ok, obj = pcall(json_parse, s)
+			if not (ok and type(obj) == "table") then
+				return { names = {}, age = nil }
 			end
+			local age = (type(obj.ts) == "number") and (os.time() - obj.ts) or nil
+			return { names = obj.names or {}, age = age }
+		end
+	},
 
-			local cache = load_cache()
-			local fresh = cache and type(cache.ts) == "number"
-			              and (os.time() - cache.ts) < TTL
-
-			-- Spawn a background refresh; fetch-catalog self-locks via
-			-- busybox `lock` and exits silently if one is already running.
-			if not fresh then
-				os.execute("/usr/libexec/prism/fetch-catalog >/dev/null 2>&1 &")
-			end
-
-			-- Return immediately — caller falls back to static list on empty.
-			return { names = (cache and cache.names) or {} }
+	-- Trigger a background catalog refresh via fetch-catalog (outbound HTTPS
+	-- to GitHub). Write-side so a read-only LuCI user cannot cause outbound
+	-- network requests or flash writes. fetch-catalog self-locks via busybox
+	-- `lock` and exits silently if one is already running.
+	refresh_rulesets = {
+		call = function()
+			os.execute("/usr/libexec/prism/fetch-catalog >/dev/null 2>&1 &")
+			return { started = true }
 		end
 	}
 }

@@ -449,7 +449,8 @@ return baseclass.extend({
 		var el = document.getElementById('prism-extra-text');
 		if (!el) return;
 		var raw = el.value || '';
-		if (raw.match(/^\s*$/) === null) {
+		var isEmpty = (raw.match(/^\s*$/) !== null);
+		if (!isEmpty) {
 			try {
 				var parsed = JSON.parse(raw);
 				if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
@@ -466,7 +467,15 @@ return baseclass.extend({
 				ui.addNotification(null, E('p', res.error || _('Save failed.')), 'error');
 				return;
 			}
-			ui.addNotification(null, E('p', _('Overrides saved. Regenerate to see them applied.')), 'info');
+			// The backend deletes the file when raw is whitespace-only;
+			// tell the user that explicitly so they don't think they
+			// just saved something when they actually cleared overrides
+			// by hitting Save on a blank textarea.
+			ui.addNotification(null, E('p',
+				isEmpty
+					? _('Overrides cleared.')
+					: _('Overrides saved. Regenerate to see them applied.')),
+				'info');
 		}).catch(function() {
 			ui.addNotification(null, E('p', _('Save failed.')), 'error');
 		});

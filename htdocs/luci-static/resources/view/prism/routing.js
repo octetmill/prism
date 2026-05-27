@@ -22,6 +22,20 @@ var callListRulesets = rpc.declare({
 	expect: { '': {} }
 });
 
+var callRefreshRulesets = rpc.declare({
+	object: 'luci.prism',
+	method: 'refresh_rulesets',
+	expect: { '': {} }
+});
+
+// Catalog refresh is the once-a-week background fetch from GitHub. It used
+// to be implicit in list_rulesets (any read triggered the refresh on stale
+// cache), but that put outbound network requests on the ACL read side. Now
+// the load() call asks for the cached data, then explicitly requests a
+// refresh only when the cache is older than the TTL. The refresh is
+// fire-and-forget; the next page load picks up the new names.
+var RULESET_CACHE_TTL_S = 7 * 24 * 3600;
+
 var callListDhcpLeases = rpc.declare({
 	object: 'luci.prism',
 	method: 'list_dhcp_leases',
@@ -427,7 +441,15 @@ return baseclass.extend({
 			callListOutbounds().catch(function() { return {}; }),
 			callListRulesets().catch(function() { return {}; }),
 			callListDhcpLeases().catch(function() { return {}; })
-		]);
+		]).then(function(results) {
+			// Fire-and-forget catalog refresh if the cache is stale or absent.
+			// Returns immediately; the next render() picks up the new names.
+			var rs = results[2] || {};
+			if (rs.age == null || rs.age > RULESET_CACHE_TTL_S) {
+				callRefreshRulesets().catch(function() {});
+			}
+			return results;
+		});
 	},
 
 	render: function(data) {
@@ -725,14 +747,28 @@ return baseclass.extend({
 			var kind = (kindOpts && kindOpts[0])
 				? (kindOpts[0].formvalue(section_id) || 'mac') : 'mac';
 			if (kind === 'mac') {
-				if (!/^[0-9a-fA-F]{2}([:.-][0-9a-fA-F]{2}){5}$/.test(value))
+				// nft only accepts colon-separated MACs; reject '-' and '.'
+				// up front so saved values match firewall.sh's regex.
+				if (!/^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$/.test(value))
 					return _('Not a valid MAC address.');
-			} else {
-				// IPv4 dotted-quad, with optional /N for the v2-CIDR case.
-				// IPv6 short-form for completeness; the firewall handles
-				// both transparently.
-				if (!/^([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+|[0-9a-fA-F:]+)(\/[0-9]+)?$/.test(value))
+			} else if (value.indexOf(':') === -1) {
+				// IPv4 dotted-quad. Octet-range check rejects '999.999...'.
+				var m = value.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)(?:\/(\d+))?$/);
+				if (!m)
 					return _('Not a valid IP address.');
+				for (var i = 1; i <= 4; i++)
+					if (parseInt(m[i], 10) > 255)
+						return _('Not a valid IP address.');
+				if (m[5] != null && parseInt(m[5], 10) > 32)
+					return _('Prefix length must be 0–32 for IPv4.');
+			} else {
+				// IPv6 shape check matching firewall.sh's nft validator:
+				// 2–7 colons, hex groups up to 4 chars, optional /prefix.
+				if (!/^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}(\/\d{1,3})?$/.test(value))
+					return _('Not a valid IPv6 address.');
+				var pm = value.match(/\/(\d+)$/);
+				if (pm && parseInt(pm[1], 10) > 128)
+					return _('Prefix length must be 0–128 for IPv6.');
 			}
 			return true;
 		};

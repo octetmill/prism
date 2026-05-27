@@ -19,7 +19,7 @@
 'require view.prism.settings as settingsPanel';
 'require view.prism.basic as basicPanel';
 
-var TABS_EXPERT = [
+var TABS_ADVANCED = [
 	{ id: 'status',   label: _('Status'),   panel: statusPanel },
 	{ id: 'nodes',    label: _('Nodes'),    panel: nodesPanel },
 	{ id: 'routing',  label: _('Routing'),  panel: routingPanel },
@@ -53,6 +53,18 @@ var callSetMode = rpc.declare({
 	expect: { '': {} }
 });
 
+// Count the staged UCI operations in the dict uci.changes() resolves to.
+// Shape is { configName: [ [op, section, option, value?], … ] }; an empty
+// dict means nothing is staged. Defensive against null/undefined arms.
+function _changeCount(changes) {
+	var n = 0;
+	for (var k in changes) {
+		if (changes.hasOwnProperty(k) && Array.isArray(changes[k]))
+			n += changes[k].length;
+	}
+	return n;
+}
+
 return view.extend({
 	// The host owns its own footers per active panel; suppress the framework one.
 	handleSave:      null,
@@ -69,7 +81,7 @@ return view.extend({
 	render: function() {
 		this._mountGen = 0;
 		this._mode = this._readMode();
-		this._tabs = (this._mode === 'basic') ? TABS_BASIC : TABS_EXPERT;
+		this._tabs = (this._mode === 'basic') ? TABS_BASIC : TABS_ADVANCED;
 		this._topMenu = E('ul', { 'class': 'cbi-tabmenu' }, []);
 		this._content = E('div', { 'class': 'prism-tab-content' }, []);
 		this._shell = E('div', { 'class': 'cbi-map' }, [
@@ -165,34 +177,66 @@ return view.extend({
 	},
 
 	_handleModeSwitch: function(target) {
-		if (target === 'advanced') {
+		// The switch finishes with window.location.reload(), which drops any
+		// staged-but-not-applied UCI changes on the floor. Warn the user
+		// rather than silently throwing their edits away. uci.changes() is
+		// an rpc.declare() in LuCI's JS API and returns a Promise resolving
+		// to { config: [ [op, section, option, value?], … ] } — calling
+		// Object.keys on the Promise itself silently yields [], so we have
+		// to await the resolution before counting.
+		var self = this;
+		return uci.changes().then(function(changes) {
+			return self._showModeSwitchModal(target, _changeCount(changes));
+		});
+	},
+
+	_showModeSwitchModal: function(target, dirty) {
+		if (target === 'advanced' && !dirty) {
 			return this._applyModeSwitch(target);
 		}
-		// Advanced → Basic: show the rules of the new mode once. The action
-		// itself is non-destructive but the running config will change shape.
-		ui.showModal(_('Switch to Basic mode?'), [
-			E('p', {}, [ _(
-				'Basic mode hides Nodes, Routing and Settings and builds the running ' +
+
+		var title, body, confirm;
+		if (target === 'basic') {
+			title = _('Switch to Basic mode?');
+			body  = _('Basic mode hides Nodes, Routing and Settings and builds the running ' +
 				'sing-box config from the Basic tab only. Your advanced configuration ' +
-				'is kept on disk and will be active again when you switch back to Advanced.'
-			) ]),
-			E('div', { 'class': 'right' }, [
-				E('button', {
-					'class': 'btn',
-					'click': ui.hideModal
-				}, [ _('Cancel') ]),
-				' ',
-				E('button', {
-					'class': 'btn cbi-button-apply',
-					'click': ui.createHandlerFn(this, '_applyModeSwitch', target)
-				}, [ _('Switch to Basic') ])
-			])
-		]);
+				'is kept on disk and will be active again when you switch back to Advanced.');
+			confirm = _('Switch to Basic');
+		} else {
+			title = _('Switch to Advanced mode?');
+			body  = _('Advanced mode exposes Nodes, Routing and Settings.');
+			confirm = _('Switch to Advanced');
+		}
+
+		var children = [ E('p', {}, [ body ]) ];
+		if (dirty) {
+			children.push(E('p', { 'class': 'alert-message warning' }, [
+				_('You have unsaved changes on this page. Switching mode reloads ' +
+				  'the page and discards them.')
+			]));
+		}
+		children.push(E('div', { 'class': 'right' }, [
+			E('button', { 'class': 'btn', 'click': ui.hideModal }, [ _('Cancel') ]),
+			' ',
+			E('button', {
+				'class': 'btn cbi-button-apply',
+				'click': ui.createHandlerFn(this, '_applyModeSwitch', target)
+			}, [ confirm ])
+		]));
+		ui.showModal(title, children);
 	},
 
 	_applyModeSwitch: function(target) {
 		ui.hideModal();
-		return callSetMode(target).then(function() {
+		// Drop any staged changes too: keeping them would re-trigger LuCI's
+		// "apply pending changes" banner on the freshly reloaded page in the
+		// other mode, where some of those changes may reference UCI sections
+		// the new mode's UI doesn't expose. ui.changes.revert() is a no-op
+		// when there's nothing staged, so call it unconditionally — cheaper
+		// than another uci.changes() round-trip just to check.
+		return ui.changes.revert().then(function() {
+			return callSetMode(target);
+		}).then(function() {
 			// Drop the stored tab id so the new mode lands on its first tab
 			// cleanly instead of being redirected through the cross-mode map.
 			session.setLocalData('prism.activeTab', '');
@@ -246,6 +290,11 @@ return view.extend({
 		var gen = ++this._mountGen;
 
 		if (this._panel && typeof this._panel._teardown === 'function') {
+			// Swallowed by design: _teardown's job is to clear timers
+			// and abort polls. A throw here cannot meaningfully block
+			// the mode/tab switch the user just initiated — but it
+			// must not crash _activate either, leaving the host in
+			// an inconsistent state with the new panel half-mounted.
 			try { this._panel._teardown(); } catch (e) {}
 		}
 		this._panel = null;

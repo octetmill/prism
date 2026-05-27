@@ -94,16 +94,18 @@ var TEST_TIMEOUT_MS = 3000;
 
 // Color-coded latency badge. Maps a probe result `{ delay_ms?, error? }` to a
 // span styled with the same label-* classes the rest of Prism uses.
-//  green   < 150 ms   (close / direct path)
-//  yellow  < 500 ms   (workable but slow)
-//  red     ≥ 500 ms   or any error
+// Thresholds match status.js _renderLatency so the Nodes Latency column and
+// the Status Groups Latency column agree on what 'yellow' means.
+//  green   < 300 ms   (workable proxy path)
+//  yellow  < 600 ms   (degraded)
+//  red     ≥ 600 ms   or any error
 function formatLatency(result) {
 	if (!result)
 		return E('span', { 'style': 'opacity:0.45;' }, [ '—' ]);
 	if (typeof result.delay_ms === 'number') {
 		var ms = result.delay_ms;
-		var cls = (ms < 150) ? 'label-success'
-		        : (ms < 500) ? 'label-warning'
+		var cls = (ms < 300) ? 'label-success'
+		        : (ms < 600) ? 'label-warning'
 		        :              'label-danger';
 		return E('span', {
 			'class': cls,
@@ -943,8 +945,18 @@ return baseclass.extend({
 
 	// Single-node probe. `btn` is the row's Test button; spin it in place
 	// (preserves width/height so the row doesn't jump) until the RPC settles.
+	// Refuses while a "Test all" batch is in flight — both write the same
+	// /var/etc/prism/latency.json with no coordination, and a per-row probe
+	// during a batch silently rolls back the runner's progress on its next
+	// atomic write.
 	_testOne: function(btn, tag) {
 		var self = this;
+		if (this._testAllRunning) {
+			ui.addNotification(null,
+				E('p', _('A latency test run is already in progress.')),
+				'info');
+			return Promise.resolve();
+		}
 		var label = btn.textContent;
 		var w = btn.offsetWidth, h = btn.offsetHeight;
 		btn.classList.add('spinning');
@@ -1036,6 +1048,7 @@ return baseclass.extend({
 			return Promise.resolve();
 		}
 		this._testAllRunning = true;
+		this._testAllAborted = false;
 
 		var self = this;
 		ui.hideModal();
@@ -1067,7 +1080,8 @@ return baseclass.extend({
 
 	// Drive the poll loop while the background runner does its work.
 	// Each tick: ask for status, refresh cells from the cache, update
-	// the banner's elapsed counter. Stops when status.running flips off.
+	// the banner's elapsed counter. Stops when status.running flips off,
+	// when the safety timeout trips, or when the panel is torn down.
 	_pollTestAll: function(elapsedEl, banner) {
 		var self = this;
 		var startMs = Date.now();
@@ -1089,6 +1103,10 @@ return baseclass.extend({
 			}
 
 			function tick() {
+				if (self._testAllAborted) {
+					resolve({ aborted: true });
+					return;
+				}
 				if (Date.now() - startMs > MAX_ELAPSED_MS) {
 					reject(new Error(_('runner timed out (status file never cleared)')));
 					return;
@@ -1103,13 +1121,13 @@ return baseclass.extend({
 					if (status && !status.running) {
 						resolve(status);
 					} else {
-						setTimeout(tick, POLL_INTERVAL);
+						self._testAllTimer = setTimeout(tick, POLL_INTERVAL);
 					}
 				}).catch(function() {
-					setTimeout(tick, POLL_INTERVAL);
+					self._testAllTimer = setTimeout(tick, POLL_INTERVAL);
 				});
 			}
-			setTimeout(tick, POLL_INTERVAL);
+			self._testAllTimer = setTimeout(tick, POLL_INTERVAL);
 		}).then(function(status) {
 			self._testAllRunning = false;
 			if (banner && banner.parentNode)
@@ -1174,5 +1192,19 @@ return baseclass.extend({
 
 	handleSave:      function() { return formpanel.save(this); },
 	handleSaveApply: function() { return formpanel.saveApply(this); },
-	handleReset:     function() { return formpanel.resetGrid(this); }
+	handleReset:     function() { return formpanel.resetGrid(this); },
+
+	// Called by the host (main.js _activate) when the panel is being
+	// replaced. Stop the Test-all poll loop so it doesn't keep firing
+	// against a detached panel, and clear the running flag so a fresh
+	// mount can start a new Test-all instead of being silently inert
+	// until the 3-min MAX_ELAPSED_MS cap trips.
+	_teardown: function() {
+		this._testAllAborted = true;
+		if (this._testAllTimer) {
+			clearTimeout(this._testAllTimer);
+			this._testAllTimer = null;
+		}
+		this._testAllRunning = false;
+	}
 });

@@ -23,7 +23,6 @@
 'require rpc';
 'require ui';
 'require uci';
-'require session';
 'require view.prism.lib.formpanel as formpanel';
 
 var callListSubNodes = rpc.declare({
@@ -43,13 +42,6 @@ var callSyncSubscription = rpc.declare({
 var callReloadIfChanged = rpc.declare({
 	object: 'luci.prism',
 	method: 'reload_if_changed',
-	expect: { '': {} }
-});
-
-var callSetMode = rpc.declare({
-	object: 'luci.prism',
-	method: 'set_mode',
-	params: ['mode'],
 	expect: { '': {} }
 });
 
@@ -81,7 +73,11 @@ return baseclass.extend({
 			var subs = uci.sections('prism', 'subscription');
 			var calls = subs.map(function(sub) {
 				return callListSubNodes(sub['.name']).catch(function() {
-					return { nodes: [] };
+					// Mark the failure so the panel can surface it
+					// instead of silently dropping the sub's servers
+					// from the picker (which previously looked
+					// indistinguishable from "this sub has no nodes").
+					return { nodes: [], _failed: true };
 				});
 			});
 			return Promise.all(calls).then(function(results) {
@@ -94,15 +90,24 @@ return baseclass.extend({
 				// so the dropdown only offers real endpoints.
 				var GROUP_TYPES = { urltest: true, selector: true };
 				var nodes = [];
+				var failed = [];
 				results.forEach(function(r, i) {
 					var subId   = subs[i]['.name'];
 					var subName = subs[i].name || subId;
+					if (r._failed) { failed.push(subName); return; }
 					(r.nodes || []).forEach(function(n) {
 						if (n.tag && !GROUP_TYPES[n.type]) nodes.push({
 							tag: n.tag, sub_id: subId, sub_name: subName
 						});
 					});
 				});
+				if (failed.length) {
+					ui.addNotification(null, E('p',
+						_('Could not load nodes from %d subscription(s): %s. ' +
+						  'Try syncing them on the Subscriptions section.')
+							.format(failed.length, failed.join(', '))),
+						'warning');
+				}
 				return nodes;
 			});
 		});
@@ -241,6 +246,21 @@ return baseclass.extend({
 		oPorts.value('common', _('Proxy only common ports (SSH, mail, DNS, web, messengers)'));
 		oPorts["default"] = 'all';
 
+		// Surface the single Advanced flag worth exposing in Basic: the
+		// clash API drives the Status panel's Traffic row and the per-group
+		// active-node display. Without this control, a user who enabled it
+		// in Advanced and then switched to Basic would have no way to turn
+		// it off (Settings tab is hidden). Bound to prism.global like the
+		// Advanced version, so toggling in either mode shows the other.
+		var sStats = m.section(form.NamedSection, 'global', 'prism', _('Status panel'));
+		sStats.addremove = false;
+		var oClash = sStats.option(form.Flag, 'clash_api_enabled',
+			_('Show traffic and active-node stats'),
+			_('Adds a loopback-only listener to sing-box (127.0.0.1:9090, ' +
+			  'never on the LAN) so the Status panel can display live ' +
+			  'throughput and which proxy node is currently active.'));
+		oClash.rmempty = false;
+
 		this.map = m;
 		return m.render().then(L.bind(this._postRender, this));
 	},
@@ -283,13 +303,12 @@ return baseclass.extend({
 	},
 
 	_switchToAdvanced: function() {
-		return callSetMode('advanced').then(function() {
-			session.setLocalData('prism.activeTab', '');
-			window.location.reload();
-		}).catch(function(err) {
-			ui.addNotification(null, E('p', _('Mode switch failed: ') +
-				((err && err.message) ? err.message : err)), 'error');
-		});
+		// Delegate to the host: main.js owns set_mode plus the
+		// unsaved-changes warning and the staged-changes revert step.
+		// _prismHost is set by main.js _activate when the panel mounts.
+		if (this._prismHost && typeof this._prismHost._handleModeSwitch === 'function') {
+			return this._prismHost._handleModeSwitch('advanced');
+		}
 	},
 
 	handleSave:      function() { return formpanel.save(this); },

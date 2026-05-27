@@ -11,14 +11,27 @@ your router's admin page — no JSON editing required.
 
 ## What you get
 
-A single **Services → Prism** page in LuCI, organised into four tabs:
+A single **Services → Prism** page in LuCI with two modes — flip between
+them via the chip in the upper-right of the tab bar.
+
+**Basic mode** (default for new installs) keeps the surface tight:
 
 | Tab | What it does |
 |---|---|
-| **Status**   | See whether sing-box is running, start / stop / restart it, view the live log, peek at the generated config. |
-| **Nodes**    | Add proxy subscriptions that auto-refresh on a schedule; or paste in individual nodes by hand. Supports VLESS, VMess, Trojan, Shadowsocks, Hysteria2, TUIC, AnyTLS, WireGuard and SOCKS. |
-| **Routing**  | Build routing rules with AND/OR conditions (domain match, IP/CIDR, rule-set, protocol, port), pick the outbound per rule, and configure rule-set sources. |
-| **Settings** | Inbound mode, DNS upstreams, rule-set delivery, logging and a handful of advanced overrides. |
+| **Status** | Service running / stopped, traffic counters, currently active node. Inline hint if you forgot to pick a server. |
+| **Basic**  | Add subscriptions, pick one or more servers (multiple = auto-fastest via urltest), proxy all ports or only the common ones, optionally bypass one country directly. |
+
+**Advanced mode** exposes the full control surface:
+
+| Tab | What it does |
+|---|---|
+| **Status**   | Everything Basic shows, plus the active-groups panel, subscription / rule counters, sing-box version, the full log and the generated config. |
+| **Nodes**    | Subscription management plus hand-pasted nodes (VLESS, VMess, Trojan, Shadowsocks, Hysteria2, TUIC, AnyTLS, WireGuard, SOCKS), urltest / selector groups, per-node latency testing. |
+| **Routing**  | Rules with AND/OR conditions (domain match, IP/CIDR, rule-set, protocol, port), per-rule outbound, rule-set sources, bypass entries. |
+| **Settings** | Inbound mode, DNS upstreams, rule-set delivery, logging, latency-test API toggle, JSON overrides. |
+
+Switching between modes is non-destructive: your Advanced configuration
+stays on disk, and switching back picks up where you left off.
 
 Everything is stored in standard UCI config (`/etc/config/prism`); the
 sing-box JSON config is generated for you.
@@ -123,4 +136,12 @@ decisions is in [`docs/decisions.md`](docs/decisions.md).
 
 ## License
 
-GPL-3.0-only
+GPL-3.0-only — see [`LICENSE`](LICENSE) for the full text.
+
+The packaged `.apk` / `.ipk` runs a comment-stripping pass over the
+source on its way into the install tree, so the on-router copy is
+about half the size of the repo source. The `SPDX-License-Identifier`
+and `Copyright` headers are preserved on every installed file, and
+the package's `license:` metadata field records `GPL-3.0-only`. The
+repo source is the canonical, fully-commented form — clone the repo
+if you want to read the code with its design notes intact.

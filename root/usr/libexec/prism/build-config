@@ -56,6 +56,13 @@ local uci_list_or_string = lib.uci_list
 
 local BASIC_AUTO_TAG = "basic-auto"
 
+-- --preview / -n on the command line: pure-read mode for the get_config
+-- RPC. Suppresses the side effects (orphan node-file deletion in
+-- load_subscription_nodes, dnsmasq drop-in rewrite at end of main) so a
+-- read-only LuCI user invoking get_config cannot trigger file deletion or
+-- overwrite the dnsmasq drop-in on demand. Set in main() below.
+local PREVIEW_MODE = false
+
 local function read_mode(c)
 	local m = c:get("prism", "global", "mode")
 	if m == "basic" or m == "advanced" then return m end
@@ -66,15 +73,17 @@ end
 -- Used by build_dns to decide whether the `remote` DNS server is detoured
 -- through a proxy (so the lookup exits the same way the connection will) and
 -- whether the DNS `final` resolves via remote or local. Advanced reads it from
--- prism.routing.final_outbound; Basic derives it from prism.basic.server —
--- either the single selected node, or BASIC_AUTO_TAG when N>1 wraps them in
--- a urltest. With zero servers Basic has no proxy default so this returns
--- "direct" and DNS stays on the local resolver, same as Advanced with no rules.
+-- prism.routing.final_outbound; Basic derives it from prism.basic.server via
+-- resolve_basic_members so a stale selection (subscription removed, node
+-- renamed) is filtered out before it can leak into route.final as a dangling
+-- tag — defined below load_subscription_nodes so it can do the resolution.
+local resolve_basic_members  -- forward declaration, defined after load_subscription_nodes
+
 local function compute_default_outbound(c)
 	if read_mode(c) == "basic" then
-		local servers = uci_list_or_string(c:get_all("prism", "basic") or {}, "server")
-		if #servers == 0 then return "direct" end
-		if #servers == 1 then return servers[1] end
+		local members = resolve_basic_members(c)
+		if #members == 0 then return "direct" end
+		if #members == 1 then return members[1] end
 		return BASIC_AUTO_TAG
 	end
 	local fin = c:get("prism", "routing", "final_outbound") or ""
@@ -438,6 +447,14 @@ local function build_node_from_uci(s)
 	if typ ~= "wireguard" and typ ~= "direct" and s.server and s.server ~= "" then
 		ob.server      = s.server
 		ob.server_port = tonumber(s.server_port) or 0
+		-- Warn loudly when the port is missing or non-numeric: sing-box
+		-- accepts port 0 in the config but every connect attempt then
+		-- hangs at dial time with no diagnostic trail. Surfacing the
+		-- cause here points the user at the offending node directly.
+		if ob.server_port == 0 then
+			io.stderr:write("prism build-config: node '" .. tag
+				.. "' has no valid server_port; dial attempts will fail\n")
+		end
 	end
 
 	if typ == "vless" then
@@ -530,6 +547,10 @@ local function build_node_from_uci(s)
 		if s.server and s.server ~= "" then
 			peer.address = s.server
 			peer.port    = tonumber(s.server_port) or 0
+			if peer.port == 0 then
+				io.stderr:write("prism build-config: WireGuard node '" .. tag
+					.. "' has no valid server_port; dial attempts will fail\n")
+			end
 		end
 		if s.wg_peer_public_key and s.wg_peer_public_key ~= "" then
 			peer.public_key = s.wg_peer_public_key
@@ -592,10 +613,156 @@ local function build_node_from_uci(s)
 	return ob
 end
 
--- direct / block are builtin outbounds added at emission. A node — manual
--- or from a (possibly hostile) subscription — carrying one of those tags
--- would collide and make sing-box reject the whole config, so drop it.
-local OUTBOUND_RESERVED_TAGS = { direct = true, block = true }
+-- direct / block are builtin outbounds added at emission. basic-auto and
+-- _prism_test_all are synthesised Basic-mode and clash-test groups; a node
+-- — manual or from a (possibly hostile) subscription — carrying one of
+-- those tags would collide and make sing-box reject the whole config, so
+-- drop it before it reaches all_map.
+local OUTBOUND_RESERVED_TAGS = {
+	direct           = true,
+	block            = true,
+	["basic-auto"]   = true,
+	_prism_test_all  = true,
+}
+
+-- ─── subscription payload sanitiser ─────────────────────────────────────
+--
+-- Subscription bodies are remote, untrusted JSON. The legacy path spliced
+-- the parsed payload table verbatim into all_map[tag] = p, so a hostile
+-- provider could ship arbitrary sing-box outbound keys — tls.insecure to
+-- disable cert verification, detour to bypass the user's routing intent,
+-- ssh.private_key_path to read router host keys, etc. Mitigate with a
+-- per-type field whitelist that mirrors what build_node_from_uci accepts
+-- from manual nodes. Anything not on the list is dropped at load time.
+--
+-- Adding a new sing-box protocol means adding it here AND in build_node_from_uci.
+
+local SUB_ALLOWED_TYPES = {
+	vless       = true,
+	vmess       = true,
+	trojan      = true,
+	shadowsocks = true,
+	hysteria2   = true,
+	tuic        = true,
+	anytls      = true,
+	socks       = true,
+	-- wireguard requires an explicit private_key + peer block; safe to
+	-- accept here since the only attacker-controlled paths are inside
+	-- well-typed fields (no path/cert references), and it lands as an
+	-- endpoint after the build_outbounds split.
+	wireguard   = true,
+}
+
+local function copy_subset(src, allowed)
+	if type(src) ~= "table" then return nil end
+	local out = {}
+	for _, k in ipairs(allowed) do
+		local v = src[k]
+		if v ~= nil then out[k] = v end
+	end
+	return out
+end
+
+local SUB_TLS_KEYS = {
+	"enabled", "server_name", "alpn", "min_version", "max_version",
+	"cipher_suites", "utls", "ech", "reality",
+}
+local SUB_TRANSPORT_KEYS = {
+	"type", "path", "host", "headers", "method", "service_name",
+	"idle_timeout", "ping_timeout", "max_early_data", "early_data_header_name",
+	"permit_without_stream",
+}
+local SUB_OBFS_KEYS  = { "type", "password" }
+local SUB_PEER_KEYS  = { "address", "port", "public_key", "pre_shared_key", "allowed_ips", "reserved" }
+
+local SUB_TYPE_KEYS = {
+	vless       = { "tag", "type", "server", "server_port", "uuid", "flow", "packet_encoding", "network" },
+	vmess       = { "tag", "type", "server", "server_port", "uuid", "security", "alter_id",
+	                "global_padding", "authenticated_length", "packet_encoding", "network" },
+	trojan      = { "tag", "type", "server", "server_port", "password", "network" },
+	shadowsocks = { "tag", "type", "server", "server_port", "method", "password", "network", "udp_over_tcp" },
+	hysteria2   = { "tag", "type", "server", "server_port", "password", "network",
+	                "up_mbps", "down_mbps", "brutal" },
+	tuic        = { "tag", "type", "server", "server_port", "uuid", "password",
+	                "congestion_control", "udp_relay_mode", "zero_rtt_handshake", "network" },
+	anytls      = { "tag", "type", "server", "server_port", "password", "network",
+	                "idle_session_check_interval", "idle_session_timeout", "min_idle_session" },
+	socks       = { "tag", "type", "server", "server_port", "version", "username", "password",
+	                "network", "udp_over_tcp" },
+	wireguard   = { "tag", "type", "address", "private_key", "mtu", "system_interface", "workers" },
+}
+
+local function sanitize_subscription_node(p)
+	if type(p) ~= "table" then return nil end
+	local t = p.type
+	if type(t) ~= "string" or not SUB_ALLOWED_TYPES[t] then return nil end
+	if type(p.tag) ~= "string" or p.tag == "" then return nil end
+	-- Reject control characters in tag — these would corrupt the
+	-- .test-all-tags newline-delimited file and stderr log lines.
+	if p.tag:find("[%c]") then return nil end
+
+	local out = copy_subset(p, SUB_TYPE_KEYS[t])
+	if not out then return nil end
+
+	-- Sub-objects whose attacker-controlled fields must be stripped (tls.insecure,
+	-- tls.disable_sni, transport.tls — anything that weakens cryptographic
+	-- guarantees the user thinks they have).
+	if type(p.tls) == "table" then
+		out.tls = copy_subset(p.tls, SUB_TLS_KEYS)
+	end
+	if type(p.transport) == "table" then
+		out.transport = copy_subset(p.transport, SUB_TRANSPORT_KEYS)
+	end
+	if type(p.obfs) == "table" then
+		out.obfs = copy_subset(p.obfs, SUB_OBFS_KEYS)
+	end
+	-- WireGuard: peers carry the dialled endpoint, must be sanitised in turn.
+	if t == "wireguard" and type(p.peers) == "table" then
+		local peers = {}
+		for _, peer in ipairs(p.peers) do
+			local sp = copy_subset(peer, SUB_PEER_KEYS)
+			if sp and sp.address and sp.port then peers[#peers + 1] = sp end
+		end
+		if #peers > 0 then out.peers = peers end
+		out._is_endpoint = true
+	end
+
+	return out
+end
+
+-- Collect every outbound tag the user has typed by hand into a routing
+-- reference (rule.outbound, basic.server, routing.final_outbound, manual
+-- urltest member list, selector default). A subscription is then forbidden
+-- from claiming one of those tags: the user clearly meant a specific
+-- (manual) node and a hostile provider could otherwise hijack the
+-- reference by shipping a same-named node.
+local function collect_user_outbound_refs(c)
+	local refs = {}
+	c:foreach("prism", "rule", function(s)
+		if s.outbound and s.outbound ~= "" then refs[s.outbound] = true end
+	end)
+	c:foreach("prism", "node", function(s)
+		if s.selector_default and s.selector_default ~= "" then
+			refs[s.selector_default] = true
+		end
+		local lst = s.urltest_outbounds
+		if type(lst) == "table" then
+			for _, t in ipairs(lst) do if t ~= "" then refs[t] = true end end
+		elseif type(lst) == "string" and lst ~= "" then
+			refs[lst] = true
+		end
+	end)
+	local fin = c:get("prism", "routing", "final_outbound")
+	if fin and fin ~= "" then refs[fin] = true end
+	local basic = c:get_all("prism", "basic") or {}
+	local picks = basic.server
+	if type(picks) == "table" then
+		for _, t in ipairs(picks) do if t ~= "" then refs[t] = true end end
+	elseif type(picks) == "string" and picks ~= "" then
+		refs[picks] = true
+	end
+	return refs
+end
 
 -- Scan /etc/prism/nodes/*.json, prune any orphan file whose subscription
 -- section was deleted, and import the remaining nodes into all_ordered /
@@ -604,19 +771,28 @@ local OUTBOUND_RESERVED_TAGS = { direct = true, block = true }
 -- calls this with empty tables. Each imported node is tagged with `_source`
 -- = the subscription section name.
 local function load_subscription_nodes(c, all_ordered, all_map, seen)
+	local user_refs = collect_user_outbound_refs(c)
+	-- A subscription node may not claim a tag the user has already typed
+	-- elsewhere — that reference belongs to the user's manual node (which
+	-- may not exist yet, may have been deleted, or may live elsewhere) and
+	-- letting a remote feed silently bind to it is a real attack vector.
+	-- Tags already in `seen` are similarly off-limits (manual nodes loaded
+	-- first take precedence over subscription tags).
 	local valid_subs = {}
 	c:foreach("prism", "subscription", function(s)
 		valid_subs[s[".name"]] = true
 	end)
-	local lf = io.popen("find " .. NODES_DIR .. " -maxdepth 1 -name '*.json' 2>/dev/null")
-	if lf then
-		for path in lf:lines() do
-			local base = path:match("/([^/]+)%.json$")
-			if base and not valid_subs[base] then
-				os.remove(path)
+	if not PREVIEW_MODE then
+		local lf = io.popen("find " .. NODES_DIR .. " -maxdepth 1 -name '*.json' 2>/dev/null")
+		if lf then
+			for path in lf:lines() do
+				local base = path:match("/([^/]+)%.json$")
+				if base and not valid_subs[base] then
+					os.remove(path)
+				end
 			end
+			lf:close()
 		end
-		lf:close()
 	end
 
 	local f = io.popen("find " .. NODES_DIR .. " -maxdepth 1 -name '*.json' 2>/dev/null | sort")
@@ -626,20 +802,38 @@ local function load_subscription_nodes(c, all_ordered, all_map, seen)
 		local content = read_file(path)
 		if content and content ~= "" then
 			local ok, nodes = pcall(jsonc.parse, content)
+			if not ok or type(nodes) ~= "table" then
+				-- Surface a corrupt subscription file (truncated write,
+				-- manual edit gone wrong) so the user sees *why* a
+				-- subscription's nodes vanished from the running config.
+				-- Without this every node from this sub silently disappears.
+				io.stderr:write("prism build-config: subscription nodes file "
+					.. path .. " failed to parse, dropping its nodes\n")
+			end
 			if ok and type(nodes) == "table" then
 				for _, n in ipairs(nodes) do
 					if type(n) == "table" and n.payload then
-						local ok2, p = pcall(jsonc.parse, n.payload)
-						if ok2 and type(p) == "table" and p.tag then
+						local ok2, raw = pcall(jsonc.parse, n.payload)
+						local p = ok2 and sanitize_subscription_node(raw) or nil
+						if p then
 							if OUTBOUND_RESERVED_TAGS[p.tag] then
 								io.stderr:write("prism build-config: subscription node "
 									.. "tag '" .. p.tag .. "' is reserved; skipping\n")
+							elseif user_refs[p.tag] then
+								io.stderr:write("prism build-config: subscription node "
+									.. "tag '" .. p.tag .. "' collides with a "
+									.. "manual outbound reference; skipping\n")
 							elseif not seen[p.tag] then
 								p._source      = sub_id
 								seen[p.tag]    = true
 								all_map[p.tag] = p
 								all_ordered[#all_ordered + 1] = p
 							end
+						elseif ok2 and type(raw) == "table" and raw.type then
+							io.stderr:write("prism build-config: subscription node "
+								.. "tag '" .. tostring(raw.tag) .. "' rejected: "
+								.. "unsupported type '" .. tostring(raw.type)
+								.. "' or unsafe fields\n")
 						end
 					end
 				end
@@ -649,6 +843,32 @@ local function load_subscription_nodes(c, all_ordered, all_map, seen)
 	f:close()
 end
 
+-- Load subscriptions and resolve the Basic-mode server selection in one pass,
+-- memoized for the lifetime of the build. compute_default_outbound (called
+-- from build_dns and build_basic_route) and build_basic_outbounds all need
+-- the same filtered member list — without the shared filter, the default
+-- could refer to a tag that build_basic_outbounds drops, leaving route.final
+-- dangling and sing-box rejecting the config.
+local _basic_cache
+resolve_basic_members = function(c)
+	if _basic_cache then return _basic_cache.members, _basic_cache.all_map, _basic_cache.all_ordered end
+	local all_ordered, all_map, seen = {}, {}, {}
+	load_subscription_nodes(c, all_ordered, all_map, seen)
+	local basic = c:get_all("prism", "basic") or {}
+	local selected = uci_list_or_string(basic, "server")
+	-- Drop selections that no longer resolve (subscription removed, node
+	-- renamed) and dedupe. Stable order preserves the user's pick sequence.
+	local members, member_set = {}, {}
+	for _, t in ipairs(selected) do
+		if all_map[t] and not member_set[t] then
+			members[#members + 1] = t
+			member_set[t] = true
+		end
+	end
+	_basic_cache = { members = members, all_map = all_map, all_ordered = all_ordered }
+	return members, all_map, all_ordered
+end
+
 -- Basic mode: import subscription nodes + synthesise a default outbound from
 -- prism.basic.server (single → that node is the default, N>1 → wrap in a
 -- urltest tagged BASIC_AUTO_TAG, zero → no proxy default and build_route's
@@ -656,22 +876,7 @@ end
 -- (prism.rule) and group regexes are ignored — they stay on disk for an
 -- Advanced switch-back but are not compiled in.
 local function build_basic_outbounds(c)
-	local all_ordered, all_map, seen = {}, {}, {}
-	load_subscription_nodes(c, all_ordered, all_map, seen)
-
-	local basic = c:get_all("prism", "basic") or {}
-	local selected = uci_list_or_string(basic, "server")
-
-	-- Drop selections that no longer resolve (subscription removed, node
-	-- renamed) and dedupe. Stable order preserves the user's pick sequence.
-	local members = {}
-	local member_set = {}
-	for _, t in ipairs(selected) do
-		if all_map[t] and not member_set[t] then
-			members[#members + 1] = t
-			member_set[t] = true
-		end
-	end
+	local members, all_map, all_ordered = resolve_basic_members(c)
 
 	if #members > 1 then
 		local group = {
@@ -800,8 +1005,14 @@ local function build_outbounds(c)
 				local src_list = ob._outbound_regex_sources
 				ob._outbound_regex = nil  -- strip before handing to sing-box
 				ob._outbound_regex_sources = nil
-				-- Empty / nil source list means "match every source" — same
-				-- behaviour as before the urltest_regex_sources field existed.
+				-- Source restriction: when urltest_regex_sources is set,
+				-- subscription nodes from those subscription IDs are admitted.
+				-- When unset (or empty), subscription nodes are NOT admitted —
+				-- only manual nodes (_source == nil). A subscription provider
+				-- otherwise could ship nodes whose tags match the user's
+				-- regex and silently steer traffic through attacker-controlled
+				-- outbounds; requiring an explicit source allowlist forces
+				-- the user to opt each subscription in by hand.
 				local src_set = nil
 				if type(src_list) == "table" and #src_list > 0 then
 					src_set = {}
@@ -811,9 +1022,13 @@ local function build_outbounds(c)
 					ob.outbounds = {}
 					for _, other in ipairs(all_ordered) do
 						if other.type ~= "urltest" and other.type ~= "selector"
-						   and match_any(other.tag, pattern)
-						   and (not src_set or src_set[other._source or ""]) then
-							ob.outbounds[#ob.outbounds + 1] = other.tag
+						   and match_any(other.tag, pattern) then
+							local source = other._source
+							local admit = (source == nil)  -- manual nodes always OK
+								or (src_set and src_set[source])
+							if admit then
+								ob.outbounds[#ob.outbounds + 1] = other.tag
+							end
 						end
 					end
 				end
@@ -910,13 +1125,21 @@ local function build_outbounds(c)
 			else
 				if (ob.type == "urltest" or ob.type == "selector")
 				   and (type(ob.outbounds) ~= "table" or #ob.outbounds == 0) then
+					-- Skip the empty group rather than emit it: sing-box
+					-- rejects urltest/selector with no members and the
+					-- whole config goes back to the last working version.
+					-- Anywhere this tag was referenced (route rule,
+					-- dns detour, parent group member) gets pruned by
+					-- the validation pass / member-prune downstream and
+					-- falls back to direct, which is a sane no-op.
 					io.stderr:write("prism build-config: " .. ob.type ..
 						" '" .. ob.tag ..
-						"' has no usable members; sing-box will reject the config\n")
-				end
-				outbounds[#outbounds + 1] = ob
-				if not is_group then
-					testable_tags[#testable_tags + 1] = ob.tag
+						"' has no usable members; dropping the group\n")
+				else
+					outbounds[#outbounds + 1] = ob
+					if not is_group then
+						testable_tags[#testable_tags + 1] = ob.tag
+					end
 				end
 			end
 		end
@@ -1331,19 +1554,37 @@ local function build_basic_route(c)
 	-- domain-routed ones. `rule_set` on a route rule is OR-matched in
 	-- sing-box, so one rule with both tags suffices. Provider is hardcoded
 	-- to sagernet to match the rule-set Advanced mode emits by default.
-	-- Known gap: with fakeip off, lookups for bypassed-country domains still
-	-- exit via the `remote` resolver — DNS routing rules are not synthesised
-	-- (prepare_rules returns {} in Basic). Resolution is over DoT and content
-	-- is encrypted, so this is a mild correctness wart, not a leak.
+	-- Known gap: lookups for bypassed-country domains still exit via the
+	-- `remote` resolver — DNS routing rules are not synthesised in Basic
+	-- (prepare_rules returns {}). With fakeip off the resolution is over
+	-- DoT and content is encrypted, so it is a mild correctness wart but
+	-- not a leak. With fakeip on (an Advanced setting that persists in UCI
+	-- if a user crosses modes) `remote` returns a fake IP that still routes
+	-- direct via the geoip set after demap, but the resolver used was the
+	-- proxied one — same wart, different surface.
+	-- Sagernet's geoip catalog covers ~all ISO codes (every Basic-mode
+	-- option resolves), but their geosite catalog ships only a handful
+	-- of per-country lists — at the time of writing, only `cn`.
+	-- Emitting geosite-<cc> for every country produces 404s on the
+	-- .srs fetch, sing-box logs the failure and the rule is half-effective
+	-- (direct-IP traffic bypassed, domain-routed traffic still proxied).
+	-- Gate geosite emission on the known-good set; geoip stays
+	-- unconditional so the bypass at least catches IP-routed packets
+	-- everywhere.
+	local SAGERNET_GEOSITES = { cn = true }
 	if routing_mode == "bypass_country" and cc ~= "" then
-		local geoip_name   = "geoip-"   .. cc
-		local geosite_name = "geosite-" .. cc
-		local geoip_tag    = "sagernet-" .. geoip_name
-		local geosite_tag  = "sagernet-" .. geosite_name
-		emit_rs(geoip_tag,   provider_url("sagernet", delivery, geoip_name))
-		emit_rs(geosite_tag, provider_url("sagernet", delivery, geosite_name))
+		local geoip_name = "geoip-" .. cc
+		local geoip_tag  = "sagernet-" .. geoip_name
+		emit_rs(geoip_tag, provider_url("sagernet", delivery, geoip_name))
+		local rs_tags = { geoip_tag }
+		if SAGERNET_GEOSITES[cc] then
+			local geosite_name = "geosite-" .. cc
+			local geosite_tag  = "sagernet-" .. geosite_name
+			emit_rs(geosite_tag, provider_url("sagernet", delivery, geosite_name))
+			rs_tags[#rs_tags + 1] = geosite_tag
+		end
 		route.rules[#route.rules + 1] = {
-			rule_set = { geoip_tag, geosite_tag },
+			rule_set = rs_tags,
 			outbound = "direct"
 		}
 	end
@@ -1579,11 +1820,42 @@ local function build_log(c)
 end
 
 
+-- Drop a dangling outbound reference (deleted manual node, renamed subscription
+-- tag) to "direct" with a warning to stderr. sing-box rejects the whole config
+-- on a route.final or dns.servers[].detour pointing at a missing outbound, and
+-- the init.d fall-back-to-last-working logic hides the failure from the user;
+-- this surfaces the cause and keeps the new save valid.
+local function validate_tag(label, tag, tagset)
+	if tag == nil or tag == "" or tag == "direct" or tag == "block" then return tag end
+	if tagset[tag] then return tag end
+	io.stderr:write("prism build-config: " .. label .. " references unknown outbound '"
+		.. tostring(tag) .. "', falling back to 'direct'\n")
+	return "direct"
+end
+
 local function build_config(c)
 	local prepared = prepare_rules(c)
 	local dns   = build_dns(c, prepared)
 	local route = build_route(c, prepared)
 	local outbounds, endpoints = build_outbounds(c)
+
+	-- Post-build validation: route.final and every dns.servers[].detour must
+	-- resolve to a tag that build_outbounds actually emitted (plus the
+	-- builtins direct/block). Stale Advanced final_outbound and DNS detour
+	-- references — surfaced by a deleted manual node or a renamed
+	-- subscription tag — would otherwise produce a config sing-box rejects,
+	-- and the init.d fallback would hide that from the user indefinitely.
+	local tagset = {}
+	for _, ob in ipairs(outbounds) do if ob.tag then tagset[ob.tag] = true end end
+	for _, ob in ipairs(endpoints) do if ob.tag then tagset[ob.tag] = true end end
+	route["final"] = validate_tag("route.final", route["final"], tagset)
+	if type(dns.servers) == "table" then
+		for _, s in ipairs(dns.servers) do
+			if s.detour then
+				s.detour = validate_tag("dns.servers[" .. (s.tag or "?") .. "].detour", s.detour, tagset)
+			end
+		end
+	end
 
 	local config = {
 		log       = build_log(c),
@@ -1665,6 +1937,11 @@ local function write_atomic(path, content)
 	if not f then return false, "cannot open " .. tmp end
 	f:write(content)
 	f:close()
+	-- 0600 before rename: sing-box.json contains every node's credentials
+	-- (uuid/password/uri), the dnsmasq drop-in shouldn't need to be readable
+	-- by anything but root either. Default umask 0022 would leave them
+	-- world-readable.
+	os.execute("chmod 0600 '" .. tmp:gsub("'", "'\\''") .. "' 2>/dev/null")
 	if not os.rename(tmp, path) then
 		os.remove(tmp)
 		return false, "rename failed for " .. path
@@ -1676,7 +1953,23 @@ end
 
 local c = uci_mod.cursor()
 
-local out_path = arg[1]
+-- Argv: build-config [--preview] [out_path]
+-- --preview / -n: pure-read mode for get_config (no orphan deletion, no
+-- dnsmasq drop-in rewrite). out_path is required in preview mode so the
+-- caller controls where the preview goes (defaulting would clobber the
+-- live config_path).
+local out_path
+local args = {}
+for _, a in ipairs(arg) do args[#args + 1] = a end
+local i = 1
+while i <= #args do
+	if args[i] == "--preview" or args[i] == "-n" then
+		PREVIEW_MODE = true
+	elseif not out_path then
+		out_path = args[i]
+	end
+	i = i + 1
+end
 if not out_path or out_path == "" then
 	out_path = c:get("prism", "global", "config_path") or "/var/etc/prism/sing-box.json"
 end
@@ -1703,7 +1996,9 @@ end
 -- (derived purely from LOCAL_DOMAINS), so writing it on every build is
 -- harmless; /etc/init.d/prism only copies it into place when managed DNS is
 -- enabled. A failure here is non-fatal — the sing-box config is the build's
--- critical output.
+-- critical output. Skipped in --preview mode so a read-only get_config can
+-- never overwrite the live drop-in.
+if PREVIEW_MODE then os.exit(0) end
 local dropin_ok, dropin_err = write_atomic(DNSMASQ_DROPIN, build_dnsmasq_dropin())
 if not dropin_ok then
 	io.stderr:write("prism build-config: " .. dropin_err .. "\n")

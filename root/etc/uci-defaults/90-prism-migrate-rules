@@ -8,15 +8,27 @@
 
 [ -f /etc/config/prism ] || exit 0
 
+# Same word-splitting hazard as 91: domain_regex values may contain glob
+# chars or whitespace, neither of which $(uci get) word-splitting handles.
+# config_list_foreach respects UCI's quoting.
+set -f
+
 . /lib/functions.sh
 
 changed=0
 fakeip_seen=0
-provider_seen=""
+
+_copy_value() {
+	uci add_list "prism.$_sid.$_rtype=$1"
+}
+
+_copy_ruleset_provider() {
+	uci add_list "prism.$_sid.ruleset=$_src/$1"
+}
 
 migrate_rule() {
-	local sid="$1"
-	local rtype uf nm src url label cs n v cc csrc opt
+	local sid rtype uf nm src url label cs cc opt
+	sid="$1"
 
 	config_get rtype "$sid" type ""
 	[ -n "$rtype" ] || return 0
@@ -27,9 +39,8 @@ migrate_rule() {
 
 	case "$rtype" in
 	domain|domain_suffix|domain_keyword|domain_regex|ip_cidr|port)
-		for v in $(uci -q get "prism.$sid.value" 2>/dev/null); do
-			uci add_list "prism.$sid.$rtype=$v"
-		done
+		_sid="$sid"; _rtype="$rtype"
+		config_list_foreach "$sid" value _copy_value
 		;;
 	source_ip_cidr)
 		# Source matching is dropped — keep the rule disabled and labelled
@@ -51,16 +62,13 @@ migrate_rule() {
 				uci add_list "prism.$sid.ruleset=$label"
 			fi
 		else
-			for n in $(uci -q get "prism.$sid.rs_name" 2>/dev/null); do
-				uci add_list "prism.$sid.ruleset=$src/$n"
-			done
+			_sid="$sid"; _src="$src"
+			config_list_foreach "$sid" rs_name _copy_ruleset_provider
 		fi
 		;;
 	country)
 		config_get cc "$sid" country_code ""
-		config_get csrc "$sid" country_source "sagernet"
 		[ -n "$cc" ] && uci add_list "prism.$sid.country=$cc"
-		[ -n "$provider_seen" ] || provider_seen="$csrc"
 		;;
 	esac
 
@@ -82,7 +90,5 @@ config_foreach migrate_rule rule
 	uci -q get prism.dns >/dev/null 2>&1 || uci set prism.dns=dns
 	uci set prism.dns.fakeip_enabled=1
 }
-[ -n "$provider_seen" ] && uci set prism.global.country_provider="$provider_seen"
-
 uci commit prism
 exit 0

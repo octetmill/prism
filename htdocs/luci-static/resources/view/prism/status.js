@@ -226,9 +226,11 @@ function formatActiveNode(tag, outbounds) {
 
 // Active outbound for the runtime header. Advanced reads
 // prism.routing.final_outbound; Basic synthesises from prism.basic.server
-// (single tag, basic-auto for N>1, none for 0). Rule count stays plain in
-// both modes — Basic just hides the row that would display it (along with
-// the sing-box/mode footer), so showing a "preset" label is unnecessary.
+// after filtering picks that no longer resolve against the live outbound
+// set (subscription removed, node renamed). Same filter the builder applies,
+// otherwise Status displays "via Auto" for a config that doesn't have a
+// basic-auto group. Rule count stays plain in both modes — Basic just hides
+// the row that would display it (along with the sing-box/mode footer).
 function runtimeInfo(outbounds) {
 	var uiMode = uci.get('prism', 'global', 'mode');
 	if (uiMode !== 'basic' && uiMode !== 'advanced') uiMode = 'advanced';
@@ -238,8 +240,15 @@ function runtimeInfo(outbounds) {
 		var servers = uci.get('prism', 'basic', 'server');
 		if (!Array.isArray(servers))
 			servers = servers ? [ servers ] : [];
-		if (servers.length === 1)      tag = servers[0];
-		else if (servers.length > 1)   tag = 'basic-auto';
+		var live = {};
+		(outbounds || []).forEach(function(ob) { if (ob && ob.tag) live[ob.tag] = true; });
+		var members = [];
+		var seen = {};
+		servers.forEach(function(t) {
+			if (live[t] && !seen[t]) { members.push(t); seen[t] = true; }
+		});
+		if (members.length === 1)      tag = members[0];
+		else if (members.length > 1)   tag = 'basic-auto';
 		else                           tag = '';
 	} else {
 		tag = uci.get('prism', 'routing', 'final_outbound') || '';
@@ -397,7 +406,14 @@ return baseclass.extend({
 					         'font-family:monospace; font-size:0.8em; ' +
 					         'line-height:1.35; background:rgba(128,128,128,0.05);'
 				}, [ singboxText ]),
-				E('div', { 'style': 'margin:0.5em 0 2em; display:flex; gap:0.4em;' }, [
+				// "View full log" and "View generated config" are debug
+				// surfaces hidden in Basic mode, consistent with hiding the
+				// Subscriptions/Rules count row and the sing-box version
+				// footer (commit 2afeb47).
+				E('div', {
+					'style': 'margin:0.5em 0 2em; display:flex; gap:0.4em;' +
+					         (info.uiMode === 'basic' ? ' display:none;' : '')
+				}, [
 					E('button', {
 						'class': 'btn cbi-button cbi-button-neutral',
 						'click': ui.createHandlerFn(self, '_showFullLog')
@@ -522,15 +538,14 @@ return baseclass.extend({
 		];
 	},
 
-	// Compact latency badge, mirroring the nodes panel's colour bands
-	// (the constants there are private to that module; the bands are
-	// repeated here verbatim because shipping a shared utils module just
-	// for one function isn't worth a new require for the status page).
+	// Compact latency badge. Thresholds mirror nodes.js formatLatency
+	// (300/600 ms green→yellow→red) so the Status Groups column and the
+	// Nodes Latency column agree on what 'yellow' means.
 	_renderLatency: function(ms) {
 		if (typeof ms !== 'number' || ms <= 0)
 			return E('span', { 'style': 'opacity:0.5;' }, [ '—' ]);
 		var cls = 'label-success';
-		if (ms >= 800)      cls = 'label-danger';
+		if (ms >= 600)      cls = 'label-danger';
 		else if (ms >= 300) cls = 'label-warning';
 		return E('span', {
 			'class': cls,
@@ -689,6 +704,18 @@ return baseclass.extend({
 					: 'display:none;'
 			}, [ _('Paused for testing — will resume on next reboot.') ])
 		];
+		// Basic-mode first-run trap: service is enabled and running, but
+		// no servers are picked. compute_default_outbound returns "direct"
+		// so sing-box runs as a transparent forwarder and no traffic is
+		// actually proxied — the user has no signal that nothing is
+		// happening. Show an inline pointer to the Basic tab.
+		if (isBasic && state === 'running' && !active) {
+			rows.push(E('div', {
+				'class': 'alert-message warning',
+				'style': 'margin-top:0.6em;'
+			}, [ _('No server selected — open the Basic tab and pick at least ' +
+			       'one server, otherwise traffic bypasses the proxy.') ]));
+		}
 		if (!isBasic) {
 			rows.push(E('div', { 'style': 'margin-top:0.5em;' }, [
 				_('Subscriptions: %d').format(subCount),
@@ -707,6 +734,16 @@ return baseclass.extend({
 
 	// ── Status controls + polling ─────────────────────────────────────────
 
+	// Surface transport-level RPC failures (rpcd reload, network error,
+	// JSON parse) as a notification instead of letting them disappear
+	// into ui.createHandlerFn's generic handler. Without a .catch,
+	// _refreshStatusNow also doesn't run and the post-action refresh is
+	// silently skipped.
+	_notifyRpcError: function(label, err) {
+		var msg = (err && err.message) ? err.message : String(err);
+		ui.addNotification(null, E('p', label + ': ' + msg), 'error');
+	},
+
 	handleToggleEnabled: function(ev) {
 		var self = this;
 		var cb = document.getElementById('prism-enable-checkbox');
@@ -721,6 +758,9 @@ return baseclass.extend({
 					on ? _('Prism enabled.') : _('Prism disabled.')), 'info');
 			}
 			return self._refreshStatusNow();
+		}).catch(function(err) {
+			self._notifyRpcError(on ? _('Enable failed') : _('Disable failed'), err);
+			return self._refreshStatusNow();
 		});
 	},
 
@@ -728,10 +768,15 @@ return baseclass.extend({
 		var self = this;
 		return callStart().then(function(res) {
 			if (res && res.ok === false) {
-				ui.addNotification(null, E('p', _('Start failed — check the log below.')), 'error');
+				ui.addNotification(null, E('p',
+					res.error ? _('Start failed: ') + res.error
+					          : _('Start failed — check the log below.')), 'error');
 			} else {
 				ui.addNotification(null, E('p', _('Service started.')), 'info');
 			}
+			return self._refreshStatusNow();
+		}).catch(function(err) {
+			self._notifyRpcError(_('Start failed'), err);
 			return self._refreshStatusNow();
 		});
 	},
@@ -741,6 +786,9 @@ return baseclass.extend({
 		return callStop().then(function() {
 			ui.addNotification(null, E('p',
 				_('Service stopped — will resume on next reboot.')), 'info');
+			return self._refreshStatusNow();
+		}).catch(function(err) {
+			self._notifyRpcError(_('Stop failed'), err);
 			return self._refreshStatusNow();
 		});
 	},
@@ -753,6 +801,9 @@ return baseclass.extend({
 			} else {
 				ui.addNotification(null, E('p', _('Service restarted.')), 'info');
 			}
+			return self._refreshStatusNow();
+		}).catch(function(err) {
+			self._notifyRpcError(_('Restart failed'), err);
 			return self._refreshStatusNow();
 		});
 	},
@@ -913,6 +964,11 @@ return baseclass.extend({
 				this._updateGroups(r[1] || { groups: [] });
 				this._updateClashStats(r[2] || {});
 			}, this))
+				// Swallowed by design: a transient WAN outage or a brief
+				// rpcd hiccup should not pile error notifications onto the
+				// user every 2 seconds. The next tick retries — visible
+				// failure modes (sing-box stopped, clash disabled) come
+				// through as well-typed empty results.
 				.catch(function() {})
 				.finally(L.bind(this._scheduleStatusRefresh, this));
 		}, this), POLL_MS);
@@ -939,6 +995,9 @@ return baseclass.extend({
 		if (!document.getElementById('prism-log-singbox')) return;
 		this._logTimer = setTimeout(L.bind(function() {
 			this._refreshLogTail()
+				// Same swallow-and-retry pattern as the status poll:
+				// log fetch can blip during rpcd reload; the next tick
+				// will succeed and the textarea re-populates.
 				.catch(function() {})
 				.finally(L.bind(this._scheduleLogRefresh, this));
 		}, this), POLL_MS);

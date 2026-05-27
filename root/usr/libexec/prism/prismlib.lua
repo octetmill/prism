@@ -50,6 +50,34 @@ function M.split_provider_token(token)
 	return token:match("^([^/]+)/(.+)$")
 end
 
+-- Create a directory with mode 0700 (or tighten an existing one). The
+-- sensitive files Prism writes (subscription nodes with embedded proxy
+-- credentials, sing-box config, extra.json overrides) live in /etc/prism
+-- and /var/etc/prism; default umask 0022 would leave them world-readable
+-- and a non-root daemon compromise (dnsmasq, statd, etc.) could exfiltrate
+-- every proxy password and subscription URL. Tighten the directory and
+-- every newly-written file (M.write_secure below).
+function M.secure_mkdir(path)
+	os.execute("mkdir -p '" .. path:gsub("'", "'\\''") .. "' 2>/dev/null"
+		.. " && chmod 0700 '" .. path:gsub("'", "'\\''") .. "' 2>/dev/null")
+end
+
+-- Atomic file write that chmods to 0600 between write and rename. Use for
+-- any file that may contain proxy credentials, subscription URLs, the
+-- sing-box config, or runtime snapshots — anything in /etc/prism or
+-- /var/etc/prism that holds remote-sensitive data.
+function M.write_secure(path, content)
+	local dir = path:match("^(.*)/[^/]+$")
+	if dir and dir ~= "" then M.secure_mkdir(dir) end
+	local tmp = path .. ".tmp"
+	local f = io.open(tmp, "w")
+	if not f then return false end
+	f:write(content)
+	f:close()
+	os.execute("chmod 0600 '" .. tmp:gsub("'", "'\\''") .. "' 2>/dev/null")
+	return os.rename(tmp, path) ~= nil
+end
+
 -- True when a rule-set tag is safe to use as a single path component. A tag
 -- becomes the filename RULESETS_DIR/<tag>.srs, so it must not contain "/"
 -- (which would escape the directory) or start with "." (".", ".." or a

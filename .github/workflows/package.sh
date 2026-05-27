@@ -160,6 +160,46 @@ rm -f "$OUT_DIR"/${PKG_NAME}*.apk "$OUT_DIR"/${PKG_NAME}*.apk.sha256 \
       "$OUT_DIR"/${PKG_NAME}*.ipk "$OUT_DIR"/${PKG_NAME}*.ipk.sha256
 mkdir -p "$STAGE_DIR" "$OUT_DIR"
 
+# ---------------------------------------------------------------------------
+# strip_comments — remove comment-only lines from staged source so the
+# installed package is smaller. Operates on the staged copy only; the
+# repo's source files keep their full commentary for maintainers.
+#
+# Conservative: strips lines whose first non-whitespace run is the
+# comment marker. Inline comments (e.g. "code  # note") are left alone,
+# string literals containing the comment marker are unaffected, multi-
+# line block comments are not touched (verified absent in this repo).
+# Shebangs on line 1 are always preserved.
+#
+# Per-language savings on this codebase (rough):
+#   Lua:  ~40% byte reduction (build-config, luci.prism, active-watch, …)
+#   JS:   ~30% byte reduction (status.js, nodes.js, …)
+#   sh:   ~15% byte reduction (init.d/prism, firewall.sh, …)
+strip_comments() {
+	local dst="$1"
+	# The {/SPDX\|Copyright/!d} dance keeps the SPDX-License-Identifier
+	# and Copyright lines required for GPL-3.0 redistribution: the inner
+	# address skips deletion for any comment line that mentions either
+	# keyword. The outer address scopes the rule to comment-only lines,
+	# so a code line that happens to contain "Copyright" as a string
+	# literal (none today, but future-proof) is unaffected.
+	case "$dst" in
+		*.js)
+			# JS: line comments only (no // mid-line strip — strings).
+			sed -i -e '/^[[:space:]]*\/\//{/SPDX\|Copyright/!d;}' "$dst"
+			;;
+		*.lua|*/luci.prism|*/build-config|*/active-watch|*/test-all-runner|*/fetch-catalog|*/prismlib.lua)
+			# Lua: -- line comments. No --[[ ]] blocks in this repo.
+			sed -i -e '/^[[:space:]]*--/{/SPDX\|Copyright/!d;}' "$dst"
+			;;
+		*/init.d/prism|*.sh|*/sync-subscriptions|*/watchdog|*/hourly|*/uci-defaults/*)
+			# Shell: # line comments, but preserve shebang on line 1
+			# (busybox-ash supports both #!/bin/sh and #!/bin/sh /etc/rc.common).
+			sed -i -e '1!{/^[[:space:]]*#/{/SPDX\|Copyright/!d;};}' "$dst"
+			;;
+	esac
+}
+
 # htdocs → /www/luci-static/…
 mkdir -p "$STAGE_DIR/www/luci-static/resources/view/prism"
 find "$REPO_DIR/htdocs/luci-static/resources/view/prism" -type f -exec sh -c '
@@ -170,6 +210,9 @@ find "$REPO_DIR/htdocs/luci-static/resources/view/prism" -type f -exec sh -c '
 		cp "$f" "$dst"
 	done
 ' _ {} +
+# Strip JS comments from the staged tree.
+find "$STAGE_DIR/www/luci-static/resources/view/prism" -type f -name '*.js' | \
+	while IFS= read -r dst; do strip_comments "$dst"; done
 
 # root/ → target filesystem; honour executable bits set in git
 find "$REPO_DIR/root" -type f -exec sh -c '
@@ -185,6 +228,16 @@ find "$REPO_DIR/root" -type f -exec sh -c '
 		fi
 	done
 ' _ {} +
+# Strip Lua and shell comments from the staged tree. Path-based dispatch
+# in strip_comments matches the helper files by exact name, plus any
+# *.lua / *.sh / uci-defaults file.
+find "$STAGE_DIR" -type f \
+	\( -name '*.lua' -o -name '*.sh' \
+	   -o -path '*/uci-defaults/*' \
+	   -o -path '*/init.d/prism' \
+	   -o -path '*/libexec/prism/*' \
+	   -o -path '*/libexec/rpcd/luci.prism' \) | \
+	while IFS= read -r dst; do strip_comments "$dst"; done
 
 # ---------------------------------------------------------------------------
 # Installed size in bytes — measured now, before the APK-only /lib/apk/
