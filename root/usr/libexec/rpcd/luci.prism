@@ -100,6 +100,17 @@ local function url_decode(s)
 	end))
 end
 
+-- Split a URI userinfo into (user, pass) on the first ':'. Decode first
+-- because some generators percent-encode the separator as %3A (RFC 3986
+-- allows it inside userinfo), which would otherwise hide the split and
+-- collapse user:pass into a single field.
+local function split_userinfo(ui)
+	local decoded = url_decode(ui or "")
+	local a, b = decoded:match("^([^:]*):(.*)$")
+	if a then return a, b end
+	return decoded, nil
+end
+
 -- Parse "k1=v1&k2=v2&..." into { [k]=v } with URL-decoded keys and values.
 local function parse_query(s)
 	local q = {}
@@ -347,12 +358,11 @@ local function parse_proxy_uri(line)
 	end
 
 	if scheme == "tuic" then
-		local u, pw = userinfo:match("^(.-):(.*)$")
-		if not u then u = userinfo end
+		local u, pw = split_userinfo(userinfo)
 		local ob = {
 			type = "tuic", tag = tag, server = h, server_port = p or 0,
-			uuid     = url_decode(u  or ""),
-			password = url_decode(pw or "")
+			uuid     = u  or "",
+			password = pw or ""
 		}
 		if q.congestion_control and q.congestion_control ~= "" then
 			ob.congestion_control = q.congestion_control
@@ -376,13 +386,13 @@ local function parse_proxy_uri(line)
 	end
 
 	if scheme == "socks5" or scheme == "socks" then
-		local user, pwd = userinfo:match("^(.-):(.*)$")
+		local user, pwd = split_userinfo(userinfo)
 		local ob = {
 			type = "socks", tag = tag, server = h, server_port = p or 0,
 			version = "5"
 		}
-		if user and user ~= "" then ob.username = url_decode(user) end
-		if pwd  and pwd  ~= "" then ob.password = url_decode(pwd)  end
+		if user and user ~= "" then ob.username = user end
+		if pwd  and pwd  ~= "" then ob.password = pwd  end
 		return ob
 	end
 
