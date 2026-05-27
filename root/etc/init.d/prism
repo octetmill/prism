@@ -237,13 +237,18 @@ start_service() {
 	# rule-set initialization and urltest probes need connectivity, and at
 	# cold boot the WAN (DHCP/PPPoE) is not up yet when /etc/rc.d/S95prism
 	# runs — starting then leaves sing-box routeless, flooding "no route to
-	# internet". With no default route and sing-box not already running,
+	# internet". With no default route and OUR sing-box not already running,
 	# return without an instance: the `interface.*.up wan` trigger re-runs
 	# start_service once the WAN comes up (one clean start), and the */5
-	# watchdog cron is a backstop. The pgrep guard limits the wait to the
+	# watchdog cron is a backstop. The guard limits the wait to the
 	# genuine first start, so a Save during a WAN outage never stops a
 	# healthy instance.
-	if ! pgrep sing-box >/dev/null 2>&1; then
+	#
+	# `pgrep -f` plus the prism config_path discriminates between OUR
+	# sing-box and an independently-installed one (e.g. a homeassistant
+	# add-on) — without it, an unrelated sing-box on the box would
+	# silently bypass the WAN gate.
+	if ! pgrep -f "sing-box .*-c .*${config_path}" >/dev/null 2>&1; then
 		if [ -z "$(ip -4 route show default 2>/dev/null)" ] && \
 		   [ -z "$(ip -6 route show default 2>/dev/null)" ]; then
 			prism_log info "service: no default route yet, waiting for WAN"
