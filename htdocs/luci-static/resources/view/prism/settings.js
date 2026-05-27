@@ -432,7 +432,7 @@ return baseclass.extend({
 
 		var cb = E('input', { 'type': 'checkbox' });
 		var toggle = E('label', { 'class': 'prism-adv-toggle' }, [
-			cb, E('span', {}, [ _('Show advanced settings') ])
+			cb, E('span', {}, [ _('Show all fields') ])
 		]);
 		cb.addEventListener('change', function() {
 			formNode.classList.toggle('prism-show-advanced', cb.checked);
