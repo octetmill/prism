@@ -23,7 +23,6 @@
 'require rpc';
 'require ui';
 'require uci';
-'require session';
 'require view.prism.lib.formpanel as formpanel';
 
 var callListSubNodes = rpc.declare({
@@ -43,13 +42,6 @@ var callSyncSubscription = rpc.declare({
 var callReloadIfChanged = rpc.declare({
 	object: 'luci.prism',
 	method: 'reload_if_changed',
-	expect: { '': {} }
-});
-
-var callSetMode = rpc.declare({
-	object: 'luci.prism',
-	method: 'set_mode',
-	params: ['mode'],
 	expect: { '': {} }
 });
 
@@ -298,13 +290,12 @@ return baseclass.extend({
 	},
 
 	_switchToAdvanced: function() {
-		return callSetMode('advanced').then(function() {
-			session.setLocalData('prism.activeTab', '');
-			window.location.reload();
-		}).catch(function(err) {
-			ui.addNotification(null, E('p', _('Mode switch failed: ') +
-				((err && err.message) ? err.message : err)), 'error');
-		});
+		// Delegate to the host: main.js owns set_mode plus the
+		// unsaved-changes warning and the staged-changes revert step.
+		// _prismHost is set by main.js _activate when the panel mounts.
+		if (this._prismHost && typeof this._prismHost._handleModeSwitch === 'function') {
+			return this._prismHost._handleModeSwitch('advanced');
+		}
 	},
 
 	handleSave:      function() { return formpanel.save(this); },
