@@ -165,34 +165,57 @@ return view.extend({
 	},
 
 	_handleModeSwitch: function(target) {
-		if (target === 'advanced') {
+		// The switch finishes with window.location.reload(), which drops any
+		// staged-but-not-applied UCI changes on the floor. Warn the user
+		// rather than silently throwing their edits away.
+		var dirty = Object.keys(uci.changes() || {}).length > 0;
+
+		if (target === 'advanced' && !dirty) {
 			return this._applyModeSwitch(target);
 		}
-		// Advanced → Basic: show the rules of the new mode once. The action
-		// itself is non-destructive but the running config will change shape.
-		ui.showModal(_('Switch to Basic mode?'), [
-			E('p', {}, [ _(
-				'Basic mode hides Nodes, Routing and Settings and builds the running ' +
+
+		var title, body, confirm;
+		if (target === 'basic') {
+			title = _('Switch to Basic mode?');
+			body  = _('Basic mode hides Nodes, Routing and Settings and builds the running ' +
 				'sing-box config from the Basic tab only. Your advanced configuration ' +
-				'is kept on disk and will be active again when you switch back to Advanced.'
-			) ]),
-			E('div', { 'class': 'right' }, [
-				E('button', {
-					'class': 'btn',
-					'click': ui.hideModal
-				}, [ _('Cancel') ]),
-				' ',
-				E('button', {
-					'class': 'btn cbi-button-apply',
-					'click': ui.createHandlerFn(this, '_applyModeSwitch', target)
-				}, [ _('Switch to Basic') ])
-			])
-		]);
+				'is kept on disk and will be active again when you switch back to Advanced.');
+			confirm = _('Switch to Basic');
+		} else {
+			title = _('Switch to Advanced mode?');
+			body  = _('Advanced mode exposes Nodes, Routing and Settings.');
+			confirm = _('Switch to Advanced');
+		}
+
+		var children = [ E('p', {}, [ body ]) ];
+		if (dirty) {
+			children.push(E('p', { 'class': 'alert-message warning' }, [
+				_('You have unsaved changes on this page. Switching mode reloads ' +
+				  'the page and discards them.')
+			]));
+		}
+		children.push(E('div', { 'class': 'right' }, [
+			E('button', { 'class': 'btn', 'click': ui.hideModal }, [ _('Cancel') ]),
+			' ',
+			E('button', {
+				'class': 'btn cbi-button-apply',
+				'click': ui.createHandlerFn(this, '_applyModeSwitch', target)
+			}, [ confirm ])
+		]));
+		ui.showModal(title, children);
 	},
 
 	_applyModeSwitch: function(target) {
 		ui.hideModal();
-		return callSetMode(target).then(function() {
+		// Drop any staged changes too: keeping them would re-trigger LuCI's
+		// "apply pending changes" banner on the freshly reloaded page in the
+		// other mode, where some of those changes may reference UCI sections
+		// the new mode's UI doesn't expose.
+		var p = (Object.keys(uci.changes() || {}).length > 0)
+			? ui.changes.revert() : Promise.resolve();
+		return p.then(function() {
+			return callSetMode(target);
+		}).then(function() {
 			// Drop the stored tab id so the new mode lands on its first tab
 			// cleanly instead of being redirected through the cross-mode map.
 			session.setLocalData('prism.activeTab', '');
