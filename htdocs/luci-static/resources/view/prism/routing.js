@@ -9,6 +9,7 @@
 'require ui';
 'require view.prism.lib.ordersave as ordersave';
 'require view.prism.lib.formpanel as formpanel';
+'require view.prism.uid as uid';
 
 var callListOutbounds = rpc.declare({
 	object: 'luci.prism',
@@ -545,7 +546,7 @@ var ConditionList = form.DummyValue.extend({
 			uci.remove('prism', c['.name']);
 		});
 		desired.forEach(function(cd, idx) {
-			var sid = uci.add('prism', 'condition');
+			var sid = uci.add('prism', 'condition', uid.generate());
 			uci.set('prism', sid, 'rule',  section_id);
 			uci.set('prism', sid, 'order', String(idx));
 			uci.set('prism', sid, 'kind',  cd.kind);
@@ -604,13 +605,14 @@ return baseclass.extend({
 		// the listing order must match the Servers tab's Subscriptions
 		// section. Manual nodes (subscription === '') sort to the top, in
 		// section order.
-		// Keyed by uid — that is what `ob.subscription` carries (the stable
-		// file key the rpcd handler emits for every subscription node).
+		// Keyed by the subscription's section name (its uid) — that is what
+		// `ob.subscription` carries (the stable file key the rpcd handler
+		// emits for every subscription node).
 		var subName = {}, subOrder = {};
 		uci.sections('prism', 'subscription').forEach(function(sub, idx) {
-			if (!sub.uid) return;
-			subName[sub.uid]  = sub.name || sub.uid;
-			subOrder[sub.uid] = idx;
+			var u = sub['.name'];
+			subName[u]  = sub.name || u;
+			subOrder[u] = idx;
 		});
 		function groupKey(sub_id) {
 			if (!sub_id) return 0;
@@ -670,18 +672,18 @@ return baseclass.extend({
 		s.addbtntitle = _('Add');
 		s.modaltitle = function() { return _('Routing rule'); };
 
-		// Create each rule as a NAMED section with a stable generated name.
-		// An anonymous section gets a temporary `newNNNN` id that LuCI renames
-		// to a real `cfgXXXX` id on save; a child condition's `rule`
-		// back-reference, captured as that temp id, would not follow the
-		// rename — orphaning every condition added in the same modal session
-		// as the new rule. An explicit name is fixed from creation through
-		// commit. `anonymous` still hides the name in the UI.
+		// Create each rule as a NAMED section whose name is a 16-hex uid.
+		// Two reasons it has to be named (not anonymous): (a) a child
+		// condition's `rule` back-reference captures the section name at
+		// modal-save time, so the parent's name must be fixed from creation
+		// — an anonymous section would commit as a fresh cfgXXXX and orphan
+		// every just-saved condition; (b) all other anonymous types in this
+		// config use uid-as-name too, so cross-references stay stable across
+		// any structural change to /etc/config/prism. `anonymous` still
+		// hides the name in the UI.
 		var gridHandleAdd = s.handleAdd;
-		s.handleAdd = function(ev) {
-			var name = 'rule_' + Date.now().toString(36) + '_' +
-			           Math.floor(Math.random() * 0xffffff).toString(16);
-			return gridHandleAdd.call(this, ev, name);
+		s.handleAdd = function(ev, name) {
+			return gridHandleAdd.call(this, ev, name || uid.generate());
 		};
 
 		var oEnabled = s.option(form.Flag, 'enabled', _('On'));
@@ -750,6 +752,15 @@ return baseclass.extend({
 		cs.anonymous = true;
 		cs.addbtntitle = _('Add');
 
+		// Uid-as-section-name (uniform with every other anonymous prism
+		// type). Conditions reference rule-sets by their `label` field,
+		// not by section name, so the change is cosmetic for customrs
+		// alone — but it keeps the schema rule the same across the board.
+		var csHandleAdd = cs.handleAdd;
+		cs.handleAdd = function(ev, name) {
+			return csHandleAdd.call(this, ev, name || uid.generate());
+		};
+
 		var oLabel = cs.option(form.Value, 'label', _('Label'));
 		oLabel.rmempty = false;
 		oLabel.validate = function(section_id, value) {
@@ -789,6 +800,11 @@ return baseclass.extend({
 		bp.anonymous = true;
 		bp.addbtntitle = _('Add');
 		bp.modaltitle = function() { return _('Bypass'); };
+
+		var bpHandleAdd = bp.handleAdd;
+		bp.handleAdd = function(ev, name) {
+			return bpHandleAdd.call(this, ev, name || uid.generate());
+		};
 
 		var bpEnabled = bp.option(form.Flag, 'enabled', _('On'));
 		bpEnabled['default'] = '1';

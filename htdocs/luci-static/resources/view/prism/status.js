@@ -210,11 +210,12 @@ function formatActiveNode(tag, outbounds) {
 	if (tag === 'direct') return _('direct (no proxy)');
 	if (tag === 'block')  return _('block (drop)');
 	if (TAG_DISPLAY[tag])  return TAG_DISPLAY[tag];
-	// Keyed by uid — `ob.subscription` carries the subscription's uid, not
-	// its cfgXXXX section name.
+	// Keyed by the subscription's section name (its uid) — that is what
+	// `ob.subscription` carries.
 	var subName = {};
 	uci.sections('prism', 'subscription').forEach(function(sub) {
-		if (sub.uid) subName[sub.uid] = sub.name || sub.uid;
+		var u = sub['.name'];
+		subName[u] = sub.name || u;
 	});
 	for (var i = 0; i < (outbounds || []).length; i++) {
 		var ob = outbounds[i];

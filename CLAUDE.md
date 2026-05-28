@@ -691,6 +691,33 @@ config prism 'global'
     option log_level 'warn'
 ```
 
+### Section identity
+
+Every non-global section type (`subscription`, `rule`, `node`, `condition`,
+`customrs`, `bypass`) is a NAMED UCI section whose name is a 16-hex-char
+random uid generated at create time. `s[".name"]` IS the stable id used
+by every cross-reference — `/etc/prism/nodes/<uid>.json`, `condition.rule`,
+the `subscription` field on built outbounds, `urltest_regex_sources`, the
+JS `subName` / `subOrder` maps.
+
+There is no `uid` UCI option. Do not introduce one. Do not store
+`section.section` (the libuci-generated `cfgXXXX`) anywhere persistent —
+for prism sections it never appears (libuci only mints it for anonymous
+sections, and these aren't), but the rule holds generally: any
+cross-reference that survives a page reload or hits disk must go through
+the section name, not a derived id.
+
+Creating a new section anywhere in the codebase:
+
+- **JS**: `'require view.prism.uid as uid';` then pass `uid.generate()`
+  as the 3rd arg to `uci.add('prism', '<type>', uid.generate())`. For
+  GridSection panels, override `handleAdd` so the Add button mints the
+  uid before the modal opens (`nodes.js` / `routing.js` / `basic.js`
+  for the existing types).
+- **Lua**: `c:set("prism", uid, "<type>")` to create, or `c:rename` for
+  fixups — `stabilise_section_name` in `luci.prism` does the latter when
+  a hand-rolled `^cfg` section sneaks in via SSH.
+
 ---
 
 ## Dependencies

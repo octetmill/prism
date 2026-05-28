@@ -959,16 +959,11 @@ end
 --     storage impractical. Each entry has a payload field with the full
 --     sing-box outbound JSON (needed by build-config).
 --
--- `uid` is a per-subscription random hex string stored on the UCI subscription
--- section. Files are keyed by uid instead of the cfgXXXX section name because
--- anonymous UCI section names are not persisted in /etc/config/prism — they
--- are regenerated from a package-wide section counter on every parse, so any
--- structural change to the file (deleting a manual node ahead of the
--- subscription block, dragging sections across each other, hand-editing) can
--- rotate them and silently re-key every JSON file out from under its row.
--- The uid is assigned once at create-time (UI handleAdd, or lazily on first
--- sync_one for hand-rolled sections, or by the install-time migration for
--- pre-uid configs) and never changes.
+-- A subscription's uid IS its UCI section name (a 16-hex random id assigned
+-- at create time). Section names are persisted to disk by libuci, so the id
+-- is stable across every parse — unlike the volatile cfgXXXX libuci hands
+-- out for anonymous sections. The install-time migration renames every
+-- pre-uid section into shape; the UI Add path mints the uid up front.
 
 local NODES_DIR = "/etc/prism/nodes"
 
@@ -977,10 +972,9 @@ local function nodes_file(uid)
 	return NODES_DIR .. "/" .. safe .. ".json"
 end
 
--- 16 hex chars from /dev/urandom (= 64 bits). The collision space is
--- comfortably oversized for a per-router list of ≤ a few subscriptions; the
--- generator is also the same shape the migration script uses so an existing
--- migrated uid and a freshly-generated one look identical.
+-- 16 hex chars from /dev/urandom (= 64 bits). Used by the cfg-rename
+-- backstop below for sections that escaped the install-time migration
+-- (e.g. someone ran `uci add prism subscription` over SSH afterwards).
 local function generate_uid()
 	local f = io.open("/dev/urandom", "rb")
 	if not f then return nil end
@@ -990,18 +984,21 @@ local function generate_uid()
 	return (bytes:gsub(".", function(c) return string.format("%02x", string.byte(c)) end))
 end
 
--- Read/assign the subscription section's `uid`. Returns the uid on success,
--- or nil if /dev/urandom is unreadable (extremely defensive — the caller
--- should treat this as a sync failure rather than silently writing a file
--- under a degenerate name).
-local function ensure_sub_uid(c, section_id)
-	local uid = c:get("prism", section_id, "uid")
-	if uid and uid ~= "" then return uid end
-	uid = generate_uid()
-	if not uid then return nil end
-	c:set("prism", section_id, "uid", uid)
+-- Promote a `^cfg…` anonymous section to a stable uid section name, in
+-- place. The migration script catches every section that existed at
+-- install time; this covers post-install hand-rolled `uci add prism …`
+-- sections that would otherwise inherit a volatile cfgXXXX name and lose
+-- their on-disk file the next time some other section rotates the counter.
+-- Returns the (possibly new) section id; nil if rename failed.
+local function stabilise_section_name(c, section_id)
+	if type(section_id) ~= "string" or not section_id:match("^cfg") then
+		return section_id
+	end
+	local new_id = generate_uid()
+	if not new_id then return nil end
+	c:rename("prism", section_id, new_id)
 	c:commit("prism")
-	return uid
+	return new_id
 end
 
 local function ensure_nodes_dir()
@@ -1095,21 +1092,20 @@ local function write_nodes_file(uid, nodes)
 	return os.rename(tmp, path) ~= nil
 end
 
--- Map uid → section_name for every `subscription` section that has a uid set.
--- The node file `<uid>.json` is only meaningful when its basename is a uid in
--- this map; any file not in it is an orphan from a since-deleted subscription
--- (or a hand-edited UCI section whose uid was wiped) and must not feed into
--- outbound dropdowns — its tags would silently appear alongside live ones,
--- with no subscription label to disambiguate them.
+-- Set of uids for which a current `subscription` UCI section exists. The
+-- subscription's section name IS its uid. A `<uid>.json` whose basename
+-- is not in this set is an orphan (subscription deleted, or hand-edit
+-- wiped the section) and must not feed into outbound dropdowns — its tags
+-- would silently appear alongside live ones, with no subscription label
+-- to disambiguate them.
 local function valid_sub_uids()
-	local map = {}
+	local set = {}
 	local c = uci_cursor()
 	c:foreach("prism", "subscription", function(s)
-		local u = s.uid
-		if u and u ~= "" then map[u] = s[".name"] end
+		set[s[".name"]] = true
 	end)
 	c:close()
-	return map
+	return set
 end
 
 -- Delete node files on disk whose uid no longer corresponds to a current
@@ -1219,23 +1215,28 @@ local function sync_one(id)
 	end
 
 	local c = uci_cursor()
+	-- Promote a `^cfg` section name to a stable uid before any file write.
+	-- The migration covers every section that existed at install time; this
+	-- backstop catches the rare post-install `uci add prism subscription`
+	-- over SSH, which would otherwise inherit a volatile cfgXXXX name and
+	-- lose its on-disk file the next time some other section rotates the
+	-- counter. After this point, `id` is the stable uid.
+	local new_id = stabilise_section_name(c, id)
+	if not new_id then
+		c:close()
+		log_prism("err", "sync '" .. id .. "': could not assign stable uid")
+		return { status = "error", node_count = 0 }
+	end
+	id = new_id
+
 	local url        = c:get("prism", id, "url")        or ""
 	local sub_name   = c:get("prism", id, "name")       or id
 	local user_agent = c:get("prism", id, "user_agent") or ""
-	-- Lazy-allocate the uid for hand-rolled or pre-migration subscriptions.
-	-- The UI Add-button path assigns one synchronously, and the install-time
-	-- migration covers every existing section, so this is a defensive backstop
-	-- rather than the common path.
-	local uid = ensure_sub_uid(c, id)
+	local uid        = id
 	c:close()
 
 	if url == "" then
 		log_prism("warn", "sync '" .. sub_name .. "': no URL configured")
-		return { status = "error", node_count = 0 }
-	end
-
-	if not uid then
-		log_prism("err", "sync '" .. sub_name .. "': could not allocate uid")
 		return { status = "error", node_count = 0 }
 	end
 
@@ -1814,17 +1815,10 @@ local methods = {
 			if not id:match("^[%w_%-]+$") then
 				return { nodes = {} }
 			end
-			-- The caller passes the UCI section name (cfgXXXX), not the uid:
-			-- the form GridSection's onclick handler hands the section id to
-			-- the row's Sync/View buttons, and downstream code (build-config,
-			-- sync-subscriptions cron) does the same. Resolve to the file's
-			-- uid here so the on-disk filename remains rotation-stable.
-			local c = uci_cursor()
-			local uid = c:get("prism", id, "uid") or ""
-			c:close()
-			if uid == "" then return { nodes = {} } end
+			-- The caller passes the subscription's UCI section name, which
+			-- IS its uid (the on-disk file is `<id>.json`).
 			local out = {}
-			for _, n in ipairs(read_nodes_file(uid)) do
+			for _, n in ipairs(read_nodes_file(id)) do
 				out[#out + 1] = {
 					tag         = n.tag or "",
 					type        = n.type or "",

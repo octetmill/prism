@@ -24,6 +24,7 @@
 'require ui';
 'require uci';
 'require view.prism.lib.formpanel as formpanel';
+'require view.prism.uid as uid';
 
 var callListSubNodes = rpc.declare({
 	object: 'luci.prism',
@@ -44,20 +45,6 @@ var callReloadIfChanged = rpc.declare({
 	method: 'reload_if_changed',
 	expect: { '': {} }
 });
-
-// 16 hex chars from getRandomValues. Subscription file storage is keyed by
-// this uid (see /etc/prism/nodes/<uid>.json) rather than the volatile cfgXXXX
-// section name. Same shape and rationale as nodes.js — duplicated here so the
-// Basic panel can create rotation-safe rows without dragging in the Advanced
-// module.
-function generateSubUid() {
-	var bytes = new Uint8Array(8);
-	(window.crypto || window.msCrypto).getRandomValues(bytes);
-	var s = '';
-	for (var i = 0; i < bytes.length; i++)
-		s += ('0' + bytes[i].toString(16)).slice(-2);
-	return s;
-}
 
 // Curated, alphabetical-by-English-name country list for the bypass picker.
 // Power users who need an obscure code switch to Advanced mode.
@@ -144,18 +131,12 @@ return baseclass.extend({
 		sSubs.addbtntitle = _('Add subscription');
 		sSubs.modaltitle  = function() { return _('Subscription'); };
 
-		// Stamp every new subscription section with a stable `uid` UCI option.
-		// /etc/prism/nodes/<uid>.json is keyed by this uid (rather than the
-		// volatile cfgXXXX section name), so the file survives any reorder or
-		// hand-edit that shifts section positions in /etc/config/prism.
-		// Mirrors the same override in nodes.js's Subscriptions section.
+		// Create every subscription as a NAMED section whose name is a
+		// random 16-hex uid — same scheme as the Advanced Nodes panel.
+		// /etc/prism/nodes/<uid>.json is keyed by that name.
 		var subsHandleAdd = sSubs.handleAdd;
 		sSubs.handleAdd = function(ev, name) {
-			var ret = subsHandleAdd.call(this, ev, name);
-			var sid = this.addedSection;
-			if (sid && !uci.get('prism', sid, 'uid'))
-				uci.set('prism', sid, 'uid', generateSubUid());
-			return ret;
+			return subsHandleAdd.call(this, ev, name || uid.generate());
 		};
 
 		var oSubEnabled = sSubs.option(form.Flag, 'enabled', _('Enabled'));
