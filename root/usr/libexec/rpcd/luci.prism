@@ -1206,12 +1206,15 @@ local function list_all_nodes()
 	return all
 end
 
--- Cooperative sync lock — same file the cron `sync-subscriptions` wrapper
--- holds. Serializes manual sync_subscription / sync_all_subscriptions RPCs
--- against the hourly cron path and against each other, so concurrent
--- sync_one() runs can't race on /etc/config/prism: without it, two writers
--- can stage disjoint c2:set's, the second commit's full-file rewrite wins,
--- and one of them silently loses its status/last_sync/node_count writes.
+-- Cooperative sync lock. This RPC is the single owner of the lock — the cron
+-- `sync-subscriptions` wrapper drives the hourly pass by calling this RPC
+-- per due subscription and deliberately does NOT hold the lock itself (a
+-- held-then-recursed `lock -n` from the wrapper process would fail and the
+-- RPC would skip every cron sync). Serializes manual and cron-driven
+-- sync_subscription / sync_all_subscriptions runs against each other, so
+-- concurrent sync_one() runs can't race on /etc/config/prism: without it, two
+-- writers can stage disjoint c2:set's, the second commit's full-file rewrite
+-- wins, and one of them silently loses its status/last_sync/node_count writes.
 -- Non-blocking (`lock -n`) to match the rest of the codebase and keep the
 -- UI responsive — a collision returns status="busy" and the user retries
 -- rather than blocking the RPC for a whole cron pass.
