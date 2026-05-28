@@ -304,13 +304,15 @@ printf '#!/bin/sh\n[ -n "${IPKG_INSTROOT}" ] || {\n\t/etc/init.d/prism stop\n\t/
 # Install with: apk add --allow-untrusted <package>.apk
 #
 # The staging tree is owned by the unprivileged build user; package files must
-# be owned by root. chown the tree to 0:0 inside a fakeroot session, save that
-# session, and replay it into `apk mkpkg` so the package records root.
+# be owned by root. chown the tree to 0:0 and run `apk mkpkg` inside a single
+# fakeroot session so the saved-state dance (-s/-i with a state file) is not
+# needed.
 
-FAKEROOT_ENV="$BUILD_DIR/fakeroot.env"
-fakeroot -s "$FAKEROOT_ENV" -- chown -R 0:0 "$STAGE_DIR"
-
-fakeroot -i "$FAKEROOT_ENV" -- apk mkpkg \
+fakeroot -- sh -c '
+	chown -R 0:0 "$1" || exit
+	shift
+	exec "$@"
+' _ "$STAGE_DIR" apk mkpkg \
 	--info "name:${PKG_NAME}" \
 	--info "version:${PKG_FULL_VER}" \
 	--info "description:${PKG_DESC}" \

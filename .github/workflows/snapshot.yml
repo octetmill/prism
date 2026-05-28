@@ -103,14 +103,3 @@ jobs:
               --prerelease \
               --target "${GITHUB_SHA}"
           fi
-
-      - name: Upload artifact (per-commit archive)
-        uses: actions/upload-artifact@v4
-        with:
-          name: luci-app-prism-snapshot-${{ github.sha }}
-          path: |
-            dist/*.apk
-            dist/*.ipk
-            dist/*.sha256
-          retention-days: 30
-          if-no-files-found: error
