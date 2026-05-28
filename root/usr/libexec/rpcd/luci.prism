@@ -1290,7 +1290,15 @@ local function sync_one(id)
 	end
 
 	local c2 = uci_cursor()
-	local old_count = tonumber(c2:get("prism", id, "node_count")) or 0
+	-- Extra parens around c2:get force single-value semantics: on this
+	-- libuci-lua, a missing option returns (nil, errmsg), and without the
+	-- parens that second string would be passed as tonumber's `base`
+	-- argument and throw "bad argument #2". sync_one runs under pcall, so
+	-- the throw silently bailed out before the c2:set/commit below — first
+	-- syncs of a subscription (the only time node_count is unset) never
+	-- persisted status/last_sync/node_count and surfaced as "Sync failed"
+	-- in the UI despite the file write succeeding.
+	local old_count = tonumber((c2:get("prism", id, "node_count"))) or 0
 	c2:set("prism", id, "last_sync", now)
 	c2:set("prism", id, "status", status)
 	if status == "ok" then
