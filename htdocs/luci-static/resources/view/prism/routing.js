@@ -86,8 +86,143 @@ var PLACEHOLDERS = {
 	port:           '80, 443, 8000-8100'
 };
 
-// Monotonic counter for unique <datalist> element ids.
-var dlSeq = 0;
+// Custom autocomplete popup. The native <datalist> opens on focus, shows
+// every option, and on some browsers expands into a full-screen overlay —
+// useless for a 100+ entry rule-set catalog. This is a single shared popup
+// that filters by substring, opens only after AC_MIN_CHARS, caps the
+// visible height at ~10 rows, and scrolls for the rest.
+var AC_MIN_CHARS  = 2;
+var AC_MAX_HITS   = 200;  // result pool; popup window is height-bounded
+var acPopup = null;
+var acState = null;       // { input, items: [str], active: idx }
+
+function acClose() {
+	if (acPopup) acPopup.style.display = 'none';
+	acState = null;
+}
+
+function acGetPopup() {
+	if (acPopup) return acPopup;
+	acPopup = E('div', {
+		'class': 'prism-ac-popup',
+		'style': 'position:fixed; z-index:10000; display:none; ' +
+		         'max-height:240px; overflow-y:auto; min-width:12em; ' +
+		         'background:var(--background-color-medium, #fff); ' +
+		         'color:var(--text-color-medium, inherit); ' +
+		         'border:1px solid var(--border-color-medium, #888); ' +
+		         'box-shadow:0 2px 6px rgba(0,0,0,0.25); ' +
+		         'font-size:13px;'
+	});
+	document.body.appendChild(acPopup);
+	document.addEventListener('mousedown', function(ev) {
+		if (!acState) return;
+		if (acPopup.contains(ev.target) || ev.target === acState.input) return;
+		acClose();
+	});
+	// Close on scroll of any ancestor — the popup is fixed-positioned so a
+	// scroll underneath would otherwise leave it stranded. Scrolls inside
+	// the popup itself (its own overflow container) must NOT trigger this.
+	window.addEventListener('scroll', function(ev) {
+		if (acPopup && acPopup.contains(ev.target)) return;
+		acClose();
+	}, true);
+	window.addEventListener('resize', acClose);
+	return acPopup;
+}
+
+function acSetActive(i) {
+	if (!acState) return;
+	var pop = acGetPopup();
+	if (i < 0 || i >= pop.children.length) return;
+	acState.active = i;
+	for (var k = 0; k < pop.children.length; k++) {
+		pop.children[k].style.background = (k === i)
+			? 'var(--background-color-high, #d0d8e0)' : '';
+	}
+	pop.children[i].scrollIntoView({ block: 'nearest' });
+}
+
+function acSelect(i) {
+	if (!acState) return;
+	var input = acState.input;
+	input.value = acState.items[i];
+	input.dispatchEvent(new Event('input',  { bubbles: true }));
+	input.dispatchEvent(new Event('change', { bubbles: true }));
+	acClose();
+	input.focus();
+}
+
+function acOpen(input, items) {
+	var pop = acGetPopup();
+	while (pop.firstChild) pop.removeChild(pop.firstChild);
+	items.forEach(function(it, i) {
+		var entry = E('div', {
+			'class': 'prism-ac-item',
+			'style': 'padding:4px 8px; cursor:pointer; white-space:nowrap;'
+		}, [ it ]);
+		entry.addEventListener('mouseenter', function() { acSetActive(i); });
+		entry.addEventListener('mousedown', function(ev) {
+			ev.preventDefault();  // keep input focused
+			acSelect(i);
+		});
+		pop.appendChild(entry);
+	});
+	var rect = input.getBoundingClientRect();
+	pop.style.left     = rect.left + 'px';
+	pop.style.top      = (rect.bottom + 2) + 'px';
+	pop.style.minWidth = rect.width + 'px';
+	pop.style.display  = 'block';
+	acState = { input: input, items: items, active: 0 };
+	acSetActive(0);
+}
+
+function bindAutocomplete(input, suggestions) {
+	if (!input || input._prismAcBound) return;
+	input._prismAcBound = true;
+
+	// Normalise once: suggestions may be plain strings or [value, label] pairs.
+	var pool = suggestions.map(function(s) {
+		return Array.isArray(s) ? s[0] : s;
+	});
+
+	function refresh() {
+		var q = (input.value || '').trim().toLowerCase();
+		if (q.length < AC_MIN_CHARS) { acClose(); return; }
+		var hits = [];
+		for (var k = 0; k < pool.length && hits.length < AC_MAX_HITS; k++) {
+			if (pool[k].toLowerCase().indexOf(q) !== -1)
+				hits.push(pool[k]);
+		}
+		if (!hits.length) { acClose(); return; }
+		acOpen(input, hits);
+	}
+
+	input.addEventListener('input', refresh);
+	input.addEventListener('blur', function() {
+		// Delay so mousedown on a popup row can fire and select first.
+		setTimeout(function() {
+			if (acState && acState.input === input &&
+			    document.activeElement !== input)
+				acClose();
+		}, 150);
+	});
+	input.addEventListener('keydown', function(ev) {
+		if (!acState || acState.input !== input) return;
+		if (ev.key === 'ArrowDown') {
+			ev.preventDefault();
+			acSetActive(Math.min(acState.active + 1,
+			                     acState.items.length - 1));
+		} else if (ev.key === 'ArrowUp') {
+			ev.preventDefault();
+			acSetActive(Math.max(acState.active - 1, 0));
+		} else if (ev.key === 'Enter') {
+			ev.preventDefault();
+			acSelect(acState.active);
+		} else if (ev.key === 'Escape') {
+			acClose();
+		}
+	});
+}
 
 // Human label for one condition — the short kind name, prefixed with NOT
 // when inverted. Shared by the grid summary and the modal preview so the
@@ -166,9 +301,9 @@ var ConditionList = form.DummyValue.extend({
 		// `port` gets a single text input — comma-separated ports, `lo-hi`
 		// for ranges (80, 443, 8000-8100) — which suits short tokens far
 		// better than a growable list. Every other kind keeps a
-		// free-typeable ui.DynamicList; a native <datalist> offers
-		// suggestions for the kinds that have them without blocking
-		// arbitrary values.
+		// free-typeable ui.DynamicList; a custom autocomplete popup
+		// (see bindAutocomplete) offers suggestions for the kinds that
+		// have them without blocking arbitrary values.
 		function makeValueEditor(kind, values) {
 			if (kind === 'port') {
 				var inp = E('input', {
@@ -194,17 +329,9 @@ var ConditionList = form.DummyValue.extend({
 			var node = dl.render();
 			var sugg = suggestionsFor(kind);
 			if (sugg && sugg.length) {
-				var listId = 'prism-dl-' + (++dlSeq);
-				var datalist = E('datalist', { 'id': listId });
-				sugg.forEach(function(it) {
-					datalist.appendChild(E('option', {
-						'value': Array.isArray(it) ? it[0] : it
-					}));
-				});
-				node.appendChild(datalist);
 				var bind = function(inp) {
 					if (inp && inp.tagName === 'INPUT' && inp.type === 'text')
-						inp.setAttribute('list', listId);
+						bindAutocomplete(inp, sugg);
 				};
 				node.querySelectorAll('input[type="text"]').forEach(bind);
 				// ui.DynamicList grows new inputs as items are added; bind
