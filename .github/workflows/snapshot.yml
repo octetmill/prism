@@ -14,6 +14,10 @@ on:
   push:
     branches-ignore:
       - main
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - '.github/workflows/release.yml'
   workflow_dispatch:
 
 # Serialise snapshot builds: a newer push supersedes an in-flight one, so the
