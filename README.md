@@ -41,11 +41,17 @@ The [latest release](../../releases/latest) page has a copy-paste
 one-liner with the version baked in — open it, copy the install
 command from the notes, paste it on the router. The shape is:
 
+**OpenWrt 25.12+** (APK):
+
 ```sh
 wget -O /tmp/prism.apk <release-asset-url> && apk add --allow-untrusted /tmp/prism.apk && service rpcd reload
 ```
 
-(`.ipk` + `opkg install` on 24.10.)
+**OpenWrt 24.10** (opkg):
+
+```sh
+wget -O /tmp/prism.ipk <release-asset-url> && opkg install /tmp/prism.ipk && service rpcd reload
+```
 
 Then open `http://<router>/cgi-bin/luci/admin/services/prism` and add
 your first subscription from the **Basic** tab (or **Nodes** in
