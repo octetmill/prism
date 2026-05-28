@@ -774,6 +774,31 @@ local function log_prism(level, msg)
 	os.execute("logger -p daemon." .. level .. " -t prism '" .. safe .. "' 2>/dev/null")
 end
 
+-- Migrate legacy `type=selector` node sections to `type=urltest`. Selector
+-- creation was removed from the UI and the type is no longer in the Type
+-- dropdown, so an existing selector section would otherwise render with no
+-- matching value. We rewrite the type and drop the now-meaningless
+-- `selector_default` field so the UI shows a consistent urltest group.
+-- build-config has its own in-memory conversion as a safety net for the
+-- edge case where this migration didn't run before the next apply (e.g. a
+-- hand-edit via SSH). No-op when no selector sections exist.
+local function migrate_legacy_selectors()
+	local c = uci_cursor()
+	local changed = false
+	c:foreach("prism", "node", function(s)
+		if s.type == "selector" and s[".name"] then
+			c:set("prism", s[".name"], "type", "urltest")
+			c:delete("prism", s[".name"], "selector_default")
+			changed = true
+		end
+	end)
+	if changed then
+		c:commit("prism")
+		log_prism("info", "migrated legacy selector node(s) to urltest")
+	end
+	c:close()
+end
+
 -- Shared helpers, loaded via dofile() with an absolute path (cwd-independent).
 -- prismlib.lua ships in this package alongside this handler, so unlike the
 -- optional luci.jsonc it is always present when the handler is. Declared up
@@ -1830,21 +1855,21 @@ local methods = {
 		end
 	},
 
-	-- Return the live state of every urltest/selector group: the currently
-	-- active member (the clash `now` field) plus its last-known latency.
-	-- Source is the snapshot file the active-watch daemon writes every 10s,
-	-- not a fresh /proxies GET — keeps the RPC cheap (no extra HTTP round
-	-- trip on every Status-page tick), and ties the UI to the same view the
-	-- daemon logs against, so what the Prism log says flipped matches what
-	-- the Groups panel shows is active.
+	-- Return the live state of every urltest group: the currently active
+	-- member (the clash `now` field) plus its last-known latency. Source
+	-- is the snapshot file the active-watch daemon writes every 10s, not
+	-- a fresh /proxies GET — keeps the RPC cheap (no extra HTTP round
+	-- trip on every Status-page tick), and ties the UI to the same view
+	-- the daemon logs against, so what the Prism log says flipped matches
+	-- what the Groups panel shows is active.
 	--
-	-- Joins UCI on the group tag to surface `interval` / `tolerance` /
-	-- `default` so the user can read each group's tuning right next to the
-	-- evidence of it churning. UCI is open as a cursor only once for the
-	-- whole list — group counts are small (a handful).
+	-- Joins UCI on the group tag to surface `interval` / `tolerance` so
+	-- the user can read each group's tuning right next to the evidence
+	-- of it churning. UCI is open as a cursor only once for the whole
+	-- list — group counts are small (a handful).
 	--
-	-- Reports the same `error = "clash API disabled"` as test_node when the
-	-- feature flag is off, so the UI can render a consistent hint.
+	-- Reports the same `error = "clash API disabled"` as test_node when
+	-- the feature flag is off, so the UI can render a consistent hint.
 	get_active_groups = {
 		call = function()
 			local c = uci_cursor()
@@ -1854,18 +1879,16 @@ local methods = {
 				return { error = "clash API disabled", groups = {} }
 			end
 
-			-- Index UCI group sections (type=node with urltest/selector
-			-- type) by their tag, so the snapshot tag maps back to the
-			-- user's configured interval/tolerance/default.
+			-- Index UCI urltest group sections by tag so the snapshot
+			-- tag maps back to the user's configured interval/tolerance.
 			local uci_groups = {}
 			c:foreach("prism", "node", function(s)
-				if s.type == "urltest" or s.type == "selector" then
+				if s.type == "urltest" then
 					if s.tag and s.tag ~= "" then
 						uci_groups[s.tag] = {
 							type      = s.type,
 							interval  = s.urltest_interval or "",
-							tolerance = s.urltest_tolerance or "",
-							default   = s.selector_default or ""
+							tolerance = s.urltest_tolerance or ""
 						}
 					end
 				end
@@ -1897,19 +1920,17 @@ local methods = {
 				-- Skip rows whose group has been deleted from UCI but
 				-- still lingers in the snapshot until sing-box's next
 				-- reload. Without this filter the UI would render a
-				-- confusing row with blank interval/tolerance/default
-				-- pointing at a group the user already removed.
+				-- confusing row with blank interval/tolerance pointing
+				-- at a group the user already removed.
 				if u then
 					out[#out + 1] = {
 						tag       = tag,
 						type      = (entry.type == "URLTest") and "urltest"
-						            or (entry.type == "Selector") and "selector"
 						            or string.lower(tostring(entry.type or "")),
 						now       = entry.now or "",
 						delay_ms  = entry.delay_ms,
 						interval  = u.interval or "",
-						tolerance = u.tolerance or "",
-						default   = u.default or ""
+						tolerance = u.tolerance or ""
 					}
 				end
 			end
@@ -2174,6 +2195,10 @@ elseif cmd == "call" then
 			args = json_parse(raw) or {}
 		end
 	end
+
+	-- One-shot migration of legacy selector node sections. No-op on a
+	-- clean install; on an upgrade this fixes UCI before any RPC reads it.
+	pcall(migrate_legacy_selectors)
 
 	local ok, result = pcall(def.call, args)
 	-- Always exit 0: rpcd's exec plugin maps non-zero exit to

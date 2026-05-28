@@ -82,14 +82,13 @@ return baseclass.extend({
 				});
 			});
 			return Promise.all(calls).then(function(results) {
-				// Clash-format subscriptions carry their own urltest /
-				// selector groups alongside the individual nodes. Basic's
-				// "pick N, auto-wrap in basic-auto" flow only makes sense
-				// for concrete servers — wrapping a group inside another
-				// group is valid in sing-box but confusing to surface in a
-				// "Default server(s)" picker. Filter group types out here
-				// so the dropdown only offers real endpoints.
-				var GROUP_TYPES = { urltest: true, selector: true };
+				// Clash-format subscriptions may carry urltest groups
+				// alongside individual nodes. Basic's "pick N, auto-wrap in
+				// basic-auto" flow only makes sense for concrete servers —
+				// wrapping a group inside another group is valid in sing-box
+				// but confusing in a "Default server(s)" picker. Filter
+				// group types out so the dropdown only offers real endpoints.
+				var GROUP_TYPES = { urltest: true };
 				var nodes = [];
 				var failed = [];
 				results.forEach(function(r, i) {

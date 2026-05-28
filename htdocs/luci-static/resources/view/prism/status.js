@@ -100,9 +100,9 @@ var callListOutbounds = rpc.declare({
 	expect: { '': {} }
 });
 
-// Pulls each urltest/selector group's currently-active member (clash `now`)
-// from the snapshot the active-watch daemon writes every 10s — the same
-// view that backs the syslog change-log. Returns { groups: [...] } or
+// Pulls each urltest group's currently-active member (clash `now`) from
+// the snapshot the active-watch daemon writes every 10s — the same view
+// that backs the syslog change-log. Returns { groups: [...] } or
 // { error: "clash API disabled", groups: [] } when the feature is off.
 var callGetActiveGroups = rpc.declare({
 	object: 'luci.prism',
@@ -367,13 +367,13 @@ return baseclass.extend({
 			}, this._renderTraffic(statsData)),
 
 			// ── Active groups ──────────────────────────────────────────
-			// One row per urltest/selector group, showing the currently
-			// active member (clash `now`), its last-known latency, and
-			// the group's own tuning (interval/tolerance for urltest,
-			// "selector" for manual). Hidden when clash API is off, when
-			// the daemon has nothing yet, or when there are no groups —
-			// the container is always present so _updateGroups can flip
-			// visibility without re-rendering the page.
+			// One row per urltest group, showing the currently active
+			// member (clash `now`), its last-known latency, and the
+			// group's own tuning (interval/tolerance). Hidden when clash
+			// API is off, when the daemon has nothing yet, or when there
+			// are no groups — the container is always present so
+			// _updateGroups can flip visibility without re-rendering the
+			// page.
 			E('div', {
 				'id': 'prism-groups-section',
 				'class': 'cbi-section',
@@ -556,9 +556,9 @@ return baseclass.extend({
 		}, [ ms + 'ms' ]);
 	},
 
-	// "urltest · every 1m0s · ±50ms" / "selector → default: HK-01" / "selector"
-	// — surfaces the configured tuning right next to the evidence of it
-	// churning, so the user can read both at once without leaving the page.
+	// "urltest · every 1m0s · ±50ms" — surfaces the configured tuning right
+	// next to the evidence of it churning, so the user can read both at
+	// once without leaving the page.
 	_renderGroupMeta: function(g) {
 		if (g.type === 'urltest') {
 			var parts = [ _('urltest') ];
@@ -567,11 +567,6 @@ return baseclass.extend({
 			if (g.tolerance && g.tolerance !== '')
 				parts.push('±' + g.tolerance + 'ms');
 			return parts.join(' · ');
-		}
-		if (g.type === 'selector') {
-			if (g.default && g.default !== '')
-				return _('selector · default: %s').format(g.default);
-			return _('selector');
 		}
 		return g.type || '';
 	},
