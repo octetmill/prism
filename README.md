@@ -33,14 +33,19 @@ page — no JSON to hand-edit.
 
 ## Install
 
+SSH into the router, then paste one of the commands below.
+
 ### Tagged release (recommended)
 
-Open the [Releases](../../releases) page, copy the `wget` + install
-one-liner from the latest release's notes (it's generated per tag and
-embeds the version), and run it on the router. Or download the
-`.apk` (25.12+) / `.ipk` (24.10) asset by hand and install it with
-`apk add --allow-untrusted /tmp/prism.apk` or
-`opkg install /tmp/prism.ipk`.
+The [latest release](../../releases/latest) page has a copy-paste
+one-liner with the version baked in — open it, copy the install
+command from the notes, paste it on the router. The shape is:
+
+```sh
+wget -O /tmp/prism.apk <release-asset-url> && apk add --allow-untrusted /tmp/prism.apk && service rpcd reload
+```
+
+(`.ipk` + `opkg install` on 24.10.)
 
 Then open `http://<router>/cgi-bin/luci/admin/services/prism` and add
 your first subscription from the **Basic** tab (or **Nodes** in
@@ -59,21 +64,13 @@ The snapshot URL is stable — the same one-liner installs and upgrades.
 **OpenWrt 25.12+** (APK):
 
 ```sh
-ssh root@192.168.1.1 '
-  wget -O /tmp/prism.apk https://github.com/octetmill/prism/releases/download/snapshot/luci-app-prism-snapshot.apk \
-  && apk add --allow-untrusted /tmp/prism.apk \
-  && service rpcd reload
-'
+wget -O /tmp/prism.apk https://github.com/octetmill/prism/releases/download/snapshot/luci-app-prism-snapshot.apk && apk add --allow-untrusted /tmp/prism.apk && service rpcd reload
 ```
 
 **OpenWrt 24.10** (opkg):
 
 ```sh
-ssh root@192.168.1.1 '
-  wget -O /tmp/prism.ipk https://github.com/octetmill/prism/releases/download/snapshot/luci-app-prism-snapshot.ipk \
-  && opkg install /tmp/prism.ipk \
-  && service rpcd reload
-'
+wget -O /tmp/prism.ipk https://github.com/octetmill/prism/releases/download/snapshot/luci-app-prism-snapshot.ipk && opkg install /tmp/prism.ipk && service rpcd reload
 ```
 
 ## Requirements
