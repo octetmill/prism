@@ -4,8 +4,8 @@
 --
 -- Active-node watcher — long-running daemon that polls sing-box's clash API
 -- at /proxies every POLL_S seconds and logs to syslog whenever the currently
--- active member (the `now` field) of any urltest or selector group changes.
--- Provides the diagnostic trail a user needs to decide whether their urltest
+-- active member (the `now` field) of any urltest group changes. Provides
+-- the diagnostic trail a user needs to decide whether their urltest
 -- `tolerance` / `interval` are tuned too aggressively for their network.
 --
 -- Lifecycle: a procd instance declared by /etc/init.d/prism alongside the
@@ -142,16 +142,20 @@ local function singbox_pid()
 end
 
 -- Extract the relevant slice of the /proxies response: one entry per
--- urltest/selector group, carrying the active member tag and (when
--- available) its most recent latency. Internal helper groups (tag starts
--- with "_", e.g. _prism_test_all) are filtered out — they're our own
--- machinery, not something the user configured or wants to see flip.
+-- urltest group, carrying the active member tag and (when available) its
+-- most recent latency. Internal helper groups (tag starts with "_", e.g.
+-- _prism_test_all — itself a Selector by sing-box type) are filtered out
+-- here: the underscore-prefix check excludes them, and the type filter
+-- below excludes any other Selector that might appear (Prism no longer
+-- creates selector nodes, but a clash-format subscription could in theory
+-- ship one — those are dropped at sanitisation time today, but the
+-- defensive filter costs nothing).
 local function group_state(parsed)
 	local out = {}
 	if type(parsed.proxies) ~= "table" then return out end
 	for tag, p in pairs(parsed.proxies) do
 		if type(p) == "table"
-			and (p.type == "URLTest" or p.type == "Selector")
+			and p.type == "URLTest"
 			and type(p.now) == "string" and p.now ~= ""
 			and tag:sub(1, 1) ~= "_"
 		then
@@ -311,8 +315,8 @@ while true do
 			-- under us — in each case the previous snapshot is either
 			-- empty or no longer authoritative about the new sing-box's
 			-- selections. Re-announce every group so the user sees which
-			-- node each urltest/selector landed on after the event, not
-			-- just future flips. Diff loop skipped this tick; next
+			-- node each urltest landed on after the event, not just
+			-- future flips. Diff loop skipped this tick; next
 			-- tick's diff runs against the snapshot we save below.
 			event_context = (not primed) and "starting"
 				or pid_changed and "after sing-box restart"

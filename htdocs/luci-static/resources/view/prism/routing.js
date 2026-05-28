@@ -844,9 +844,9 @@ return baseclass.extend({
 		// entries are declared at construction; force a ui.Combobox so
 		// addChoices / clearChoices are available for the kind-driven
 		// repopulation below. Initial choices are seeded asynchronously
-		// once the modal is mounted (same setTimeout(0) trick servers.js
-		// uses for selector_default — at the synchronous render pass the
-		// cloned-modal option's data hasn't been hydrated yet).
+		// once the modal is mounted (a setTimeout(0) — at the synchronous
+		// render pass the cloned-modal option's data hasn't been hydrated
+		// yet, so we render an empty widget and populate it one tick later).
 		bpValue.renderWidget = function(section_id, option_index, cfgvalue) {
 			var widget = new ui.Combobox(cfgvalue != null ? cfgvalue : '', {}, {
 				id:          this.cbid(section_id),

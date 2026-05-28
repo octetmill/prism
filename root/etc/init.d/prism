@@ -160,7 +160,7 @@ prism_declare_instance() {
 }
 
 # Second procd instance: the active-node watcher. Polls sing-box's loopback
-# clash API at /proxies every 10s and logs every urltest/selector flip to
+# clash API at /proxies every 10s and logs every urltest flip to
 # syslog — the diagnostic trail a user needs to decide whether their
 # `tolerance` / `interval` are tuned too aggressively. Only declared when
 # the clash API itself is enabled (otherwise the daemon has nothing to talk
