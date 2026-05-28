@@ -629,9 +629,9 @@ local OUTBOUND_RESERVED_TAGS = {
 --
 -- Subscription bodies are remote, untrusted JSON. The legacy path spliced
 -- the parsed payload table verbatim into all_map[tag] = p, so a hostile
--- provider could ship arbitrary sing-box outbound keys — tls.insecure to
--- disable cert verification, detour to bypass the user's routing intent,
--- ssh.private_key_path to read router host keys, etc. Mitigate with a
+-- provider could ship arbitrary sing-box outbound keys — detour to bypass
+-- the user's routing intent, ssh.private_key_path to read router host keys,
+-- transport.tls to override the configured TLS block, etc. Mitigate with a
 -- per-type field whitelist that mirrors what build_node_from_uci accepts
 -- from manual nodes. Anything not on the list is dropped at load time.
 --
@@ -663,9 +663,16 @@ local function copy_subset(src, allowed)
 	return out
 end
 
+-- `insecure` is whitelisted so per-node `skip-cert-verify: true` from Clash subs
+-- (and `tls.insecure: true` from sing-box subs) reaches sing-box. Providers that
+-- use decoy / fronted SNIs depend on it — strict verification fails the dial.
+-- Matches the behaviour of Clash / Clash Meta / sing-box's own remote-config
+-- loader. The remaining strip list (`detour`, `ssh.private_key_path`, transport
+-- overrides, unlisted top-level keys, …) still defends against the more
+-- dangerous hostile-publisher cases.
 local SUB_TLS_KEYS = {
 	"enabled", "server_name", "alpn", "min_version", "max_version",
-	"cipher_suites", "utls", "ech", "reality",
+	"cipher_suites", "utls", "ech", "reality", "insecure",
 }
 local SUB_TRANSPORT_KEYS = {
 	"type", "path", "host", "headers", "method", "service_name",
@@ -704,9 +711,10 @@ local function sanitize_subscription_node(p)
 	local out = copy_subset(p, SUB_TYPE_KEYS[t])
 	if not out then return nil end
 
-	-- Sub-objects whose attacker-controlled fields must be stripped (tls.insecure,
-	-- tls.disable_sni, transport.tls — anything that weakens cryptographic
-	-- guarantees the user thinks they have).
+	-- Sub-objects whose attacker-controlled fields must be filtered (tls.disable_sni,
+	-- transport.tls — anything that weakens cryptographic guarantees the user
+	-- thinks they have). `tls.insecure` is intentionally allowed through; see
+	-- the SUB_TLS_KEYS note above.
 	if type(p.tls) == "table" then
 		out.tls = copy_subset(p.tls, SUB_TLS_KEYS)
 	end
