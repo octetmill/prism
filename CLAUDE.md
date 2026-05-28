@@ -42,6 +42,7 @@ auto-generated branch.
 - **Package format**: APK (Alpine Package Keeper) on 25.12+; IPK (opkg) on 24.10. CI builds both formats from one source.
 - **Web framework**: LuCI — JavaScript views + rpcd (modern approach)
 - **Config system**: UCI (Unified Configuration Interface)
+- **Firewall**: nftables (the `nft` binary + kernel modules) is a hard requirement — `firewall.sh` writes its own `inet prism` table via `nft -f`. iptables / fw3 are not supported. Both 24.10 and 25.12 ship fw4/nftables by default. Prism does not integrate with fw4 itself (no zone/include hooks), so `firewall4` is not pulled in — Prism's table runs alongside whatever firewall stack the user has.
 - **Lua version**: 5.1 — used only for rpcd handler scripts, not for LuCI views
 
 ## Resource Constraints
