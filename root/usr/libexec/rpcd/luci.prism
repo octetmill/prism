@@ -1185,6 +1185,26 @@ local function list_all_nodes()
 	return all
 end
 
+-- Cooperative sync lock — same file the cron `sync-subscriptions` wrapper
+-- holds. Serializes manual sync_subscription / sync_all_subscriptions RPCs
+-- against the hourly cron path and against each other, so concurrent
+-- sync_one() runs can't race on /etc/config/prism: without it, two writers
+-- can stage disjoint c2:set's, the second commit's full-file rewrite wins,
+-- and one of them silently loses its status/last_sync/node_count writes.
+-- Non-blocking (`lock -n`) to match the rest of the codebase and keep the
+-- UI responsive — a collision returns status="busy" and the user retries
+-- rather than blocking the RPC for a whole cron pass.
+local SYNC_LOCK = "/var/lock/prism-sync.lock"
+
+local function sync_lock_acquire()
+	os.execute("mkdir -p /var/lock 2>/dev/null")
+	return os.execute("lock -n " .. SYNC_LOCK .. " 2>/dev/null") == 0
+end
+
+local function sync_lock_release()
+	os.execute("lock -u " .. SYNC_LOCK .. " 2>/dev/null")
+end
+
 -- Fetch a subscription URL and update its UCI state.
 -- Returns a result table { status, node_count } on success.
 local function sync_one(id)
@@ -1676,34 +1696,54 @@ local methods = {
 			if not args.id or args.id == "" then
 				return { error = "id required" }
 			end
-			local result = sync_one(args.id)
-			prune_orphan_nodes()
+			if not sync_lock_acquire() then
+				return { status = "busy", node_count = 0 }
+			end
+			-- pcall so a throw inside sync_one (e.g. the historical
+			-- libuci-lua multi-return tonumber crash) still releases the
+			-- lock before propagating, otherwise the lock daemon outlives
+			-- this handler and jams every subsequent sync.
+			local ok, result = pcall(function()
+				local r = sync_one(args.id)
+				prune_orphan_nodes()
+				return r
+			end)
+			sync_lock_release()
+			if not ok then error(result) end
 			return result
 		end
 	},
 
 	sync_all_subscriptions = {
 		call = function()
-			local c = uci_cursor()
-			local ids = {}
-			c:foreach("prism", "subscription", function(s)
-				if s.enabled == "1" then
-					ids[#ids + 1] = s[".name"]
-				end
-			end)
-			c:close()
-			local synced, errors = 0, 0
-			for _, id in ipairs(ids) do
-				local result = sync_one(id)
-				if result and result.status == "ok" then
-					synced = synced + 1
-				else
-					errors = errors + 1
-				end
+			if not sync_lock_acquire() then
+				return { status = "busy", synced = 0, errors = 0, reloaded = false }
 			end
-			prune_orphan_nodes()
-			local reloaded = reload_if_config_changed()
-			return { synced = synced, errors = errors, reloaded = reloaded }
+			local ok, result = pcall(function()
+				local c = uci_cursor()
+				local ids = {}
+				c:foreach("prism", "subscription", function(s)
+					if s.enabled == "1" then
+						ids[#ids + 1] = s[".name"]
+					end
+				end)
+				c:close()
+				local synced, errors = 0, 0
+				for _, id in ipairs(ids) do
+					local r = sync_one(id)
+					if r and r.status == "ok" then
+						synced = synced + 1
+					else
+						errors = errors + 1
+					end
+				end
+				prune_orphan_nodes()
+				local reloaded = reload_if_config_changed()
+				return { synced = synced, errors = errors, reloaded = reloaded }
+			end)
+			sync_lock_release()
+			if not ok then error(result) end
+			return result
 		end
 	},
 
