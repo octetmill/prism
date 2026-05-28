@@ -33,8 +33,28 @@ page — no JSON to hand-edit.
 
 ## Install
 
-The snapshot release is rebuilt on every commit. The URL is stable, so
-the same one-liner installs and upgrades.
+### Tagged release (recommended)
+
+Open the [Releases](../../releases) page, copy the `wget` + install
+one-liner from the latest release's notes (it's generated per tag and
+embeds the version), and run it on the router. Or download the
+`.apk` (25.12+) / `.ipk` (24.10) asset by hand and install it with
+`apk add --allow-untrusted /tmp/prism.apk` or
+`opkg install /tmp/prism.ipk`.
+
+Then open `http://<router>/cgi-bin/luci/admin/services/prism` and add
+your first subscription from the **Basic** tab (or **Nodes** in
+Advanced mode).
+
+### Snapshot (bleeding edge)
+
+> **Warning.** Snapshots are rebuilt on every commit to `main`. They
+> are not stability-tested, may include half-finished features, and
+> can change UCI shape or behaviour without notice. Use them to track
+> upcoming changes or to verify a fix; prefer a tagged release for
+> anything you depend on.
+
+The snapshot URL is stable — the same one-liner installs and upgrades.
 
 **OpenWrt 25.12+** (APK):
 
@@ -55,14 +75,6 @@ ssh root@192.168.1.1 '
   && service rpcd reload
 '
 ```
-
-Then open `http://<router>/cgi-bin/luci/admin/services/prism` and add
-your first subscription from the **Basic** tab (or **Nodes** in
-Advanced mode).
-
-For pinned versions, grab a `.apk` or `.ipk` from the
-[Releases](../../releases) page and install with
-`apk add --allow-untrusted` or `opkg install`.
 
 ## Requirements
 
