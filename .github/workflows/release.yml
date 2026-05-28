@@ -24,8 +24,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+        # No fetch-depth: 0 — PRISM_VERSION is parsed from the tag and
+        # package.sh skips its git block when PRISM_VERSION is set, so
+        # no commit history is consulted on the release path.
 
       - name: Install apk-tools
         uses: ./.github/actions/install-apk-tools

@@ -36,7 +36,7 @@ runs:
       with:
         repository: alpinelinux/apk-tools
         path: apk-tools
-        fetch-depth: 0
+        fetch-depth: 1
         ref: ${{ inputs.ref }}
 
     - name: Compile apk-tools
