@@ -725,6 +725,15 @@ return baseclass.extend({
 		o.datatype = 'uinteger';
 		o.placeholder = '50';
 		o.depends('type', 'urltest');
+
+		o = s.taboption('group', form.Flag, 'urltest_interrupt_exist_connections',
+			_('Interrupt existing connections'),
+			_('Drop connections routed through this group when its active member ' +
+			  'changes, so apps reconnect through the new node. Useful for HTTP/web; ' +
+			  'noisy for SSH and other long-lived sessions.'));
+		o.modalonly = true;
+		o.rmempty = true;
+		o.depends('type', 'urltest');
 	},
 
 	_showNodes: function(section_id) {

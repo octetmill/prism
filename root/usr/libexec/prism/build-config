@@ -591,6 +591,9 @@ local function build_node_from_uci(s)
 		if s.urltest_tolerance and s.urltest_tolerance ~= "" then
 			ob.tolerance = tonumber(s.urltest_tolerance)
 		end
+		if s.urltest_interrupt_exist_connections == "1" then
+			ob.interrupt_exist_connections = true
+		end
 
 	elseif typ == "selector" then
 		-- Legacy selector group from a pre-removal UCI. Treat its member
