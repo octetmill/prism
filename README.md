@@ -74,9 +74,12 @@ Pick the latest `.apk` (25.12+) or `.ipk` (24.10) from the
 
 ### Requirements
 
-OpenWrt 24.10 or 25.12+ with `sing-box ≥ 1.12`. The package pulls in
+OpenWrt 24.10 or 25.12+ with `sing-box ≥ 1.12`. nftables is required —
+Prism installs its own `inet prism` table via `nft`, and does not
+support iptables / fw3. Both 24.10 and 25.12 ship fw4/nftables by
+default, so a stock install already meets this. The package pulls in
 everything else it needs (`luci-base`, `luci-lib-jsonc`, `rpcd`,
-`rpcd-mod-rpcsys`, `uclient-fetch`, `ca-bundle`).
+`rpcd-mod-rpcsys`, `uclient-fetch`, `ca-bundle`, `nftables`).
 
 ## Upgrade
 
