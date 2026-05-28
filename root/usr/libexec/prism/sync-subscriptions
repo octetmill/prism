@@ -6,16 +6,15 @@
 # interval (in hours) has elapsed since last_sync. Exits quickly when nothing
 # is due.
 #
-# Cooperative lock so a slow hourly run is never re-entered by the next tick
-# (a network-stalled fetch can easily exceed an hour) and never overlapped by
-# an interactive `ubus call luci.prism sync_all_subscriptions` from the UI.
-# Without it, two writers can race on the same /etc/prism/nodes/<id>.json and
-# on the UCI last_sync/status fields. `lock -n` skips silently when held.
-
-LOCK=/var/lock/prism-sync.lock
-mkdir -p /var/lock
-lock -n "$LOCK" 2>/dev/null || exit 0
-trap 'lock -u "$LOCK" 2>/dev/null' EXIT
+# Serialization lives inside the sync_subscription RPC, which takes
+# /var/lock/prism-sync.lock around each sync_one (and so against the UI's
+# manual sync and against itself). This wrapper must NOT hold that lock while
+# it calls the RPC: the lock is non-blocking, and a held-then-recursed acquire
+# from this separate process fails, so the RPC returns "busy" and never syncs
+# — leaving last_sync/status frozen. Per-call locking in the RPC already
+# prevents two writers racing on the same /etc/prism/nodes/<id>.json and on the
+# UCI last_sync/status fields; an overlapping next tick is harmless because a
+# just-synced subscription's updated last_sync makes it no longer due.
 
 . /lib/functions.sh
 
