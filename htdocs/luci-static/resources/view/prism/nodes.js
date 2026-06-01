@@ -123,7 +123,7 @@ function formatLatency(result) {
 		return E('span', attrs, [ ms + ' ms' ]);
 	}
 	// Probe failed: the cached `error` string is sing-box's own message
-	// (mapped via probe_node), e.g. "unreachable", "proxy not in running
+	// (mapped via probe_node), e.g. "timeout", "proxy not in running
 	// config". Show it on hover so the cell doesn't grow to the longest
 	// error length.
 	var msg = result.error || _('error');
@@ -1090,7 +1090,7 @@ return baseclass.extend({
 			var errors = (status && status.errors) || 0;
 			ui.addNotification(null, E('p',
 				errors > 0
-					? _('Tested %d nodes — %d unreachable.').format(tested + errors, errors)
+					? _('Tested %d nodes — %d timed out.').format(tested + errors, errors)
 					: _('Tested %d nodes.').format(tested)),
 				'info');
 		});

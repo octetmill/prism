@@ -513,7 +513,7 @@ msgstr ""
 
 #: htdocs/luci-static/resources/view/prism/nodes.js:1127
 #, javascript-format
-msgid "Tested %d nodes — %d unreachable."
+msgid "Tested %d nodes — %d timed out."
 msgstr ""
 
 #: htdocs/luci-static/resources/view/prism/nodes.js:1128
