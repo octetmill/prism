@@ -98,12 +98,31 @@ printf 'Collected %s apk and %s ipk package(s)\n' "$apk_count" "$ipk_count"
 [ "$ipk_count" -gt 0 ] || die "no .ipk packages collected"
 
 # ---------------------------------------------------------------------------
-# apk v3 index — built and signed in one step. Routers add the feed as
+# apk v3 — sign each package, then build the signed index. Routers add the
+# feed as
 #   ndx https://…/prism/apk/Packages.adb
 # and trust keys/prism-feed.pem in /etc/apk/keys/.
+#
+# The released .apk files are unsigned — package.sh builds them for
+# `apk add --allow-untrusted`. An apk feed that installs WITHOUT
+# --allow-untrusted needs the packages themselves signed by a trusted key
+# (this is what OpenWrt does: it signs every package and the index). So
+# re-sign each .apk in place with the feed key via `apk adbsign`, then
+# mkndx the now-signed packages into a signed index.
+#
+# Both apk invocations run with --allow-untrusted: the CI container does
+# not carry prism-feed.pem in /etc/apk/keys, so apk cannot verify the
+# signature it is itself applying/reading. That only relaxes build-time
+# verification here; the signatures embedded in the packages and the index
+# are what the router (which does trust the key) verifies. Re-signing
+# recompresses each .apk, so the feed copy differs byte-wise from the
+# immutable release asset — fine, the index records the new hash.
+
+printf 'Signing apk packages (adbsign)\n'
+( cd "$APK_DIR" && apk --allow-untrusted adbsign --sign-key "$APK_SIGN_KEY_FILE" ./*.apk )
 
 printf 'Building apk index (Packages.adb)\n'
-( cd "$APK_DIR" && apk mkndx --sign-key "$APK_SIGN_KEY_FILE" -o Packages.adb ./*.apk )
+( cd "$APK_DIR" && apk --allow-untrusted mkndx --sign-key "$APK_SIGN_KEY_FILE" -o Packages.adb ./*.apk )
 
 # ---------------------------------------------------------------------------
 # opkg index — Packages (control stanza + Filename/Size/SHA256sum per pkg),
