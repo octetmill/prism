@@ -169,6 +169,7 @@ cat > "$FEED_OUT/index.html" <<HTML
   code, pre { background: #f4f4f4; border-radius: 4px; }
   pre { padding: .75rem 1rem; overflow-x: auto; }
   code { padding: .1rem .3rem; }
+  pre code { padding: 0; background: none; }
   h2 { margin-top: 2rem; }
   .muted { color: #666; }
 </style>
