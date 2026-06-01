@@ -44,7 +44,7 @@ you import its public key the first time.
 **OpenWrt 25.12+** (apk):
 
 ```sh
-wget -O /etc/apk/keys/prism-feed.ec.pub https://octetmill.github.io/prism/keys/prism-feed.ec.pub
+wget -O /etc/apk/keys/prism-feed.pem https://octetmill.github.io/prism/keys/prism-feed.pem
 echo "ndx https://octetmill.github.io/prism/apk/Packages.adb" >> /etc/apk/repositories
 apk update && apk add luci-app-prism && service rpcd reload
 ```

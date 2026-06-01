@@ -56,7 +56,7 @@ usign -G \
 # that yields the longer PKCS#8 form (-----BEGIN PRIVATE KEY-----) which
 # wraps the key in an id-ecPublicKey/prime256v1 algorithm header.
 openssl ecparam -name prime256v1 -genkey -noout -out "$SEC_DIR/prism-feed.ec" 2>/dev/null
-openssl ec -in "$SEC_DIR/prism-feed.ec" -pubout -out "$PUB_DIR/prism-feed.ec.pub" 2>/dev/null
+openssl ec -in "$SEC_DIR/prism-feed.ec" -pubout -out "$PUB_DIR/prism-feed.pem" 2>/dev/null
 chmod 600 "$SEC_DIR/prism-feed.ec" "$SEC_DIR/prism-feed.sec"
 
 cat <<EOF
@@ -65,7 +65,7 @@ Keys generated.
 
   Public keys (commit these):
     feed/keys/prism-feed.pub        (usign / opkg)
-    feed/keys/prism-feed.ec.pub     (EC prime256v1 / apk)
+    feed/keys/prism-feed.pem        (EC prime256v1 / apk)
 
   Private keys (DO NOT commit — kept in .feed-keys/, git-ignored):
     .feed-keys/prism-feed.sec
