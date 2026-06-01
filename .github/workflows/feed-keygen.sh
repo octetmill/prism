@@ -49,6 +49,12 @@ usign -G \
 # with an EC prime256v1 key (openssl ecparam … prime256v1), so the stock
 # 25.12 apk client verifies it. apk v3 matches by key identity, so the
 # published filename is cosmetic.
+#
+# Use `ecparam -genkey` deliberately: it emits the SEC1 form
+# (-----BEGIN EC PRIVATE KEY-----), the short encoding with no
+# AlgorithmIdentifier. Do NOT switch to `openssl genpkey -algorithm EC` —
+# that yields the longer PKCS#8 form (-----BEGIN PRIVATE KEY-----) which
+# wraps the key in an id-ecPublicKey/prime256v1 algorithm header.
 openssl ecparam -name prime256v1 -genkey -noout -out "$SEC_DIR/prism-feed.ec" 2>/dev/null
 openssl ec -in "$SEC_DIR/prism-feed.ec" -pubout -out "$PUB_DIR/prism-feed.ec.pub" 2>/dev/null
 chmod 600 "$SEC_DIR/prism-feed.ec" "$SEC_DIR/prism-feed.sec"
