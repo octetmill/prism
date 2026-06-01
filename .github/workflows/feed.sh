@@ -19,8 +19,8 @@
 #
 # Inputs (env):
 #   FEED_OUT          output dir                       (default ./public)
-#   APK_SIGN_KEY_FILE path to RSA private key for apk mkndx        (required)
-#   OPKG_SIGN_KEY_FILE path to usign secret key for opkg            (required)
+#   APK_SIGN_KEY_FILE  path to the apk signing key (RSA private key) (required)
+#   OPKG_SIGN_KEY_FILE path to the opkg signing key (usign private)  (required)
 #   FEED_SRC_DIR      pre-populated dir of *.apk/*.ipk; skips the gh
 #                     download (for local testing)              (optional)
 #   PAGES_URL         absolute feed URL baked into index.html
