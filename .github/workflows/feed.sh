@@ -8,7 +8,7 @@
 #   $FEED_OUT/
 #     index.html               landing page with install instructions
 #     keys/prism-feed.pub       usign public key (opkg trusts via opkg-key)
-#     keys/prism-feed.rsa.pub   RSA public key (apk trusts in /etc/apk/keys)
+#     keys/prism-feed.ec.pub    EC public key (apk trusts in /etc/apk/keys)
 #     apk/                      *.apk + signed Packages.adb (apk v3 / 25.12+)
 #     opkg/                     *.ipk + Packages(.gz) + Packages.sig (24.10)
 #
@@ -19,7 +19,7 @@
 #
 # Inputs (env):
 #   FEED_OUT          output dir                       (default ./public)
-#   APK_SIGN_KEY_FILE  path to the apk signing key (RSA private key) (required)
+#   APK_SIGN_KEY_FILE  path to the apk signing key (EC prime256v1)   (required)
 #   OPKG_SIGN_KEY_FILE path to the opkg signing key (usign private)  (required)
 #   FEED_SRC_DIR      pre-populated dir of *.apk/*.ipk; skips the gh
 #                     download (for local testing)              (optional)
@@ -43,7 +43,7 @@ KEYS_SRC="$REPO_DIR/feed/keys"
 [ -n "${APK_SIGN_KEY_FILE:-}" ] && [ -f "$APK_SIGN_KEY_FILE" ] || die "APK_SIGN_KEY_FILE not set or missing"
 [ -n "${OPKG_SIGN_KEY_FILE:-}" ] && [ -f "$OPKG_SIGN_KEY_FILE" ] || die "OPKG_SIGN_KEY_FILE not set or missing"
 [ -f "$KEYS_SRC/prism-feed.pub" ]     || die "missing $KEYS_SRC/prism-feed.pub — run feed-keygen.sh and commit feed/keys/"
-[ -f "$KEYS_SRC/prism-feed.rsa.pub" ] || die "missing $KEYS_SRC/prism-feed.rsa.pub — run feed-keygen.sh and commit feed/keys/"
+[ -f "$KEYS_SRC/prism-feed.ec.pub" ] || die "missing $KEYS_SRC/prism-feed.ec.pub — run feed-keygen.sh and commit feed/keys/"
 
 APK_DIR="$FEED_OUT/apk"
 OPKG_DIR="$FEED_OUT/opkg"
@@ -100,7 +100,7 @@ printf 'Collected %s apk and %s ipk package(s)\n' "$apk_count" "$ipk_count"
 # ---------------------------------------------------------------------------
 # apk v3 index — built and signed in one step. Routers add the feed as
 #   ndx https://…/prism/apk/Packages.adb
-# and trust keys/prism-feed.rsa.pub in /etc/apk/keys/.
+# and trust keys/prism-feed.ec.pub in /etc/apk/keys/.
 
 printf 'Building apk index (Packages.adb)\n'
 ( cd "$APK_DIR" && apk mkndx --sign-key "$APK_SIGN_KEY_FILE" -o Packages.adb ./*.apk )
@@ -135,7 +135,7 @@ usign -S -m "$PKGFILE" -s "$OPKG_SIGN_KEY_FILE" -x "$OPKG_DIR/Packages.sig"
 # Public keys + landing page.
 
 cp "$KEYS_SRC/prism-feed.pub"     "$FEED_OUT/keys/prism-feed.pub"
-cp "$KEYS_SRC/prism-feed.rsa.pub" "$FEED_OUT/keys/prism-feed.rsa.pub"
+cp "$KEYS_SRC/prism-feed.ec.pub" "$FEED_OUT/keys/prism-feed.ec.pub"
 
 cat > "$FEED_OUT/index.html" <<HTML
 <!DOCTYPE html>
@@ -160,7 +160,7 @@ cat > "$FEED_OUT/index.html" <<HTML
 Add it once, then install and upgrade Prism with your package manager.</p>
 
 <h2>OpenWrt 25.12+ (apk)</h2>
-<pre><code>wget -O /etc/apk/keys/prism-feed.rsa.pub ${PAGES_URL}/keys/prism-feed.rsa.pub
+<pre><code>wget -O /etc/apk/keys/prism-feed.ec.pub ${PAGES_URL}/keys/prism-feed.ec.pub
 echo "ndx ${PAGES_URL}/apk/Packages.adb" >> /etc/apk/repositories
 apk update
 apk add luci-app-prism
@@ -179,7 +179,7 @@ service rpcd reload</code></pre>
 opkg update && opkg upgrade luci-app-prism  # 24.10</code></pre>
 
 <p class="muted">Signed feed. The keys above are published at
-<a href="keys/prism-feed.rsa.pub">keys/prism-feed.rsa.pub</a> and
+<a href="keys/prism-feed.ec.pub">keys/prism-feed.ec.pub</a> and
 <a href="keys/prism-feed.pub">keys/prism-feed.pub</a>.</p>
 </body>
 </html>

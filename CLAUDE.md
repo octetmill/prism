@@ -895,8 +895,9 @@ it to GitHub Pages, so routers add the feed once and then `apk add` /
   `apk/Packages.adb` (`apk mkndx --sign-key`) and an opkg
   `opkg/Packages(.gz)` with a detached `usign` signature over the
   uncompressed `Packages`. One index per format covers all architectures.
-- Signing keys are repo secrets: `APK_SIGN_KEY` (RSA private PEM) and
-  `OPKG_SIGN_KEY` (usign private key). The matching **public** keys live in
+- Signing keys are repo secrets: `APK_SIGN_KEY` (EC prime256v1 private
+  PEM, matching OpenWrt's own apk build) and `OPKG_SIGN_KEY` (usign private
+  key). The matching **public** keys live in
   the repo at `feed/keys/` and are republished in the feed for clients to
   trust (`/etc/apk/keys/` for apk, `opkg-key add` for opkg).
 - `feed-keygen.sh` mints both keypairs (one-time); `install-usign`

@@ -8,7 +8,7 @@
 #
 #   - usign (ed25519) keypair  -> signs the opkg `Packages` index
 #                                 secret: OPKG_SIGN_KEY
-#   - RSA keypair (PEM)         -> signs the apk v3 `Packages.adb` index
+#   - EC prime256v1 keypair    -> signs the apk v3 `Packages.adb` index
 #                                 secret: APK_SIGN_KEY
 #
 # The private keys are written to ./.feed-keys/ (git-ignored) and echoed
@@ -43,13 +43,15 @@ usign -G \
 	-p "$PUB_DIR/prism-feed.pub" \
 	-c "Prism package feed (octetmill/prism)"
 
-# --- RSA (apk v3) -----------------------------------------------------------
-# apk mkndx --sign-key takes a plain RSA private key; the public half goes
-# in /etc/apk/keys/ on the router. apk v3 matches by key identity, so the
+# --- EC prime256v1 (apk v3) -------------------------------------------------
+# apk mkndx --sign-key takes the private key; the public half goes in
+# /etc/apk/keys/ on the router. Match OpenWrt's own apk build, which signs
+# with an EC prime256v1 key (openssl ecparam … prime256v1), so the stock
+# 25.12 apk client verifies it. apk v3 matches by key identity, so the
 # published filename is cosmetic.
-openssl genrsa -out "$SEC_DIR/prism-feed.rsa" 2048 2>/dev/null
-openssl rsa -in "$SEC_DIR/prism-feed.rsa" -pubout -out "$PUB_DIR/prism-feed.rsa.pub" 2>/dev/null
-chmod 600 "$SEC_DIR/prism-feed.rsa" "$SEC_DIR/prism-feed.sec"
+openssl ecparam -name prime256v1 -genkey -noout -out "$SEC_DIR/prism-feed.ec" 2>/dev/null
+openssl ec -in "$SEC_DIR/prism-feed.ec" -pubout -out "$PUB_DIR/prism-feed.ec.pub" 2>/dev/null
+chmod 600 "$SEC_DIR/prism-feed.ec" "$SEC_DIR/prism-feed.sec"
 
 cat <<EOF
 
@@ -57,22 +59,22 @@ Keys generated.
 
   Public keys (commit these):
     feed/keys/prism-feed.pub        (usign / opkg)
-    feed/keys/prism-feed.rsa.pub    (RSA / apk)
+    feed/keys/prism-feed.ec.pub     (EC prime256v1 / apk)
 
   Private keys (DO NOT commit — kept in .feed-keys/, git-ignored):
     .feed-keys/prism-feed.sec
-    .feed-keys/prism-feed.rsa
+    .feed-keys/prism-feed.ec
 
 Add these two GitHub Actions secrets (Settings -> Secrets and variables ->
 Actions). Paste the full file contents verbatim:
 
   OPKG_SIGN_KEY   <- contents of .feed-keys/prism-feed.sec
-  APK_SIGN_KEY       <- contents of .feed-keys/prism-feed.rsa
+  APK_SIGN_KEY    <- contents of .feed-keys/prism-feed.ec
 
 Quick copy on Linux:
 
   gh secret set OPKG_SIGN_KEY < .feed-keys/prism-feed.sec
-  gh secret set APK_SIGN_KEY     < .feed-keys/prism-feed.rsa
+  gh secret set APK_SIGN_KEY  < .feed-keys/prism-feed.ec
 
 Then:  git add feed/keys && git commit -m "feed: add signing public keys"
 EOF
