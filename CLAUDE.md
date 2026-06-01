@@ -463,9 +463,24 @@ Apply `classList.add/remove('drag-over-above', 'drag-over-below')` on drag event
 
 LuCI themes (bootstrap, material) style labels as a base class plus a
 modifier, separated by a space — not the Bootstrap-3 hyphenated form. The
-modifier alone matches no selector and renders as plain text. For the red
-badge, Material uses `.label.danger` and Bootstrap uses `.label.important`
-— including both keeps the badge red on either theme.
+modifier alone matches no selector and renders as plain text.
+
+`label success` (green) and `label warning` (yellow/tan) work uniformly
+on both themes. **Red is not portable through the class system**: Material
+has `.label.danger`, Bootstrap has no red label class at all (its
+`.label.important` is mapped to the *primary* colour token, which on the
+default theme is blue). For a red badge, keep the base `.label` class
+for padding/font and set the background-color inline from each theme's
+error/danger CSS variable, with a literal fallback for themes that
+define neither:
+
+```javascript
+E('span', {
+    'class': 'label',
+    'style': 'background-color: var(--danger-color, var(--error-color, var(--error-color-high, #d9534f)));' +
+             ' color: var(--on-danger-color, var(--on-error-color, #fff));'
+}, [ _('Error') ])
+```
 
 The base `.label` class also applies `text-transform: uppercase` on the
 Bootstrap theme, which is fine for short status words ("Running") but
@@ -475,7 +490,6 @@ the badge contains content that must keep its case.
 ```javascript
 E('span', { 'class': 'label success' }, [ _('Running') ])
 E('span', { 'class': 'label warning' }, [ _('Stopped') ])
-E('span', { 'class': 'label danger important' }, [ _('Error') ])
 ```
 
 **Alert messages:**

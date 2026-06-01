@@ -105,14 +105,22 @@ function formatLatency(result) {
 		return E('span', { 'style': 'opacity:0.45;' }, [ '—' ]);
 	if (typeof result.delay_ms === 'number') {
 		var ms = result.delay_ms;
-		var cls = (ms < 300) ? 'label success'
-		        : (ms < 600) ? 'label warning'
-		        :              'label danger important';
-		return E('span', {
-			'class': cls,
+		// Bootstrap's `.label.important` is mapped to the primary (blue)
+		// colour and the theme has no built-in red label class, so set the
+		// red background inline from the theme's error/danger CSS var.
+		var attrs = {
 			'style': 'padding:1px 6px; border-radius:3px; text-transform:none;',
 			'title': result.tested_at ? _('Tested %s').format(relTime(result.tested_at)) : ''
-		}, [ ms + ' ms' ]);
+		};
+		if (ms < 300) {
+			attrs['class'] = 'label success';
+		} else if (ms < 600) {
+			attrs['class'] = 'label warning';
+		} else {
+			attrs['class'] = 'label';
+			attrs['style'] += ' background-color: var(--danger-color, var(--error-color, var(--error-color-high, #d9534f))); color: var(--on-danger-color, var(--on-error-color, #fff));';
+		}
+		return E('span', attrs, [ ms + ' ms' ]);
 	}
 	// Probe failed: the cached `error` string is sing-box's own message
 	// (mapped via probe_node), e.g. "unreachable", "proxy not in running
@@ -120,8 +128,9 @@ function formatLatency(result) {
 	// error length.
 	var msg = result.error || _('error');
 	return E('span', {
-		'class': 'label danger important',
-		'style': 'padding:1px 6px; border-radius:3px; text-transform:none; cursor:help;',
+		'class': 'label',
+		'style': 'padding:1px 6px; border-radius:3px; text-transform:none; cursor:help;' +
+		         ' background-color: var(--danger-color, var(--error-color, var(--error-color-high, #d9534f))); color: var(--on-danger-color, var(--on-error-color, #fff));',
 		'title': msg + (result.tested_at ? '\n' + _('Tested %s').format(relTime(result.tested_at)) : '')
 	}, [ msg.length > 14 ? msg.substring(0, 13) + '…' : msg ]);
 }
