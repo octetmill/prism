@@ -35,7 +35,40 @@ page — no JSON to hand-edit.
 
 SSH into the router, then paste one of the commands below.
 
-### Tagged release (recommended)
+### From the Prism feed (recommended)
+
+Add the Prism package feed once and your package manager handles
+install *and* upgrades — no chasing release URLs. The feed is signed;
+you import its public key the first time.
+
+**OpenWrt 25.12+** (apk):
+
+```sh
+wget -O /etc/apk/keys/prism-feed.pem https://octetmill.github.io/prism/keys/prism-feed.pem
+echo "ndx https://octetmill.github.io/prism/apk/Packages.adb" >> /etc/apk/repositories
+apk update && apk add luci-app-prism && service rpcd reload
+```
+
+**OpenWrt 24.10** (opkg):
+
+```sh
+wget -O /tmp/prism-feed.pub https://octetmill.github.io/prism/keys/prism-feed.pub
+opkg-key add /tmp/prism-feed.pub
+echo "src/gz prism https://octetmill.github.io/prism/opkg" >> /etc/opkg/customfeeds.conf
+opkg update && opkg install luci-app-prism && service rpcd reload
+```
+
+Later, upgrade in place:
+
+```sh
+apk update && apk add -u luci-app-prism      # 25.12+
+opkg update && opkg upgrade luci-app-prism   # 24.10
+```
+
+The feed indexes every tagged release; see
+<https://octetmill.github.io/prism/> for the live instructions.
+
+### Tagged release
 
 The [latest release](../../releases/latest) page has a copy-paste
 one-liner with the version baked in — open it, copy the install
