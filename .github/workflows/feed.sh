@@ -20,7 +20,7 @@
 # Inputs (env):
 #   FEED_OUT          output dir                       (default ./public)
 #   APK_SIGN_KEY_FILE path to RSA private key for apk mkndx        (required)
-#   USIGN_SECRET_FILE path to usign secret key for opkg            (required)
+#   OPKG_SIGN_KEY_FILE path to usign secret key for opkg            (required)
 #   FEED_SRC_DIR      pre-populated dir of *.apk/*.ipk; skips the gh
 #                     download (for local testing)              (optional)
 #   PAGES_URL         absolute feed URL baked into index.html
@@ -41,7 +41,7 @@ PAGES_URL="${PAGES_URL:-https://octetmill.github.io/prism}"
 KEYS_SRC="$REPO_DIR/feed/keys"
 
 [ -n "${APK_SIGN_KEY_FILE:-}" ] && [ -f "$APK_SIGN_KEY_FILE" ] || die "APK_SIGN_KEY_FILE not set or missing"
-[ -n "${USIGN_SECRET_FILE:-}" ] && [ -f "$USIGN_SECRET_FILE" ] || die "USIGN_SECRET_FILE not set or missing"
+[ -n "${OPKG_SIGN_KEY_FILE:-}" ] && [ -f "$OPKG_SIGN_KEY_FILE" ] || die "OPKG_SIGN_KEY_FILE not set or missing"
 [ -f "$KEYS_SRC/prism-feed.pub" ]     || die "missing $KEYS_SRC/prism-feed.pub — run feed-keygen.sh and commit feed/keys/"
 [ -f "$KEYS_SRC/prism-feed.rsa.pub" ] || die "missing $KEYS_SRC/prism-feed.rsa.pub — run feed-keygen.sh and commit feed/keys/"
 
@@ -129,7 +129,7 @@ for ipk in "$OPKG_DIR"/*.ipk; do
 	} >> "$PKGFILE"
 done
 gzip -9 -k -f "$PKGFILE"
-usign -S -m "$PKGFILE" -s "$USIGN_SECRET_FILE" -x "$OPKG_DIR/Packages.sig"
+usign -S -m "$PKGFILE" -s "$OPKG_SIGN_KEY_FILE" -x "$OPKG_DIR/Packages.sig"
 
 # ---------------------------------------------------------------------------
 # Public keys + landing page.

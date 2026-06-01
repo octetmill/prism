@@ -7,7 +7,7 @@
 # PRIVATE keys for you to paste into GitHub Actions secrets.
 #
 #   - usign (ed25519) keypair  -> signs the opkg `Packages` index
-#                                 secret: USIGN_SECRET_KEY
+#                                 secret: OPKG_SIGN_KEY
 #   - RSA keypair (PEM)         -> signs the apk v3 `Packages.adb` index
 #                                 secret: APK_SIGN_KEY
 #
@@ -66,12 +66,12 @@ Keys generated.
 Add these two GitHub Actions secrets (Settings -> Secrets and variables ->
 Actions). Paste the full file contents verbatim:
 
-  USIGN_SECRET_KEY   <- contents of .feed-keys/prism-feed.sec
+  OPKG_SIGN_KEY   <- contents of .feed-keys/prism-feed.sec
   APK_SIGN_KEY       <- contents of .feed-keys/prism-feed.rsa
 
 Quick copy on Linux:
 
-  gh secret set USIGN_SECRET_KEY < .feed-keys/prism-feed.sec
+  gh secret set OPKG_SIGN_KEY < .feed-keys/prism-feed.sec
   gh secret set APK_SIGN_KEY     < .feed-keys/prism-feed.rsa
 
 Then:  git add feed/keys && git commit -m "feed: add signing public keys"

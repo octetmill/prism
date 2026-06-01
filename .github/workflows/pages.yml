@@ -7,7 +7,7 @@ name: Feed
 #
 # One-time setup (see README "Install from the Prism feed"):
 #   - run .github/workflows/feed-keygen.sh, commit feed/keys/*.pub
-#   - add repo secrets USIGN_SECRET_KEY and APK_SIGN_KEY
+#   - add repo secrets OPKG_SIGN_KEY and APK_SIGN_KEY
 #   - enable Pages with Source = GitHub Actions
 
 # Runs after the Release workflow finishes, not on the `release` event:
@@ -51,13 +51,13 @@ jobs:
       - name: Materialise signing keys
         env:
           APK_SIGN_KEY: ${{ secrets.APK_SIGN_KEY }}
-          USIGN_SECRET_KEY: ${{ secrets.USIGN_SECRET_KEY }}
+          OPKG_SIGN_KEY: ${{ secrets.OPKG_SIGN_KEY }}
         run: |
           [ -n "$APK_SIGN_KEY" ]     || { echo "APK_SIGN_KEY secret is empty"; exit 1; }
-          [ -n "$USIGN_SECRET_KEY" ] || { echo "USIGN_SECRET_KEY secret is empty"; exit 1; }
+          [ -n "$OPKG_SIGN_KEY" ] || { echo "OPKG_SIGN_KEY secret is empty"; exit 1; }
           install -d -m 700 "$RUNNER_TEMP/keys"
           printf '%s\n' "$APK_SIGN_KEY"     > "$RUNNER_TEMP/keys/apk.rsa"
-          printf '%s\n' "$USIGN_SECRET_KEY" > "$RUNNER_TEMP/keys/usign.sec"
+          printf '%s\n' "$OPKG_SIGN_KEY" > "$RUNNER_TEMP/keys/usign.sec"
           chmod 600 "$RUNNER_TEMP/keys/apk.rsa" "$RUNNER_TEMP/keys/usign.sec"
 
       - name: Configure Pages
@@ -69,7 +69,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FEED_OUT: ${{ github.workspace }}/public
           APK_SIGN_KEY_FILE: ${{ runner.temp }}/keys/apk.rsa
-          USIGN_SECRET_FILE: ${{ runner.temp }}/keys/usign.sec
+          OPKG_SIGN_KEY_FILE: ${{ runner.temp }}/keys/usign.sec
           PAGES_URL: ${{ steps.pages.outputs.base_url }}
         run: .github/workflows/feed.sh
 
