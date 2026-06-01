@@ -547,12 +547,12 @@ return baseclass.extend({
 	_renderLatency: function(ms) {
 		if (typeof ms !== 'number' || ms <= 0)
 			return E('span', { 'style': 'opacity:0.5;' }, [ '—' ]);
-		var cls = 'label-success';
-		if (ms >= 600)      cls = 'label-danger';
-		else if (ms >= 300) cls = 'label-warning';
+		var cls = 'label success';
+		if (ms >= 600)      cls = 'label danger important';
+		else if (ms >= 300) cls = 'label warning';
 		return E('span', {
 			'class': cls,
-			'style': 'padding:1px 6px; border-radius:3px; font-size:0.85em;'
+			'style': 'padding:1px 6px; border-radius:3px; font-size:0.85em; text-transform:none;'
 		}, [ ms + 'ms' ]);
 	},
 
@@ -1054,8 +1054,8 @@ return baseclass.extend({
 					E('span', { 'style': 'font-size:0.85em; opacity:0.7;' }, [ _('Target file:') ]),
 					E('code', { 'style': 'font-size:0.85em;' }, [ path ]),
 					data.exists
-						? E('span', { 'class': 'label-success', 'style': 'padding:1px 7px; border-radius:3px;' }, [ _('running file present') ])
-						: E('span', { 'class': 'label-warning', 'style': 'padding:1px 7px; border-radius:3px;' }, [ _('preview only — not yet applied') ])
+						? E('span', { 'class': 'label success', 'style': 'padding:1px 7px; border-radius:3px; text-transform:none;' }, [ _('running file present') ])
+						: E('span', { 'class': 'label warning', 'style': 'padding:1px 7px; border-radius:3px; text-transform:none;' }, [ _('preview only — not yet applied') ])
 				])
 			];
 			if (data.error)

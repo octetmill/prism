@@ -105,12 +105,12 @@ function formatLatency(result) {
 		return E('span', { 'style': 'opacity:0.45;' }, [ '—' ]);
 	if (typeof result.delay_ms === 'number') {
 		var ms = result.delay_ms;
-		var cls = (ms < 300) ? 'label-success'
-		        : (ms < 600) ? 'label-warning'
-		        :              'label-danger';
+		var cls = (ms < 300) ? 'label success'
+		        : (ms < 600) ? 'label warning'
+		        :              'label danger important';
 		return E('span', {
 			'class': cls,
-			'style': 'padding:1px 6px; border-radius:3px;',
+			'style': 'padding:1px 6px; border-radius:3px; text-transform:none;',
 			'title': result.tested_at ? _('Tested %s').format(relTime(result.tested_at)) : ''
 		}, [ ms + ' ms' ]);
 	}
@@ -120,8 +120,8 @@ function formatLatency(result) {
 	// error length.
 	var msg = result.error || _('error');
 	return E('span', {
-		'class': 'label-danger',
-		'style': 'padding:1px 6px; border-radius:3px; cursor:help;',
+		'class': 'label danger important',
+		'style': 'padding:1px 6px; border-radius:3px; text-transform:none; cursor:help;',
 		'title': msg + (result.tested_at ? '\n' + _('Tested %s').format(relTime(result.tested_at)) : '')
 	}, [ msg.length > 14 ? msg.substring(0, 13) + '…' : msg ]);
 }

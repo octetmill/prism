@@ -461,10 +461,21 @@ Apply `classList.add/remove('drag-over-above', 'drag-over-below')` on drag event
 
 **Status badges:**
 
+LuCI themes (bootstrap, material) style labels as a base class plus a
+modifier, separated by a space — not the Bootstrap-3 hyphenated form. The
+modifier alone matches no selector and renders as plain text. For the red
+badge, Material uses `.label.danger` and Bootstrap uses `.label.important`
+— including both keeps the badge red on either theme.
+
+The base `.label` class also applies `text-transform: uppercase` on the
+Bootstrap theme, which is fine for short status words ("Running") but
+wrong for content like "1380 ms". Add `text-transform:none` inline when
+the badge contains content that must keep its case.
+
 ```javascript
-E('span', { 'class': 'label-success' }, [ _('Running') ])
-E('span', { 'class': 'label-warning' }, [ _('Stopped') ])
-E('span', { 'class': 'label-danger'  }, [ _('Error')   ])
+E('span', { 'class': 'label success' }, [ _('Running') ])
+E('span', { 'class': 'label warning' }, [ _('Stopped') ])
+E('span', { 'class': 'label danger important' }, [ _('Error') ])
 ```
 
 **Alert messages:**
