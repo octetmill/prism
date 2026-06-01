@@ -99,8 +99,9 @@ printf 'Collected %s apk and %s ipk package(s)\n' "$apk_count" "$ipk_count"
 
 # ---------------------------------------------------------------------------
 # apk v3 — sign each package, then build the signed index. Routers add the
-# feed as
-#   ndx https://…/prism/apk/Packages.adb
+# feed by dropping the plain index URL into customfeeds.list
+#   https://…/prism/apk/Packages.adb >> /etc/apk/repositories.d/customfeeds.list
+# (apk auto-detects the v3 ndx index from the .adb suffix — no prefix needed)
 # and trust keys/prism-feed.pem in /etc/apk/keys/.
 #
 # The released .apk files are unsigned — package.sh builds them for
@@ -180,7 +181,7 @@ Add it once, then install and upgrade Prism with your package manager.</p>
 
 <h2>OpenWrt 25.12+ (apk)</h2>
 <pre><code>wget -O /etc/apk/keys/prism-feed.pem ${PAGES_URL}/keys/prism-feed.pem
-echo "ndx ${PAGES_URL}/apk/Packages.adb" >> /etc/apk/repositories
+echo "${PAGES_URL}/apk/Packages.adb" >> /etc/apk/repositories.d/customfeeds.list
 apk update
 apk add luci-app-prism
 service rpcd reload</code></pre>
