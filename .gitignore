@@ -1,2 +1,4 @@
 dist/
 .build/
+.feed-keys/
+public/

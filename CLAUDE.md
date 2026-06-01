@@ -882,6 +882,32 @@ different number (typically the next planned release).
 
 Requires `permissions: contents: write` — provided by the default `GITHUB_TOKEN`.
 
+### pages.yml — publishes the signed package feed to GitHub Pages
+
+Fires on `release: published` (and `workflow_dispatch`). Rebuilds an
+OpenWrt-style package repository from **every** `v*` release and deploys
+it to GitHub Pages, so routers add the feed once and then `apk add` /
+`opkg install` (and upgrade) Prism without chasing release URLs.
+
+- `feed.sh` gathers all `v*` release assets via `gh`, strips the
+  `-openwrt-XX.YY` platform suffix to recover canonical filenames, then
+  builds two indexes for the single `noarch`/`all` package: an apk v3
+  `apk/Packages.adb` (`apk mkndx --sign-key`) and an opkg
+  `opkg/Packages(.gz)` with a detached `usign` signature over the
+  uncompressed `Packages`. One index per format covers all architectures.
+- Signing keys are repo secrets: `APK_SIGN_KEY` (RSA private PEM) and
+  `USIGN_SECRET_KEY` (usign secret). The matching **public** keys live in
+  the repo at `feed/keys/` and are republished in the feed for clients to
+  trust (`/etc/apk/keys/` for apk, `opkg-key add` for opkg).
+- `feed-keygen.sh` mints both keypairs (one-time); `install-usign`
+  composite action builds OpenWrt's `usign` from source the same way
+  `install-apk-tools` builds apk-tools.
+- Requires `permissions: pages: write` + `id-token: write`, and Pages
+  enabled with Source = GitHub Actions.
+
+Stable feed URLs: `https://octetmill.github.io/prism/apk/Packages.adb`
+and `https://octetmill.github.io/prism/opkg`.
+
 ---
 
 ## Decisions & Context
