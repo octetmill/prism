@@ -45,7 +45,7 @@ you import its public key the first time.
 
 ```sh
 wget -O /etc/apk/keys/prism-feed.pem https://octetmill.github.io/prism/keys/prism-feed.pem
-echo "ndx https://octetmill.github.io/prism/apk/Packages.adb" >> /etc/apk/repositories
+echo "https://octetmill.github.io/prism/apk/Packages.adb" >> /etc/apk/repositories.d/customfeeds.list
 apk update && apk add luci-app-prism && service rpcd reload
 ```
 
