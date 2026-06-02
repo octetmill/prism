@@ -109,7 +109,7 @@ function formatLatency(result) {
 		// colour and the theme has no built-in red label class, so set the
 		// red background inline from the theme's error/danger CSS var.
 		var attrs = {
-			'style': 'padding:1px 6px; border-radius:3px; text-transform:none;',
+			'style': 'padding:1px 6px; border-radius:3px; text-transform:none; cursor:help;',
 			'title': result.tested_at ? _('Tested %s').format(relTime(result.tested_at)) : ''
 		};
 		if (ms < 300) {
