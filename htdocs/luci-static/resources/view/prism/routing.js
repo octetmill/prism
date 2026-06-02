@@ -927,8 +927,8 @@ return baseclass.extend({
 		bpWarn.cfgvalue = function(section_id) {
 			var kind = uci.get('prism', section_id, 'kind') || 'mac';
 			if (kind === 'mac' && imode === 'tun')
-				return E('span', { 'class': 'label-warning',
-					'style': 'padding:1px 6px; border-radius:3px;',
+				return E('span', { 'class': 'label warning',
+					'style': 'padding:1px 6px; border-radius:3px; text-transform:none;',
 					'title': _('MAC bypass requires TProxy or TProxy + Mixed mode')
 				}, [ _('⚠ TUN mode: ignored') ]);
 			return '';

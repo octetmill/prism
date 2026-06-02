@@ -547,13 +547,21 @@ return baseclass.extend({
 	_renderLatency: function(ms) {
 		if (typeof ms !== 'number' || ms <= 0)
 			return E('span', { 'style': 'opacity:0.5;' }, [ '—' ]);
-		var cls = 'label-success';
-		if (ms >= 600)      cls = 'label-danger';
-		else if (ms >= 300) cls = 'label-warning';
-		return E('span', {
-			'class': cls,
-			'style': 'padding:1px 6px; border-radius:3px; font-size:0.85em;'
-		}, [ ms + 'ms' ]);
+		// Bootstrap's `.label.important` is blue and it has no red label
+		// class, so use the theme's error/danger CSS var inline for the
+		// ≥600 ms band — see formatLatency in nodes.js for the same fix.
+		var attrs = {
+			'style': 'padding:1px 6px; border-radius:3px; font-size:0.85em; text-transform:none;'
+		};
+		if (ms >= 600) {
+			attrs['class'] = 'label';
+			attrs['style'] += ' background-color: var(--danger-color, var(--error-color, var(--error-color-high, #d9534f))); color: var(--on-danger-color, var(--on-error-color, #fff));';
+		} else if (ms >= 300) {
+			attrs['class'] = 'label warning';
+		} else {
+			attrs['class'] = 'label success';
+		}
+		return E('span', attrs, [ ms + 'ms' ]);
 	},
 
 	// "urltest · every 1m0s · ±50ms" — surfaces the configured tuning right
@@ -1054,8 +1062,8 @@ return baseclass.extend({
 					E('span', { 'style': 'font-size:0.85em; opacity:0.7;' }, [ _('Target file:') ]),
 					E('code', { 'style': 'font-size:0.85em;' }, [ path ]),
 					data.exists
-						? E('span', { 'class': 'label-success', 'style': 'padding:1px 7px; border-radius:3px;' }, [ _('running file present') ])
-						: E('span', { 'class': 'label-warning', 'style': 'padding:1px 7px; border-radius:3px;' }, [ _('preview only — not yet applied') ])
+						? E('span', { 'class': 'label success', 'style': 'padding:1px 7px; border-radius:3px; text-transform:none;' }, [ _('running file present') ])
+						: E('span', { 'class': 'label warning', 'style': 'padding:1px 7px; border-radius:3px; text-transform:none;' }, [ _('preview only — not yet applied') ])
 				])
 			];
 			if (data.error)

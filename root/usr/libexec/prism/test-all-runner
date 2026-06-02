@@ -176,7 +176,7 @@ local function parse_result(idx)
 		-- uclient-fetch suppresses the body on 4xx/5xx, so empty means
 		-- either the proxy isn't in the running config (404, but with
 		-- the hidden group we shouldn't see this) or the probe failed.
-		entry.error = "unreachable"
+		entry.error = "timeout"
 		return entry, "error"
 	end
 	local pok, p = pcall(jsonc.parse, content)
