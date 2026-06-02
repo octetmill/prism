@@ -42,7 +42,7 @@ auto-generated branch.
 - **Package format**: APK (Alpine Package Keeper) on 25.12+; IPK (opkg) on 24.10. CI builds both formats from one source.
 - **Web framework**: LuCI — JavaScript views + rpcd (modern approach)
 - **Config system**: UCI (Unified Configuration Interface)
-- **Firewall**: nftables (the `nft` binary + kernel modules) is a hard requirement — `firewall.sh` writes its own `inet prism` table via `nft -f`. iptables / fw3 are not supported. Both 24.10 and 25.12 ship fw4/nftables by default. Prism does not integrate with fw4 itself (no zone/include hooks), so `firewall4` is not pulled in — Prism's table runs alongside whatever firewall stack the user has.
+- **Firewall**: nftables (the `nft` binary + kernel modules) is a hard requirement — `firewall.sh` writes its own `inet prism` table via `nft -f`. iptables / fw3 are not supported. Both 24.10 and 25.12 ship fw4/nftables by default. Prism does not integrate with fw4 itself (no zone/include hooks), so `firewall4` is not pulled in — Prism's table runs alongside whatever firewall stack the user has. The userspace `nft` binary is pulled in via `nftables-json` (the variant fw4 itself uses); the bare name `nftables` is not a package on 24.10/25.12.
 - **Lua version**: 5.1 — used only for rpcd handler scripts, not for LuCI views
 
 ## Resource Constraints
@@ -763,6 +763,7 @@ Declared in `LUCI_DEPENDS` in the Makefile. All packages below must be listed th
 | `ca-bundle` | TLS certificate validation for HTTPS subscription URLs |
 | `lua` | `/usr/bin/lua` 5.1 interpreter — every rpcd handler and helper script (`build-config`, `fetch-catalog`, `luci.prism`) has a `#!/usr/bin/env lua` shebang. Not transitively pulled in by `luci-base` or `luci-lib-jsonc` on apk (those only link `liblua5.1.5`), so it must be declared explicitly. |
 | `libuci-lua` | Lua `uci` binding — `build-config` does `require "uci"` to read prism's UCI config. Also not transitive through `luci-base` on apk. |
+| `nftables-json` | Provides `/usr/sbin/nft`, used by `firewall.sh` to load the `inet prism` table. The bare name `nftables` is not a real package on 24.10/25.12 — it was split into `nftables-json` (what fw4 uses) and `nftables-nojson`. We pick `-json` because it matches the default install and won't conflict with fw4. |
 
 ### Assumed present (do not redeclare)
 
