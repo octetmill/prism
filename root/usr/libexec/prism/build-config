@@ -1890,10 +1890,17 @@ local function build_config(c)
 	-- and the init.d fallback would hide that from the user indefinitely.
 	local tagset    = {}
 	local originset = {}
+	-- Subscription uid → display name, so the SEC-4 audit line shows the
+	-- friendly name instead of the 16-hex section id. Fallback to the uid
+	-- keeps the log informative when `name` is unset.
+	local sub_names = {}
+	c:foreach("prism", "subscription", function(s)
+		if s.name and s.name ~= "" then sub_names[s[".name"]] = s.name end
+	end)
 	local function classify(ob)
 		if ob.type == "urltest" or ob.type == "selector" then return "group" end
 		if ob._source == "_manual" or ob._source == nil then return "manual" end
-		return "subscription " .. tostring(ob._source)
+		return "subscription " .. tostring(sub_names[ob._source] or ob._source)
 	end
 	for _, ob in ipairs(outbounds) do
 		if ob.tag then tagset[ob.tag] = true; originset[ob.tag] = classify(ob) end
