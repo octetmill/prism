@@ -964,16 +964,41 @@ local function build_outbounds(c)
 	-- For each referenced group, expand _outbound_regex (Prism-internal
 	-- marker, must be stripped) then pull its member tags into the
 	-- referenced set. The worklist handles nested groups correctly.
-	-- Lua patterns have no | alternation; we split on | manually.
-	local function match_any(tag, pattern)
-		for part in pattern:gmatch("[^|]+") do
-			part = part:match("^%s*(.-)%s*$")
-			-- Plain substring search: user values like "EU-France" contain
-			-- literal hyphens, which Lua treats as a pattern quantifier.
-			if part ~= "" and tag:find(part, 1, true) then return true end
-		end
-		return false
+	--
+	-- Pattern semantics: POSIX ERE, evaluated by `grep -E`. Lua 5.1 has
+	-- no PCRE; shelling out to grep is the simplest correct engine and
+	-- runs only at config-build time (once per regex-mode group). `|`
+	-- is native ERE alternation, so existing plain-substring patterns
+	-- continue to match (every literal substring is also a valid ERE).
+	-- Pattern is single-quoted into the shell command; the only escape
+	-- needed is `'` → `'\''`. UCI values are single-line so we don't
+	-- have to worry about embedded newlines.
+	local function shell_squote(s)
+		return "'" .. (s:gsub("'", "'\\''")) .. "'"
 	end
+	local function regex_match_set(pattern, tags)
+		local set = {}
+		if pattern == "" or #tags == 0 then return set end
+		local args = {}
+		for i, t in ipairs(tags) do args[i] = shell_squote(t) end
+		local cmd = "printf '%s\\n' " .. table.concat(args, " ")
+			.. " | grep -E -- " .. shell_squote(pattern) .. " 2>/dev/null"
+		local h = io.popen(cmd, "r")
+		if not h then return set end
+		for line in h:lines() do
+			if line ~= "" then set[line] = true end
+		end
+		h:close()
+		return set
+	end
+
+	-- Subscription uid → display name, for audit messages below. Built
+	-- once per build; fallback to the uid keeps the log informative for
+	-- subscriptions whose `name` field is unset.
+	local sub_names = {}
+	c:foreach("prism", "subscription", function(s)
+		if s.name and s.name ~= "" then sub_names[s[".name"]] = s.name end
+	end)
 
 	local worklist = {}
 	for tag in pairs(referenced) do worklist[#worklist + 1] = tag end
@@ -1013,9 +1038,21 @@ local function build_outbounds(c)
 				local by_source = {}
 				if type(ob.outbounds) ~= "table" or #ob.outbounds == 0 then
 					ob.outbounds = {}
+					-- Collect candidate tags (apply src_set restriction
+					-- first so we don't ship hostile sources through grep
+					-- unnecessarily), then evaluate the pattern in one
+					-- subprocess. Iterate all_ordered again to preserve
+					-- the deterministic order in the emitted outbounds list.
+					local candidates = {}
 					for _, other in ipairs(all_ordered) do
 						if other.type ~= "urltest"
-						   and match_any(other.tag, pattern)
+						   and (not src_set or src_set[other._source or ""]) then
+							candidates[#candidates + 1] = other.tag
+						end
+					end
+					local matched = regex_match_set(pattern, candidates)
+					for _, other in ipairs(all_ordered) do
+						if other.type ~= "urltest" and matched[other.tag]
 						   and (not src_set or src_set[other._source or ""]) then
 							ob.outbounds[#ob.outbounds + 1] = other.tag
 							local src = other._source or "_manual"
@@ -1029,7 +1066,8 @@ local function build_outbounds(c)
 					if src ~= "_manual" then
 						io.stderr:write("prism build-config: urltest '" .. ob.tag
 							.. "' regex admitted " .. count
-							.. " node(s) from subscription '" .. src .. "'\n")
+							.. " node(s) from subscription '"
+							.. (sub_names[src] or src) .. "'\n")
 					end
 				end
 			end

@@ -680,9 +680,15 @@ return baseclass.extend({
 		o.modalonly = true;
 		o.depends({ type: 'urltest', urltest_mode: 'manual' });
 
-		o = s.taboption('group', form.Value, 'urltest_regex', _('Tag pattern'));
+		o = s.taboption('group', form.Value, 'urltest_regex', _('Tag pattern'),
+			_('POSIX extended regular expression (ERE) matched against each ' +
+			  'node tag. Use <code>|</code> for alternation, <code>[0-9]</code> ' +
+			  'for digits, <code>.</code> for any character, <code>^</code>/' +
+			  '<code>$</code> to anchor. Note this is POSIX, not PCRE — ' +
+			  '<code>\\d</code> / <code>\\w</code> are not supported; ' +
+			  'write <code>[0-9]</code> / <code>[A-Za-z0-9_]</code> instead.'));
 		o.modalonly = true;
-		o.placeholder = '.*HK.*|.*JP.*';
+		o.placeholder = 'ASIA-Singapore-[0-9]{2}|EU-.*';
 		o.depends({ type: 'urltest', urltest_mode: 'regex' });
 
 		// Restrict regex matching to nodes from selected sources. Empty =
