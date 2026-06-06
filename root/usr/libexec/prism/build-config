@@ -992,6 +992,14 @@ local function build_outbounds(c)
 		return set
 	end
 
+	-- Subscription uid → display name, for audit messages below. Built
+	-- once per build; fallback to the uid keeps the log informative for
+	-- subscriptions whose `name` field is unset.
+	local sub_names = {}
+	c:foreach("prism", "subscription", function(s)
+		if s.name and s.name ~= "" then sub_names[s[".name"]] = s.name end
+	end)
+
 	local worklist = {}
 	for tag in pairs(referenced) do worklist[#worklist + 1] = tag end
 	local i = 1
@@ -1058,7 +1066,8 @@ local function build_outbounds(c)
 					if src ~= "_manual" then
 						io.stderr:write("prism build-config: urltest '" .. ob.tag
 							.. "' regex admitted " .. count
-							.. " node(s) from subscription '" .. src .. "'\n")
+							.. " node(s) from subscription '"
+							.. (sub_names[src] or src) .. "'\n")
 					end
 				end
 			end
