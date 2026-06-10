@@ -11,7 +11,7 @@
 #   opkg install luci-app-prism_*.ipk
 #
 # Requirements:
-#   bash, apk-tools 3.x (`apk mkpkg`), fakeroot, tar, gzip, ar (binutils),
+#   bash, apk-tools 3.x (`apk mkpkg`), fakeroot, tar, gzip,
 #   find (GNU), wc, du, awk, sha256sum. git is optional — used only to derive
 #   the snapshot version suffix when PRISM_VERSION is unset.
 set -euo pipefail
@@ -22,7 +22,7 @@ require_cmd() {
 	command -v "$1" >/dev/null 2>&1 || die "'$1' not found in PATH"
 }
 
-for cmd in tar gzip find wc du awk ar apk fakeroot sha256sum; do
+for cmd in tar gzip find wc du awk apk fakeroot sha256sum; do
 	require_cmd "$cmd"
 done
 
@@ -330,7 +330,13 @@ fakeroot -- sh -c '
 sha256sum "$APK_FILE" | awk '{print $1}' > "${APK_FILE}.sha256"
 
 # ---------------------------------------------------------------------------
-# Build .ipk (ar archive: debian-binary + control.tar.gz + data.tar.gz)
+# Build .ipk (gzip-compressed tar of debian-binary + control.tar.gz +
+# data.tar.gz). This is the outer container OpenWrt's own ipkg-build emits by
+# default, and the format opkg on 24.10 reliably unpacks. A GNU `ar` archive
+# (the Debian .deb container) is NOT a safe substitute here: opkg registers
+# such a package and runs its postinst but silently extracts zero files, so
+# the app installs yet none of its files — menu.d, acl.d, the rpcd handler —
+# ever land on disk. Keep this a tar.gz outer.
 
 IPK_BUILD_DIR="$BUILD_DIR/ipk"
 mkdir -p "$IPK_BUILD_DIR/control" "$IPK_BUILD_DIR/data"
@@ -367,10 +373,12 @@ IPK_CTRL_TAR="$IPK_BUILD_DIR/control.tar.gz"
 (cd "$IPK_BUILD_DIR/control" && tar --owner=0 --group=0 -czf "$IPK_CTRL_TAR" ./control ./conffiles ./postinst ./prerm)
 
 printf '2.0\n' > "$IPK_BUILD_DIR/debian-binary"
-# Recreate the archive from scratch — ar is modify-in-place by default and
-# would leave stale members if the same version were rebuilt.
+# Pack the three members into a gzip-compressed tar outer (member order matches
+# OpenWrt's ipkg-build: debian-binary, data, control). Recreate from scratch so
+# a rebuild at the same version never inherits stale bytes.
 rm -f "$IPK_FILE"
-ar cr "$IPK_FILE" "$IPK_BUILD_DIR/debian-binary" "$IPK_CTRL_TAR" "$DATA_TAR"
+(cd "$IPK_BUILD_DIR" && tar --owner=0 --group=0 -czf "$IPK_FILE" \
+	./debian-binary ./data.tar.gz ./control.tar.gz)
 sha256sum "$IPK_FILE" | awk '{print $1}' > "${IPK_FILE}.sha256"
 
 # ---------------------------------------------------------------------------
