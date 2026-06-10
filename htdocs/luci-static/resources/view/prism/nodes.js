@@ -259,12 +259,21 @@ return baseclass.extend({
 			return subs.groupKey(sub_id, subOrder);
 		}
 
-		// URLTest member candidates: live outbounds plus any tag already
-		// stored on an existing urltest node, so a saved member whose node
-		// was removed still shows rather than being silently dropped.
+		// URLTest member candidates: manual nodes from the staged UCI view
+		// (a staged rename or fresh add must show its current tag here —
+		// list_outbounds only sees committed state; see routing.js
+		// addServers), subscription nodes from the RPC, plus any tag
+		// already stored on an existing urltest node, so a saved member
+		// whose node was removed still shows rather than being silently
+		// dropped. First-seen wins, manual first — matching build-config's
+		// dedupe policy.
 		var memberByTag = {};
+		subs.manualNodes().forEach(function(n, i) {
+			if (!(n.tag in memberByTag))
+				memberByTag[n.tag] = { tag: n.tag, label: n.tag, group: 0, idx: i };
+		});
 		outbounds.forEach(function(ob, i) {
-			if (ob && ob.tag && !(ob.tag in memberByTag)) {
+			if (ob && ob.tag && ob.subscription && !(ob.tag in memberByTag)) {
 				memberByTag[ob.tag] = {
 					tag:   ob.tag,
 					label: labelFor(ob.tag, ob.subscription),

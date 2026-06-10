@@ -49,6 +49,26 @@ return baseclass.extend({
 		return tag;
 	},
 
+	// Manual node sections from the (staged) UCI view, tag-bearing only,
+	// sorted by drag order then section name — the same ordering
+	// list_outbounds emits for manual nodes. Choice lists must source
+	// manual nodes from here rather than from list_outbounds: the RPC
+	// reads committed disk state only, so a staged tag rename (or a
+	// freshly added node) would otherwise be invisible until Save & Apply,
+	// and a rule whose reference was rewritten by the rename propagation
+	// would point at a choice the dropdown doesn't offer yet.
+	manualNodes: function() {
+		var list = uci.sections('prism', 'node').filter(function(n) {
+			return n.tag && n.tag !== '';
+		});
+		list.sort(function(a, b) {
+			var ao = parseInt(a.order, 10) || 0, bo = parseInt(b.order, 10) || 0;
+			if (ao !== bo) return ao - bo;
+			return a['.name'] < b['.name'] ? -1 : a['.name'] > b['.name'] ? 1 : 0;
+		});
+		return list;
+	},
+
 	// Comparator for { group, idx, label } entries: subscription-section
 	// order first, original index within a source, label as tiebreak.
 	entryCompare: function(a, b) {
