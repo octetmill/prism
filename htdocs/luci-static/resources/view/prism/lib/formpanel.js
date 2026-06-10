@@ -37,7 +37,7 @@ return baseclass.extend({
 	// silently do nothing. Only the global revert clears staged changes, so
 	// delegate to it. Prism only ever edits the `prism` config, so a global
 	// revert and a per-panel reset clear the same set.
-	resetGrid: function(panel) {
+	resetGrid: function() {
 		return ui.changes.revert();
 	}
 });

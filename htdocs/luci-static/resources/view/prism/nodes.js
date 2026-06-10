@@ -19,24 +19,14 @@
 'require rpc';
 'require view.prism.lib.ordersave as ordersave';
 'require view.prism.lib.formpanel as formpanel';
+'require view.prism.lib.subs as subs';
+'require view.prism.lib.badges as badges';
+'require view.prism.lib.subsync as subsync';
 'require view.prism.uid as uid';
-
-var callSyncSubscription = rpc.declare({
-	object: 'luci.prism',
-	method: 'sync_subscription',
-	params: ['id'],
-	expect: { '': {} }
-});
 
 var callSyncAll = rpc.declare({
 	object: 'luci.prism',
 	method: 'sync_all_subscriptions',
-	expect: { '': {} }
-});
-
-var callReloadIfChanged = rpc.declare({
-	object: 'luci.prism',
-	method: 'reload_if_changed',
 	expect: { '': {} }
 });
 
@@ -82,58 +72,9 @@ var callTestAllStatus = rpc.declare({
 });
 
 
-// Color-coded latency badge. Maps a probe result `{ delay_ms?, error? }` to a
-// span styled with the same label-* classes the rest of Prism uses.
-// Thresholds match status.js _renderLatency so the Nodes Latency column and
-// the Status Groups Latency column agree on what 'yellow' means.
-//  green   < 300 ms   (workable proxy path)
-//  yellow  < 600 ms   (degraded)
-//  red     ≥ 600 ms   or any error
-function formatLatency(result) {
-	if (!result)
-		return E('span', { 'style': 'opacity:0.45;' }, [ '—' ]);
-	if (typeof result.delay_ms === 'number') {
-		var ms = result.delay_ms;
-		// Bootstrap's `.label.important` is mapped to the primary (blue)
-		// colour and the theme has no built-in red label class, so set the
-		// red background inline from the theme's error/danger CSS var.
-		var attrs = {
-			'style': 'padding:1px 6px; border-radius:3px; text-transform:none; cursor:help;',
-			'title': result.tested_at ? _('Tested %s').format(relTime(result.tested_at)) : ''
-		};
-		if (ms < 300) {
-			attrs['class'] = 'label success';
-		} else if (ms < 600) {
-			attrs['class'] = 'label warning';
-		} else {
-			attrs['class'] = 'label';
-			attrs['style'] += ' background-color: var(--danger-color, var(--error-color, var(--error-color-high, #d9534f))); color: var(--on-danger-color, var(--on-error-color, #fff));';
-		}
-		return E('span', attrs, [ ms + ' ms' ]);
-	}
-	// Probe failed: the cached `error` string is sing-box's own message
-	// (mapped via probe_node), e.g. "timeout", "proxy not in running
-	// config". Show it on hover so the cell doesn't grow to the longest
-	// error length.
-	var msg = result.error || _('error');
-	return E('span', {
-		'class': 'label',
-		'style': 'padding:1px 6px; border-radius:3px; text-transform:none; cursor:help;' +
-		         ' background-color: var(--danger-color, var(--error-color, var(--error-color-high, #d9534f))); color: var(--on-danger-color, var(--on-error-color, #fff));',
-		'title': msg + (result.tested_at ? '\n' + _('Tested %s').format(relTime(result.tested_at)) : '')
-	}, [ msg.length > 14 ? msg.substring(0, 13) + '…' : msg ]);
-}
-
-// "2m ago" / "1h ago" / "3d ago" style relative timestamp from a unix epoch.
-function relTime(ts) {
-	if (!ts) return '';
-	var diff = Math.floor(Date.now() / 1000 - ts);
-	if (diff < 5)       return _('just now');
-	if (diff < 60)      return diff + _('s ago');
-	if (diff < 3600)    return Math.floor(diff / 60)    + _('m ago');
-	if (diff < 86400)   return Math.floor(diff / 3600)  + _('h ago');
-	return Math.floor(diff / 86400) + _('d ago');
-}
+// Color-coded latency badge shared with the Status panel — lives in
+// lib/badges.js so the two columns agree on what 'yellow' means.
+var formatLatency = badges.formatLatency;
 
 
 // Types with a server endpoint. `direct` is excluded — a direct outbound has
@@ -245,10 +186,7 @@ return baseclass.extend({
 		// cfgXXXX (regenerated from a package-wide counter on every parse,
 		// shifted by any structural change to /etc/config/prism); the named
 		// form is fixed from creation through commit.
-		var gridHandleAdd = s.handleAdd;
-		s.handleAdd = function(ev, name) {
-			return gridHandleAdd.call(this, ev, name || uid.generate());
-		};
+		uid.installGridAdd(s);
 
 		var oEnabled = s.option(form.Flag, 'enabled', _('Enabled'));
 		oEnabled['default'] = '1';
@@ -299,43 +237,7 @@ return baseclass.extend({
 		oSync.inputtitle = _('Sync');
 		oSync.inputstyle = 'apply';
 		oSync.onclick = function(ev, section_id) {
-			var btn = ev.currentTarget, label = btn.textContent;
-			btn.classList.remove('spinning');
-			var w = btn.offsetWidth, h = btn.offsetHeight;
-			btn.classList.add('spinning');
-			btn.style.width  = w + 'px';
-			btn.style.height = h + 'px';
-			btn.textContent = '';
-			return callSyncSubscription(section_id).then(function(res) {
-				var ok = res && res.status === 'ok';
-				ui.addNotification(null, E('p',
-					ok ? _('Synced: %d nodes.').format(res.node_count || 0)
-					   : _('Sync failed.')),
-					ok ? 'info' : 'warning');
-				if (!ok)
-					return;
-				return callReloadIfChanged().then(function(r) {
-					if (r && r.reloaded)
-						ui.addNotification(null,
-							E('p', _('Active node changed — sing-box reloaded.')), 'info');
-					// Close the edit modal first if the sync was triggered
-					// from inside it — remountActive() would orphan it.
-					ui.hideModal();
-					// The RPC committed node_count / status / last_sync to UCI
-					// on disk; reload from disk so the grid reflects them
-					// without staging phantom changes the way uci.set would.
-					uci.unload('prism');
-					return uci.load('prism').then(function() {
-						return self._prismHost.remountActive();
-					});
-				});
-			}).catch(function() {
-				ui.addNotification(null, E('p', _('Sync failed.')), 'error');
-			}).finally(function() {
-				btn.style.width  = '';
-				btn.style.height = '';
-				btn.textContent = label;
-			});
+			return subsync.handleSync(self, ev, section_id);
 		};
 	},
 
@@ -347,32 +249,14 @@ return baseclass.extend({
 		// renderer already consumes, just kept available across handlers.
 		this._outbounds = outbounds;
 
-		// Map uid → human-readable name and display order. Two subscriptions
-		// can carry nodes with identical tags; the label shown in the dropdown
-		// must make clear which subscription a tag comes from. Manual nodes
-		// (no subscription) and orphan tags (saved member whose source is
-		// gone) get their own ordering buckets. The key is the subscription's
-		// section name — which is its uid — and matches what `n.subscription`
-		// carries (the stable file key).
-		var subName = {}, subOrder = {};
-		uci.sections('prism', 'subscription').forEach(function(sub, idx) {
-			var u = sub['.name'];
-			subName[u]  = sub.name || u;
-			subOrder[u] = idx;
-		});
+		// Subscription name/order lookups shared with routing.js / status.js
+		// via lib/subs.js — see that module for the uid-keying rationale.
+		var subName = subs.nameMap(), subOrder = subs.orderMap();
 		function labelFor(tag, sub_id) {
-			if (sub_id && subName[sub_id])
-				return subName[sub_id] + '/' + tag;
-			return tag;
+			return subs.labelFor(tag, sub_id, subName);
 		}
-		// Sort group: 0 = manual, 1+ = subscriptions in Subscriptions-section
-		// order, Infinity = orphan (saved tag, source gone). Within a group,
-		// the caller's original index preserves sync order for sub nodes and
-		// Node-section order for manual nodes.
 		function groupKey(sub_id) {
-			if (!sub_id) return 0;
-			if (sub_id in subOrder) return 1 + subOrder[sub_id];
-			return Infinity;
+			return subs.groupKey(sub_id, subOrder);
 		}
 
 		// URLTest member candidates: live outbounds plus any tag already
@@ -401,11 +285,7 @@ return baseclass.extend({
 		});
 		var memberList = [];
 		for (var k in memberByTag) memberList.push(memberByTag[k]);
-		memberList.sort(function(a, b) {
-			if (a.group !== b.group) return a.group - b.group;
-			if (a.idx   !== b.idx)   return a.idx   - b.idx;
-			return a.label < b.label ? -1 : a.label > b.label ? 1 : 0;
-		});
+		memberList.sort(subs.entryCompare);
 
 		var s = m.section(form.GridSection, 'node', _('Nodes'),
 			_('Manually configured proxy nodes.'));
@@ -420,10 +300,7 @@ return baseclass.extend({
 		// them as named sections keeps the schema uniform with every other
 		// anonymous type and forecloses any future code that might reach
 		// for the section id as a cross-reference.
-		var nodeHandleAdd = s.handleAdd;
-		s.handleAdd = function(ev, name) {
-			return nodeHandleAdd.call(this, ev, name || uid.generate());
-		};
+		uid.installGridAdd(s);
 
 		s.tab('general',   _('General'));
 		s.tab('transport', _('Transport'));
@@ -468,8 +345,7 @@ return baseclass.extend({
 			// can update it later without re-rendering the whole grid.
 			oLatency.cfgvalue = function(section_id) {
 				var tag = uci.get('prism', section_id, 'tag') || '';
-				var span = E('span', { 'class': 'prism-latency-cell' },
-					[ formatLatency(self._latency[tag]) ]);
+				var span = E('span', {}, [ formatLatency(self._latency[tag]) ]);
 				self._registerLatencyCell(tag, span);
 				return span;
 			};
@@ -790,8 +666,7 @@ return baseclass.extend({
 					];
 					if (clashOn) {
 						var tag = n.tag || '';
-						var span = E('span', { 'class': 'prism-latency-cell' },
-							[ formatLatency(self._latency[tag]) ]);
+						var span = E('span', {}, [ formatLatency(self._latency[tag]) ]);
 						self._registerLatencyCell(tag, span);
 						cells.push(E('td', { 'class': 'td' }, [ span ]));
 						cells.push(E('td', { 'class': 'td cbi-section-actions' }, [
@@ -909,37 +784,16 @@ return baseclass.extend({
 		}).catch(function() { /* no runner state — nothing to adopt */ });
 	},
 
-	// Poll the runner's status file until the run finishes (running flips
-	// false) or `maxMs` elapses. Quiet helper for the single-node path —
-	// the batch path drives its own loop with banner/elapsed UI in
-	// _pollTestAll.
-	_waitTestDone: function(maxMs) {
-		var startMs = Date.now();
-		return new Promise(function(resolve, reject) {
-			function tick() {
-				if (Date.now() - startMs > maxMs) {
-					reject(new Error(_('runner timed out (status file never cleared)')));
-					return;
-				}
-				callTestAllStatus().then(function(status) {
-					if (status && !status.running)
-						resolve(status);
-					else
-						setTimeout(tick, 1000);
-				}).catch(function() {
-					setTimeout(tick, 1000);
-				});
-			}
-			setTimeout(tick, 1000);
-		});
-	},
-
 	// Single-node probe: a one-tag run of the background runner (which
 	// spins up the ephemeral probe instance, probes, tears it down). `btn`
 	// is the row's Test button; spin it in place (preserves width/height
 	// so the row doesn't jump) until the run settles. Refuses while a
 	// "Test all" batch is in flight — the runner's lock would reject the
 	// second run anyway, and the UI guard gives a friendlier message.
+	// Completion is driven by the same banner-less _pollTestAll loop the
+	// batch path uses: it refreshes the cell from the cache as the result
+	// lands, its timer is tracked in _testAllTimer (so _teardown cancels
+	// it on tab switch), and it clears _testAllRunning when done.
 	_testOne: function(btn, tag) {
 		var self = this;
 		if (this._testAllRunning) {
@@ -949,6 +803,7 @@ return baseclass.extend({
 			return Promise.resolve();
 		}
 		this._testAllRunning = true;
+		this._testAllAborted = false;
 		var label = btn.textContent;
 		var w = btn.offsetWidth, h = btn.offsetHeight;
 		btn.classList.add('spinning');
@@ -958,26 +813,14 @@ return baseclass.extend({
 		return callTestAllStart([ tag ]).then(function(res) {
 			if (res && res.error)
 				throw new Error(res.error);
-			// Probe-instance startup (~a few seconds) + one probe; 60 s
-			// leaves generous headroom before declaring the runner stuck.
-			return self._waitTestDone(60 * 1000);
-		}).then(function(status) {
-			if (status && status.error)
-				throw new Error(status.error);
-			return callGetLastLatency().then(function(c) {
-				var results = (c && c.results) || {};
-				if (results[tag]) {
-					self._latency[tag] = results[tag];
-					self._refreshLatencyCell(tag);
-				}
-			});
+			return self._pollTestAll(E('span'), null);
 		}).catch(function(err) {
+			self._testAllRunning = false;
 			var detail = err && (err.message || String(err)) || _('unknown error');
 			ui.addNotification(null,
 				E('p', [ _('Test failed: '), detail ]),
 				'error');
 		}).finally(function() {
-			self._testAllRunning = false;
 			btn.style.width  = '';
 			btn.style.height = '';
 			btn.classList.remove('spinning');
