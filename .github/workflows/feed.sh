@@ -133,13 +133,25 @@ printf 'Building apk index (Packages.adb)\n'
 printf 'Building opkg index (Packages, Packages.gz, Packages.sig)\n'
 PKGFILE="$OPKG_DIR/Packages"
 : > "$PKGFILE"
+
+# Emit the raw control.tar.gz bytes from an ipk regardless of its outer
+# container. Packages built since v0.7.1 are a gzip-compressed tar (what
+# OpenWrt's opkg reliably unpacks on 24.10); older releases are a GNU `ar`
+# archive. The feed indexes every historical release, so both must work. Try
+# `ar` first, fall back to tar. Always pipe these bytes straight into tar —
+# never capture them in a shell variable, since command substitution mangles
+# the NULs in gzip data.
+ipk_control_tar() {
+	ar p "$1" control.tar.gz 2>/dev/null || tar -xzOf "$1" ./control.tar.gz
+}
+
 for ipk in "$OPKG_DIR"/*.ipk; do
 	fname="$(basename "$ipk")"
 	size="$(wc -c < "$ipk")"
 	sha="$(sha256sum "$ipk" | awk '{print $1}')"
-	# control.tar.gz lives inside the ipk ar archive; pull out ./control.
-	ctrl="$(ar p "$ipk" control.tar.gz | tar -xzO ./control 2>/dev/null || \
-	        ar p "$ipk" control.tar.gz | tar -xzO control)"
+	# Pull ./control out of the package's control.tar.gz.
+	ctrl="$(ipk_control_tar "$ipk" | tar -xzO ./control 2>/dev/null || \
+	        ipk_control_tar "$ipk" | tar -xzO control)"
 	{
 		printf '%s\n' "$ctrl" | sed '/^[[:space:]]*$/d'
 		printf 'Filename: %s\n' "$fname"
