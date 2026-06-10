@@ -7,6 +7,7 @@ config prism 'global'
 	option ruleset_delivery 'github'
 	option ruleset_download_detour 'default'
 	option clash_api_enabled '0'
+	option auto_test_hours '0'
 
 config prism 'basic'
 	option routing 'all'

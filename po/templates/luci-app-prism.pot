@@ -786,6 +786,18 @@ msgid ""
 "config."
 msgstr ""
 
+#: htdocs/luci-static/resources/view/prism/settings.js:307
+msgid "Auto-test interval (hours)"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/prism/settings.js:308
+msgid ""
+"Probe every node automatically each N hours, so the Latency column stays "
+"fresh without clicking Test all. Runs from the hourly maintenance tick "
+"after due subscription syncs, so newly imported nodes are included. 0 "
+"disables."
+msgstr ""
+
 #: htdocs/luci-static/resources/view/prism/settings.js:316
 msgid "Logging"
 msgstr ""

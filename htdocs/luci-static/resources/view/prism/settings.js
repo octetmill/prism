@@ -302,6 +302,17 @@ return baseclass.extend({
 			  'testable without bloating the running config.'));
 		oClashApi.rmempty = false;
 
+		var oAutoTest = sLatency.option(form.Value, 'auto_test_hours',
+			_('Auto-test interval (hours)'),
+			_('Probe every node automatically each N hours, so the Latency ' +
+			  'column stays fresh without clicking Test all. Runs from the ' +
+			  'hourly maintenance tick after due subscription syncs, so newly ' +
+			  'imported nodes are included. 0 disables.'));
+		oAutoTest.datatype = 'uinteger';
+		oAutoTest.placeholder = '0';
+		oAutoTest['default'] = '0';
+		oAutoTest.depends('clash_api_enabled', '1');
+
 		// ── Logging ──────────────────────────────────────────────────────
 		// Entire section is Advanced — its wrapper div gets the
 		// prism-advanced class in _postRender, so individual rows do not
