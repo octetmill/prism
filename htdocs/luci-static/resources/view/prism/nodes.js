@@ -317,6 +317,27 @@ return baseclass.extend({
 		var oTag = s.taboption('general', form.Value, 'tag', _('Name'));
 		oTag.rmempty = false;
 		oTag.placeholder = _('e.g. MY-VPS-HK');
+		// Routing references store the node's TAG, not its section id —
+		// subscription nodes have no UCI section, so the tag is the only
+		// universal outbound identifier (and what sing-box itself keys on).
+		// A rename would therefore dangle every reference to the old tag,
+		// and build-config's validation pass would silently fall the
+		// affected rules back to direct. Propagate the rename instead:
+		// rewrite rule.outbound, routing.final_outbound, urltest member
+		// lists and Basic's server picks inside the same staged save, so
+		// Save & Apply commits the rename and the rewires atomically and
+		// Reset reverts both together. Skipped when the old tag is not
+		// unique among outbounds: with a duplicate tag the references
+		// still resolve after the rename (first-seen-wins dedupe), so
+		// rewriting them would steal the duplicate's references.
+		var tagWrite = oTag.write;
+		oTag.write = function(section_id, formvalue) {
+			var oldTag = uci.get('prism', section_id, 'tag');
+			if (oldTag && formvalue && oldTag !== formvalue
+			    && self._tagIsUnique(oldTag, section_id))
+				self._propagateTagRename(oldTag, formvalue);
+			return tagWrite.apply(this, arguments);
+		};
 
 		var oType = s.taboption('general', form.ListValue, 'type', _('Type'));
 		[['urltest','URLTest'],
@@ -1037,6 +1058,69 @@ return baseclass.extend({
 		}).catch(function() {
 			ui.addNotification(null, E('p', _('Sync all failed.')), 'error');
 		});
+	},
+
+	// True when `tag` belongs to the given node section alone — no other
+	// manual node section and no subscription node carries it. Subscription
+	// tags come from the outbound list cached at load time, which is fine:
+	// a sync mid-edit re-renders the whole panel anyway.
+	_tagIsUnique: function(tag, section_id) {
+		var dup = false;
+		uci.sections('prism', 'node').forEach(function(n) {
+			if (n['.name'] !== section_id && n.tag === tag) dup = true;
+		});
+		(this._outbounds || []).forEach(function(ob) {
+			if (ob.subscription && ob.tag === tag) dup = true;
+		});
+		return !dup;
+	},
+
+	// Rewrite every staged-or-saved routing reference from oldTag to
+	// newTag. Plain uci.set calls, so the rewrites ride the same staged
+	// change set as the rename itself.
+	_propagateTagRename: function(oldTag, newTag) {
+		var changed = 0;
+
+		uci.sections('prism', 'rule').forEach(function(r) {
+			if (r.outbound === oldTag) {
+				uci.set('prism', r['.name'], 'outbound', newTag);
+				changed++;
+			}
+		});
+
+		if (uci.get('prism', 'routing', 'final_outbound') === oldTag) {
+			uci.set('prism', 'routing', 'final_outbound', newTag);
+			changed++;
+		}
+
+		// List-typed references (urltest members, Basic server picks). UCI
+		// hands back an array for lists and a string for a single value;
+		// tags legitimately contain spaces, so only exact-element matches
+		// are rewritten — never substring or split-on-whitespace.
+		var renameInList = function(sid, opt) {
+			var v = uci.get('prism', sid, opt);
+			if (Array.isArray(v)) {
+				if (v.indexOf(oldTag) === -1) return;
+				uci.set('prism', sid, opt, v.map(function(t) {
+					return (t === oldTag) ? newTag : t;
+				}));
+				changed++;
+			} else if (v === oldTag) {
+				uci.set('prism', sid, opt, newTag);
+				changed++;
+			}
+		};
+		uci.sections('prism', 'node').forEach(function(n) {
+			if (n.type === 'urltest')
+				renameInList(n['.name'], 'urltest_outbounds');
+		});
+		if (uci.get('prism', 'basic'))
+			renameInList('basic', 'server');
+
+		if (changed > 0)
+			ui.addNotification(null, E('p',
+				_('Renamed "%s" to "%s" — %d routing reference(s) updated to follow.')
+					.format(oldTag, newTag, changed)), 'info');
 	},
 
 	handleSave:      function() { return formpanel.save(this); },
