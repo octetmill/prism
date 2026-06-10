@@ -212,7 +212,7 @@ strip_comments() {
 			# Lua: -- line comments. No --[[ ]] blocks in this repo.
 			sed -i -e '/^[[:space:]]*--/{/SPDX\|Copyright/!d;}' "$dst"
 			;;
-		*/init.d/prism|*.sh|*/sync-subscriptions|*/watchdog|*/hourly|*/uci-defaults/*)
+		*/init.d/prism|*.sh|*/sync-subscriptions|*/watchdog|*/hourly)
 			# Shell: # line comments, but preserve shebang on line 1
 			# (busybox-ash supports both #!/bin/sh and #!/bin/sh /etc/rc.common).
 			sed -i -e '1!{/^[[:space:]]*#/{/SPDX\|Copyright/!d;};}' "$dst"
@@ -222,38 +222,23 @@ strip_comments() {
 
 # htdocs → /www/luci-static/…
 mkdir -p "$STAGE_DIR/www/luci-static/resources/view/prism"
-find "$REPO_DIR/htdocs/luci-static/resources/view/prism" -type f -exec sh -c '
-	for f; do
-		rel="${f#'"$REPO_DIR"'/htdocs/luci-static/resources/view/prism/}"
-		dst="'"$STAGE_DIR"'/www/luci-static/resources/view/prism/$rel"
-		mkdir -p "$(dirname "$dst")"
-		cp "$f" "$dst"
-	done
-' _ {} +
+cp -R "$REPO_DIR/htdocs/luci-static/resources/view/prism/." \
+	"$STAGE_DIR/www/luci-static/resources/view/prism/"
 # Strip JS comments from the staged tree.
 find "$STAGE_DIR/www/luci-static/resources/view/prism" -type f -name '*.js' | \
 	while IFS= read -r dst; do strip_comments "$dst"; done
 
-# root/ → target filesystem; honour executable bits set in git
-find "$REPO_DIR/root" -type f -exec sh -c '
-	for f; do
-		rel="${f#'"$REPO_DIR"'/root/}"
-		dst="'"$STAGE_DIR"'/$rel"
-		mkdir -p "$(dirname "$dst")"
-		cp "$f" "$dst"
-		if [ -x "$f" ]; then
-			chmod 755 "$dst"
-		else
-			chmod 644 "$dst"
-		fi
-	done
-' _ {} +
+# root/ → target filesystem. cp -R preserves source modes; the chmod -R
+# normalises them — `X` keeps the executable bit exactly where git set it
+# (exec for all if exec for any), i.e. 755 for directories and executables,
+# 644 otherwise, independent of the build host's umask.
+cp -R "$REPO_DIR/root/." "$STAGE_DIR/"
+chmod -R u=rwX,go=rX "$STAGE_DIR"
 # Strip Lua and shell comments from the staged tree. Path-based dispatch
 # in strip_comments matches the helper files by exact name, plus any
-# *.lua / *.sh / uci-defaults file.
+# *.lua / *.sh file.
 find "$STAGE_DIR" -type f \
 	\( -name '*.lua' -o -name '*.sh' \
-	   -o -path '*/uci-defaults/*' \
 	   -o -path '*/init.d/prism' \
 	   -o -path '*/libexec/prism/*' \
 	   -o -path '*/libexec/rpcd/luci.prism' \) | \

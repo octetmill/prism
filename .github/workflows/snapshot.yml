@@ -63,24 +63,17 @@ jobs:
         run: |
           TAG="snapshot"
           NOTES_FILE=$(mktemp)
-          {
-            echo "Rolling snapshot — replaced on every commit to a non-main branch."
-            echo ""
-            echo "**Built version:** \`${BUILT_VERSION}\`"
-            echo "**Commit:** \`${GITHUB_SHA}\`"
-            echo "**Branch:** \`${GITHUB_REF_NAME}\`"
-            echo ""
-            echo "**APK** (OpenWrt 25.12+):"
-            echo "_apk-tools 3.x does not accept remote URLs directly — download first._"
-            echo '```'
-            echo "wget -O /tmp/prism.apk https://github.com/${GITHUB_REPOSITORY}/releases/download/snapshot/luci-app-prism-snapshot.apk && apk add --allow-untrusted /tmp/prism.apk && service rpcd reload"
-            echo '```'
-            echo ""
-            echo "**IPK** (OpenWrt ≤24.10 / opkg):"
-            echo '```'
-            echo "wget -O /tmp/prism.ipk https://github.com/${GITHUB_REPOSITORY}/releases/download/snapshot/luci-app-prism-snapshot.ipk && opkg install /tmp/prism.ipk && service rpcd reload"
-            echo '```'
-          } > "$NOTES_FILE"
+          DL="https://github.com/${GITHUB_REPOSITORY}/releases/download/snapshot"
+          .github/workflows/release-notes.sh \
+            "${DL}/luci-app-prism-snapshot.apk" \
+            "${DL}/luci-app-prism-snapshot.ipk" \
+            > "$NOTES_FILE" <<EOF
+          Rolling snapshot — replaced on every commit to a non-main branch.
+
+          **Built version:** \`${BUILT_VERSION}\`
+          **Commit:** \`${GITHUB_SHA}\`
+          **Branch:** \`${GITHUB_REF_NAME}\`
+          EOF
 
           # The "snapshot" tag is non-semantic and moves to the current commit
           # on every build. Force-update is intentional here.
