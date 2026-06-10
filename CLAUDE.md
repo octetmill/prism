@@ -649,7 +649,7 @@ Make the script executable (`chmod 755`). The Makefile installs it with `INSTALL
 - sing-box configuration is native JSON (`/etc/sing-box/config.json`) — not UCI.
 - Prism's own settings (enabled, log level, config path) live in UCI (`/etc/config/prism`).
 - On apply, Prism writes the sing-box JSON file directly, then reloads via procd.
-- Never kill the sing-box process directly; always go through `procd` (`/etc/init.d/prism reload`).
+- Never kill the **managed** sing-box process directly; always go through `procd` (`/etc/init.d/prism reload`). The one exception is the ephemeral latency-probe instance, which is runner-owned, not procd-managed: `test-all-runner` starts and kills it itself (see `build-config --probe`).
 
 ### procd init script conventions
 

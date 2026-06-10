@@ -444,8 +444,8 @@ msgstr ""
 msgid "Failed to load nodes."
 msgstr ""
 
-#: htdocs/luci-static/resources/view/prism/nodes.js:959
-msgid "Test failed — check the Prism log on the Status page."
+#: htdocs/luci-static/resources/view/prism/nodes.js:955
+msgid "Test failed: "
 msgstr ""
 
 #: htdocs/luci-static/resources/view/prism/nodes.js:997
@@ -459,10 +459,9 @@ msgstr ""
 #: htdocs/luci-static/resources/view/prism/nodes.js:1003
 #, javascript-format
 msgid ""
-"Probe latency for %d nodes? A background runner probes them in parallel and "
-"cells update as results arrive. A node that isn't in the running config — "
-"see Settings → Latency testing → \"Include all nodes\" — will report \"proxy "
-"not in running config\"."
+"Probe latency for %d nodes? A background runner starts a temporary sing-box "
+"test instance on the router, probes all nodes in parallel through it, and "
+"cells update as results arrive."
 msgstr ""
 
 #: htdocs/luci-static/resources/view/prism/nodes.js:1011
@@ -769,32 +768,22 @@ msgstr ""
 msgid "Latency testing"
 msgstr ""
 
-#: htdocs/luci-static/resources/view/prism/settings.js:292
+#: htdocs/luci-static/resources/view/prism/settings.js:293
 msgid ""
 "Probe node round-trip time via sing-box's clash-compatible API. The API "
-"binds 127.0.0.1:9090 only — never exposed on the LAN."
+"binds 127.0.0.1 only — never exposed on the LAN."
 msgstr ""
 
-#: htdocs/luci-static/resources/view/prism/settings.js:297
+#: htdocs/luci-static/resources/view/prism/settings.js:299
 msgid "Enable latency testing"
 msgstr ""
 
-#: htdocs/luci-static/resources/view/prism/settings.js:298
+#: htdocs/luci-static/resources/view/prism/settings.js:300
 msgid ""
 "Adds a loopback-only clash API listener to sing-box and a Test button next "
-"to each node on the Nodes tab."
-msgstr ""
-
-#: htdocs/luci-static/resources/view/prism/settings.js:303
-msgid "Include all nodes in the running config"
-msgstr ""
-
-#: htdocs/luci-static/resources/view/prism/settings.js:304
-msgid ""
-"Subscription nodes only reach sing-box (and become testable) when a routing "
-"rule or group member references them. Enable this to emit every known node "
-"into the generated config, regardless. Cost: a few hundred bytes per node on "
-"tmpfs; idle nodes are not dialed unless used."
+"to each node on the Nodes tab. Tests run on a temporary second sing-box "
+"instance, so every known node is testable without bloating the running "
+"config."
 msgstr ""
 
 #: htdocs/luci-static/resources/view/prism/settings.js:316

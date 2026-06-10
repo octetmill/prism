@@ -603,7 +603,6 @@ local RESERVED_TAGS = {
 	direct          = true,
 	block           = true,
 	["basic-auto"]  = true,
-	_prism_test_all = true,
 }
 
 -- SingBox JSON: the outbounds array, minus builtin and group outbounds.
@@ -802,68 +801,24 @@ end
 -- Shared helpers, loaded via dofile() with an absolute path (cwd-independent).
 -- prismlib.lua ships in this package alongside this handler, so unlike the
 -- optional luci.jsonc it is always present when the handler is. Declared up
--- here so the clash-API helpers below (probe_node, read_latency_cache, …) can
--- use read_file — they ran before this binding existed in an earlier draft and
--- crashed with "attempt to call global 'read_file' (a nil value)".
+-- here so the latency-cache helpers below can use read_file — they ran
+-- before this binding existed in an earlier draft and crashed with
+-- "attempt to call global 'read_file' (a nil value)".
 local lib = dofile("/usr/libexec/prism/prismlib.lua")
 local read_file = lib.read_file
-local url_encode = lib.url_encode
 
--- ─── Node latency probe via sing-box clash API ────────────────────────────
--- Loopback-only API surface configured by build-config when the user enables
--- `prism.global.clash_api_enabled` from Settings. Tests are on-demand: the UI
--- triggers them per node (test_node) or via the background runner spawned
--- by test_all_start; results land in a tmpfs cache so a page reload doesn't
--- drop measurements, and `get_last_latency` reads the cache for the Nodes
--- panel's Latency column.
---
--- We talk to the API with uclient-fetch — the same downloader the subscription
--- sync code already uses, so no new dependency. sing-box's clash auth only
--- kicks in when a `secret` is configured server-side; with no secret (see
--- build-config) every endpoint is reachable without a custom Authorization
--- header, which uclient-fetch has no flag for sending. The API is bound to
--- 127.0.0.1 — anyone able to reach the port has root on the router already.
+-- ─── Node latency probes ──────────────────────────────────────────────────
+-- All probes run through the background test-all-runner, which builds an
+-- ephemeral probe config (`build-config --probe`: every known node + a
+-- loopback clash API on 127.0.0.1:9091, nothing else), starts a short-lived
+-- second sing-box instance from it, probes /proxies/<tag>/delay there, and
+-- tears the instance down. The running (production) config stays lean — it
+-- carries only nodes referenced by a rule or group, and the probes measure
+-- through the real protocol stack regardless. Results land in a tmpfs cache
+-- so a page reload doesn't drop measurements; `get_last_latency` reads the
+-- cache for the Nodes panel's Latency column.
 
-local CLASH_HOST          = "127.0.0.1:9090"
 local LATENCY_CACHE_PATH  = "/var/etc/prism/latency.json"
-local DEFAULT_TEST_URL    = "http://www.gstatic.com/generate_204"
-local DEFAULT_TEST_TIMEOUT_MS = 5000
-
--- Shell out to uclient-fetch and return body, rc, and (when the server
--- replied with a 4xx/5xx) the HTTP status code parsed out of stderr.
--- Probing happens against the loopback clash API so a stuck connect cannot
--- happen — port 9090 is either listening (instant connect) or not (instant
--- refusal). uclient-fetch's `--timeout` bounds the transfer.
---
--- uclient-fetch suppresses the response body whenever the server returns a
--- non-2xx status (it just emits "HTTP error N" to stderr and exits rc=8),
--- so we can't read sing-box's "message" field for failures. We capture
--- stderr to a tmpfs side-file and grep the status code back out — at least
--- the UI can show "HTTP 404 (proxy not in running config)" instead of an
--- opaque "empty response".  Note: `-q` is intentionally NOT passed, because
--- on this OpenWrt build `-q` suppresses the "HTTP error N" line too — we
--- need that line to recover the status code (it's the only signal we get).
--- The progress chatter ("Downloading X", "Connecting to Y") that comes with
--- dropping -q is harmlessly filtered out below.
-local function clash_get(path_with_query, timeout_s)
-	local url = "http://" .. CLASH_HOST .. path_with_query
-	local safe_url = url:gsub("'", "'\\''")
-	local stderr_path = "/var/etc/prism/.uclient-fetch.stderr"
-	os.execute("mkdir -p /var/etc/prism 2>/dev/null")
-	local cmd = "uclient-fetch --timeout=" .. tostring(timeout_s)
-		.. " -O- '" .. safe_url .. "' 2>'" .. stderr_path
-		.. "'; echo __RC__$?"
-	local f = io.popen(cmd)
-	if not f then return nil, 0, nil end
-	local out = f:read("*a") or ""
-	f:close()
-	local rc = tonumber(out:match("__RC__(%d+)%s*$") or "1") or 1
-	out = out:gsub("__RC__%d+%s*$", "")
-	local stderr = read_file(stderr_path) or ""
-	os.remove(stderr_path)
-	local http_status = tonumber(stderr:match("HTTP error (%d+)") or "") or nil
-	return out, rc, http_status
-end
 
 -- Read the current latency cache. Empty object when the file is missing or
 -- malformed — both are normal first-run states.
@@ -875,102 +830,6 @@ local function read_latency_cache()
 	if not ok or type(parsed) ~= "table" then return { results = {} } end
 	if type(parsed.results) ~= "table" then parsed.results = {} end
 	return parsed
-end
-
-local function write_latency_cache(cache)
-	os.execute("mkdir -p /var/etc/prism 2>/dev/null")
-	local tmp = LATENCY_CACHE_PATH .. ".tmp"
-	local f = io.open(tmp, "w")
-	if not f then return false end
-	if _jsonc_ok then
-		f:write(_jsonc.stringify(cache))
-	else
-		f:write(json_stringify(cache))
-	end
-	f:close()
-	return os.rename(tmp, LATENCY_CACHE_PATH) ~= nil
-end
-
--- Run one delay probe against the clash API. Returns a result table with
--- `delay_ms` (number on success) and/or `error` (string on failure). Used
--- by the per-row Test button via the test_node RPC; "Test all" goes
--- through the background runner instead and doesn't call this.
--- Caveats surfaced as `error`:
---   "clash API disabled"   — UCI flag off (the experimental.clash_api block
---                            is absent, so port 9090 isn't listening)
---   "proxy not found"      — tag isn't an outbound in the running config
---                            (e.g. a subscription node not referenced by any
---                            group or rule, which build-config filters out)
---   "<sing-box message>"   — anything else the clash API reports back
-local function probe_node(tag, url, timeout_ms)
-	if type(tag) ~= "string" or tag == "" then
-		return { error = "tag required" }
-	end
-	local c = uci_cursor()
-	local enabled = c:get("prism", "global", "clash_api_enabled")
-	c:close()
-	if enabled ~= "1" then
-		return { error = "clash API disabled" }
-	end
-	local t_ms = tonumber(timeout_ms) or DEFAULT_TEST_TIMEOUT_MS
-	if t_ms < 500   then t_ms = 500   end
-	if t_ms > 30000 then t_ms = 30000 end
-	local test_url = (type(url) == "string" and url ~= "") and url or DEFAULT_TEST_URL
-	-- /proxies/<tag>/delay?timeout=<ms>&url=<url> — clash protocol.
-	local path = "/proxies/" .. url_encode(tag) .. "/delay"
-		.. "?timeout=" .. tostring(t_ms)
-		.. "&url="     .. url_encode(test_url)
-	-- Give uclient-fetch a little headroom over the probe timeout so it
-	-- doesn't kill the connection before sing-box's own timer fires, giving
-	-- us a clean error body to parse instead of an EOF.
-	local req_timeout_s = math.ceil(t_ms / 1000) + 3
-	local body, rc, http_status = clash_get(path, req_timeout_s)
-	local result = { tested_at = os.time() }
-	-- HTTP error: uclient-fetch wrote no body to stdout (it discards 4xx/5xx
-	-- bodies), but stderr told us the status code. The two cases we care
-	-- about: 404 = proxy not in the running config (typical for subscription
-	-- nodes not referenced by any rule or group, which build_outbounds
-	-- filters out before sing-box sees them); 504 = the delay probe itself
-	-- timed out (target unreachable through this outbound).
-	if http_status then
-		-- sing-box 1.12 clash API status conventions:
-		--   404 = no such proxy registered (only happens when the tag is
-		--         not in the running config, e.g. include_all_nodes is off
-		--         and the node isn't referenced by any rule or group)
-		--   503 = probe couldn't complete — outbound dial failed, the test
-		--         URL didn't load through this node, or the test timed out.
-		--         sing-box doesn't distinguish "unreachable" from "timeout"
-		--         at the HTTP layer, so we report a single label here.
-		--   504 = older sing-box used this for timeout; keep the mapping
-		--         for forward/backward compatibility.
-		if http_status == 404 then
-			result.error = "proxy not in running config"
-		elseif http_status == 503 or http_status == 504 then
-			result.error = "timeout"
-		else
-			result.error = "HTTP " .. tostring(http_status)
-		end
-		return result
-	end
-	if rc ~= 0 then
-		result.error = "fetch failed (rc=" .. tostring(rc) .. ")"
-		return result
-	end
-	if not _jsonc_ok or not body or body == "" then
-		result.error = "empty response"
-		return result
-	end
-	local ok, parsed = pcall(_jsonc.parse, body)
-	if not ok or type(parsed) ~= "table" then
-		result.error = "invalid response"
-		return result
-	end
-	if type(parsed.delay) == "number" then
-		result.delay_ms = parsed.delay
-		return result
-	end
-	result.error = "unknown response"
-	return result
 end
 
 -- Node storage:
@@ -1871,8 +1730,8 @@ local methods = {
 	-- of it churning. UCI is open as a cursor only once for the whole
 	-- list — group counts are small (a handful).
 	--
-	-- Reports the same `error = "clash API disabled"` as test_node when
-	-- the feature flag is off, so the UI can render a consistent hint.
+	-- Reports the same `error = "clash API disabled"` as get_clash_stats
+	-- when the feature flag is off, so the UI can render a consistent hint.
 	get_active_groups = {
 		call = function()
 			local c = uci_cursor()
@@ -1911,8 +1770,7 @@ local methods = {
 			-- Basic-mode urltest emitted by build-config when the user
 			-- picks more than one server; it carries fixed tuning, so
 			-- surface it with the same shape the urltest's UCI peers
-			-- would. _prism_test_all is filtered by active-watch's
-			-- underscore-prefix rule and never reaches the snapshot.
+			-- would.
 			local SYNTHESISED = {
 				["basic-auto"] = { type = "urltest", interval = "5m", tolerance = "50" },
 			}
@@ -1985,32 +1843,6 @@ local methods = {
 		end
 	},
 
-	-- Probe one outbound's latency via the loopback clash API. The clash API
-	-- block must be enabled in Settings (UCI clash_api_enabled=1) so sing-box
-	-- is listening on 127.0.0.1:9090; otherwise we return error="clash API
-	-- disabled" and the UI surfaces it. Result is cached to
-	-- /var/etc/prism/latency.json so a page reload doesn't re-run probes.
-	test_node = {
-		args = { tag = "", url = "", timeout_ms = 0 },
-		call = function(args)
-			local tag = type(args.tag) == "string" and args.tag or ""
-			local r = probe_node(tag, args.url, args.timeout_ms)
-			-- Only persist real probe results. probe_node returns
-			-- {error="clash API disabled"} / {error="tag required"}
-			-- before it ever hits the network — caching those would
-			-- overwrite the previous good delay_ms entry with a stale
-			-- error string that lingers until the next successful probe.
-			-- A real probe (success OR network-side failure) carries
-			-- `tested_at`, the discriminator.
-			if r.tested_at then
-				local cache = read_latency_cache()
-				cache.results[tag] = r
-				write_latency_cache(cache)
-			end
-			return r
-		end
-	},
-
 	-- Return the cached latency results so the Nodes panel can render the
 	-- Latency / Last-tested columns without re-probing on every page load.
 	-- Empty `results` table when the cache file is missing (first run, or a
@@ -2021,11 +1853,12 @@ local methods = {
 		end
 	},
 
-	-- Fork the background "Test all" runner. Optional `tags` array narrows
-	-- the run to a subset (used by the per-subscription "Test all in this
-	-- subscription" button); omitted/empty means "probe every member of
-	-- the hidden _prism_test_all group". The runner calls the clash API
-	-- on its own (no synchronous RPC waiting for the response), writes
+	-- Fork the background latency-test runner. Optional `tags` array narrows
+	-- the run to a subset (the per-row Test button passes one tag, the
+	-- per-subscription "Test all in this subscription" button a list);
+	-- omitted/empty means "probe every node Prism knows about". The runner
+	-- builds an ephemeral probe config, starts a short-lived sing-box
+	-- instance from it, probes through that instance's clash API, writes
 	-- results into /var/etc/prism/latency.json, and updates
 	-- /var/etc/prism/.test-all-status with running=true/false plus
 	-- progress counters. The UI polls test_all_status to know when to

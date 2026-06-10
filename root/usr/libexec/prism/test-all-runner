@@ -2,27 +2,42 @@
 -- SPDX-License-Identifier: GPL-3.0-only
 -- Copyright (C) 2026 OctetMill
 --
--- Background runner for the Nodes panel's "Test all" button.
+-- Background runner for the Nodes panel's latency tests (per-row Test,
+-- "Test all", and the per-subscription batch).
 --
 -- luci.prism's test_all_start RPC forks this script (no stdin/stdout/stderr
 -- attached) so it survives the parent rpcd worker's exit. The script then:
 --
---   1. Asks sing-box's clash API for the membership of the hidden
---      _prism_test_all group (set up by build-config to contain every
---      concrete-endpoint outbound).
---   2. Probes each member via /proxies/<tag>/delay in parallel batches of
---      CONCURRENCY uclient-fetch processes (shell-forked & + wait).
+--   1. Builds an ephemeral probe config (`build-config --probe`) containing
+--      every concrete node Prism knows about — manual + all subscriptions —
+--      with a loopback clash API on 127.0.0.1:9091 and nothing else, and
+--      starts a second, short-lived sing-box instance from it. The running
+--      (production) config stays lean: it no longer carries unreferenced
+--      nodes just to make them testable.
+--   2. Probes each requested tag via /proxies/<tag>/delay on the probe
+--      instance, in parallel batches of CONCURRENCY uclient-fetch processes
+--      (shell-forked & + wait).
 --   3. Writes results into /var/etc/prism/latency.json after each batch,
 --      and updates /var/etc/prism/.test-all-status with progress, so the
 --      UI's poll sees results land batch by batch.
---   4. On exit, sets status.running=false plus tested/errors counts.
+--   4. Tears the probe instance down, then sets status.running=false plus
+--      tested/errors counts.
 --
--- The earlier implementation called the clash /group/<tag>/delay endpoint
--- (single big HTTP call). sing-box's internal probe concurrency for that
--- endpoint is capped — on a real config with ~100 unreachable nodes the
--- batch took 4+ minutes. Doing per-tag probes with our own concurrency
--- knob brings the wall clock down to ~one minute for the same set, with
--- the bonus that cells fill in progressively rather than all at once.
+-- The probe instance is NOT procd-managed — it is owned by this runner,
+-- which starts it, records its pid, and kills it on every exit path. The
+-- "always go through procd" rule applies to the production sing-box
+-- service only. A runner killed with SIGKILL can leave the instance
+-- behind; the next run reclaims it via the pidfile (with a /proc/cmdline
+-- identity check so a recycled pid is never killed by mistake).
+--
+-- The earlier implementation probed the LIVE instance's clash API, which
+-- required the `include_all_nodes` flag to bloat the running config with
+-- every subscription node. Before that, it called /group/<tag>/delay as a
+-- single big HTTP call — sing-box's internal probe concurrency for that
+-- endpoint is capped, and on a real config with ~100 unreachable nodes the
+-- batch took 4+ minutes. Per-tag probes with our own concurrency knob
+-- bring the wall clock down to ~one minute for the same set, with the
+-- bonus that cells fill in progressively rather than all at once.
 
 local jsonc = require "luci.jsonc"
 local lib   = dofile("/usr/libexec/prism/prismlib.lua")
@@ -33,7 +48,16 @@ local STATUS  = "/var/etc/prism/.test-all-status"
 local LATENCY = "/var/etc/prism/latency.json"
 local TMPDIR  = "/tmp/prism-latency-pending"
 
-local CLASH_HOST       = "127.0.0.1:9090"
+-- Probe instance plumbing. Host/port and config path must match
+-- build-config's PROBE_CLASH_HOST / PROBE_CONFIG_PATH.
+local SINGBOX       = "/usr/bin/sing-box"
+local BUILD_CONFIG  = "/usr/libexec/prism/build-config"
+local PROBE_HOST    = "127.0.0.1:9091"
+local PROBE_CONFIG  = "/var/etc/prism/sing-box-probe.json"
+local PROBE_PIDFILE = "/var/etc/prism/.sing-box-probe.pid"
+local PROBE_LOG     = "/var/etc/prism/sing-box-probe.log"
+local PROBE_START_TIMEOUT_S = 15   -- readiness wait for the probe instance
+
 local CONCURRENCY      = 16            -- parallel uclient-fetch processes
 local PROBE_TIMEOUT_MS = 3000          -- per-probe (clash query param)
 local REQ_TIMEOUT_S    = 5             -- uclient-fetch wall clock per probe
@@ -41,6 +65,11 @@ local TEST_URL         = "http://www.gstatic.com/generate_204"
 
 local function shell_quote(s)
 	return "'" .. tostring(s):gsub("'", "'\\''") .. "'"
+end
+
+local function log_syslog(prio, msg)
+	os.execute("logger -t prism -p daemon." .. prio .. " "
+		.. shell_quote("test-all: " .. msg) .. " 2>/dev/null")
 end
 
 local function write_atomic(path, content)
@@ -63,7 +92,46 @@ local function update_status(state)
 	write_atomic(STATUS, jsonc.stringify(state))
 end
 
+-- ─── probe instance lifecycle ────────────────────────────────────────────
+
+local probe_pid = nil
+
+-- True when `pid` is alive AND is our probe instance — the cmdline must
+-- mention the probe config path, so a pid recycled by an unrelated process
+-- (or by the production sing-box) is never signalled.
+local function is_probe_process(pid)
+	return os.execute("[ -r /proc/" .. pid .. "/cmdline ] && tr '\\0' ' ' "
+		.. "</proc/" .. pid .. "/cmdline | grep -q "
+		.. shell_quote(PROBE_CONFIG)) == 0
+end
+
+-- Stop the probe instance (current run's, or a stale one left by a
+-- SIGKILL'd previous runner) and remove its on-disk traces. The probe
+-- config holds every node's credentials, so it never outlives the run.
+local function stop_probe()
+	local pid = probe_pid
+	if not pid then
+		local raw = read_file(PROBE_PIDFILE)
+		pid = raw and tonumber(raw:match("%d+")) or nil
+	end
+	if pid and is_probe_process(pid) then
+		os.execute("kill " .. pid .. " 2>/dev/null")
+		for _ = 1, 3 do
+			if os.execute("kill -0 " .. pid .. " 2>/dev/null") ~= 0 then break end
+			os.execute("sleep 1")
+		end
+		if is_probe_process(pid) then
+			os.execute("kill -9 " .. pid .. " 2>/dev/null")
+		end
+	end
+	probe_pid = nil
+	os.remove(PROBE_PIDFILE)
+	os.remove(PROBE_CONFIG)
+end
+
 local function bail(msg)
+	stop_probe()
+	log_syslog("err", msg)
 	update_status({
 		running     = false,
 		error       = msg,
@@ -73,10 +141,10 @@ local function bail(msg)
 end
 
 -- Cooperative lock so concurrent runners cannot race on STATUS / LATENCY /
--- TMPDIR. Releases automatically when this process exits (any signal,
--- including SIGKILL), so a previously-killed runner does not jam future
--- runs the way a stale .test-all-status file on its own would. The lock
--- supersedes the status file as the busy gate.
+-- TMPDIR / the probe instance. Releases automatically when this process
+-- exits (any signal, including SIGKILL), so a previously-killed runner does
+-- not jam future runs the way a stale .test-all-status file on its own
+-- would. The lock supersedes the status file as the busy gate.
 local LOCK = "/var/lock/prism-test-all.lock"
 os.execute("mkdir -p /var/lock 2>/dev/null")
 if os.execute("lock -n " .. LOCK .. " 2>/dev/null") ~= 0 then
@@ -89,11 +157,11 @@ local started_at = os.time()
 update_status({ running = true, started_at = started_at })
 
 -- ─── decide which tags to probe ──────────────────────────────────────────
--- If luci.prism's test_all_start was called with a tag list (subscription-
--- scoped Test all from the UI), the RPC wrote those tags to TAG_FILE one
--- per line. We use that list verbatim. Otherwise we fall back to the full
--- membership of _prism_test_all from the clash API (the global Test all
--- path).
+-- If luci.prism's test_all_start was called with a tag list (the per-row
+-- Test button and the subscription-scoped Test all), the RPC wrote those
+-- tags to TAG_FILE one per line. We use that list verbatim. Otherwise we
+-- probe every concrete node in the probe config (the global Test all
+-- path) — enumerated from the config itself after it is built below.
 local TAG_FILE = "/var/etc/prism/.test-all-tags"
 local tags = {}
 local raw_tag_file = read_file(TAG_FILE)
@@ -104,23 +172,80 @@ if raw_tag_file and raw_tag_file ~= "" then
 	os.remove(TAG_FILE)
 end
 
-if #tags == 0 then
-	local f = io.popen(
-		"uclient-fetch -qO- 'http://" .. CLASH_HOST ..
-		"/proxies/_prism_test_all' 2>/dev/null")
-	if not f then bail("cannot fork uclient-fetch") end
-	local body = f:read("*a") or ""
-	f:close()
-	if body == "" then bail("clash API returned no proxy list") end
+-- ─── build the probe config and start the probe instance ────────────────
+-- Reclaim any stale instance first: its pidfile (if any) points at a
+-- process whose cmdline we verify before killing.
+stop_probe()
 
-	local ok, parsed = pcall(jsonc.parse, body)
-	if not ok or type(parsed) ~= "table" or type(parsed.all) ~= "table" then
-		bail("malformed proxy list from clash API")
+local BUILD_ERR = "/var/etc/prism/.probe-build.stderr"
+local build_rc = os.execute(BUILD_CONFIG .. " --probe " .. shell_quote(PROBE_CONFIG)
+	.. " 2>" .. shell_quote(BUILD_ERR))
+-- Forward build warnings (reserved-tag skips, corrupt sub files, …) to
+-- syslog, same place the production build's stderr ends up.
+os.execute("[ -s " .. shell_quote(BUILD_ERR) .. " ] && logger -t prism -p daemon.warn <"
+	.. shell_quote(BUILD_ERR) .. " 2>/dev/null")
+os.remove(BUILD_ERR)
+if build_rc ~= 0 then
+	bail("failed to build probe config")
+end
+
+local probe_handle = io.popen(SINGBOX .. " run -c " .. shell_quote(PROBE_CONFIG)
+	.. " >" .. shell_quote(PROBE_LOG) .. " 2>&1 </dev/null & echo $!")
+if probe_handle then
+	probe_pid = tonumber((probe_handle:read("*a") or ""):match("%d+")) or nil
+	probe_handle:close()
+end
+if not probe_pid then
+	bail("cannot start probe sing-box instance")
+end
+write_atomic(PROBE_PIDFILE, tostring(probe_pid))
+
+-- Readiness: the clash API answers /version as soon as sing-box is up.
+-- Give up early if the process already died (config rejected, port taken)
+-- rather than sitting out the full window.
+local ready = false
+for _ = 1, PROBE_START_TIMEOUT_S do
+	local vf = io.popen("uclient-fetch -qO- --timeout=2 'http://" .. PROBE_HOST
+		.. "/version' 2>/dev/null")
+	local vbody = vf and (vf:read("*a") or "") or ""
+	if vf then vf:close() end
+	if vbody ~= "" then ready = true break end
+	if os.execute("kill -0 " .. probe_pid .. " 2>/dev/null") ~= 0 then break end
+	os.execute("sleep 1")
+end
+if not ready then
+	os.execute("tail -n 5 " .. shell_quote(PROBE_LOG)
+		.. " 2>/dev/null | logger -t prism -p daemon.err")
+	bail("probe sing-box instance failed to start (see logread)")
+end
+
+-- ─── enumerate tags when no explicit list was given ──────────────────────
+-- The probe config is the authoritative node universe: every entry in
+-- `outbounds` except the builtin direct, plus every endpoint (WireGuard).
+if #tags == 0 then
+	local craw = read_file(PROBE_CONFIG)
+	local cok, cfg = pcall(jsonc.parse, craw or "")
+	if not cok or type(cfg) ~= "table" then
+		bail("cannot parse probe config")
 	end
-	tags = parsed.all
+	if type(cfg.outbounds) == "table" then
+		for _, ob in ipairs(cfg.outbounds) do
+			if type(ob) == "table" and ob.tag and ob.tag ~= "direct" then
+				tags[#tags + 1] = ob.tag
+			end
+		end
+	end
+	if type(cfg.endpoints) == "table" then
+		for _, ep in ipairs(cfg.endpoints) do
+			if type(ep) == "table" and ep.tag then
+				tags[#tags + 1] = ep.tag
+			end
+		end
+	end
 end
 local total = #tags
 if total == 0 then
+	stop_probe()
 	update_status({
 		running     = false,
 		started_at  = started_at,
@@ -143,7 +268,7 @@ local uf = io.open(urls_path, "w")
 if not uf then bail("cannot write urls file") end
 for i, tag in ipairs(tags) do
 	local enc = url_encode(tag)
-	local url = "http://" .. CLASH_HOST .. "/proxies/" .. enc
+	local url = "http://" .. PROBE_HOST .. "/proxies/" .. enc
 		.. "/delay?timeout=" .. tostring(PROBE_TIMEOUT_MS)
 		.. "&url=" .. url_encode(TEST_URL)
 	uf:write(string.format("%d\t%s\n", i, url))
@@ -174,8 +299,8 @@ local function parse_result(idx)
 	local content = read_file(TMPDIR .. "/r_" .. tostring(idx))
 	if not content or content == "" then
 		-- uclient-fetch suppresses the body on 4xx/5xx, so empty means
-		-- either the proxy isn't in the running config (404, but with
-		-- the hidden group we shouldn't see this) or the probe failed.
+		-- either the tag isn't in the probe config (404 — a node that was
+		-- removed or renamed after the UI rendered) or the probe failed.
 		entry.error = "timeout"
 		return entry, "error"
 	end
@@ -248,6 +373,7 @@ done < "$TMPDIR/batch.txt"
 end
 
 -- ─── done ────────────────────────────────────────────────────────────────
+stop_probe()
 update_status({
 	running     = false,
 	started_at  = started_at,
