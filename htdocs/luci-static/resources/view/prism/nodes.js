@@ -53,25 +53,21 @@ var callListOutbounds = rpc.declare({
 	expect: { '': {} }
 });
 
-var callTestNode = rpc.declare({
-	object: 'luci.prism',
-	method: 'test_node',
-	params: ['tag', 'timeout_ms'],
-	expect: { '': {} }
-});
-
 var callGetLastLatency = rpc.declare({
 	object: 'luci.prism',
 	method: 'get_last_latency',
 	expect: { '': {} }
 });
 
-// Background-runner RPCs for "Test all": test_all_start forks the runner
-// and returns immediately (no XHR-timeout issue — the heavy lifting is
-// fire-and-forget on the device); test_all_status reads the runner's
-// tiny progress file. UI polls the status while refreshing cells from
-// get_last_latency between ticks, so results appear as the runner
-// writes them.
+// Background-runner RPCs — every latency probe (per-row Test, "Test all",
+// per-subscription batch) goes through them: test_all_start forks the
+// runner and returns immediately (no XHR-timeout issue — the heavy lifting
+// is fire-and-forget on the device); the runner spins up an ephemeral
+// sing-box probe instance containing every known node, so nodes absent
+// from the lean running config are testable too. test_all_status reads
+// the runner's tiny progress file. UI polls the status while refreshing
+// cells from get_last_latency between ticks, so results appear as the
+// runner writes them.
 var callTestAllStart = rpc.declare({
 	object: 'luci.prism',
 	method: 'test_all_start',
@@ -84,13 +80,6 @@ var callTestAllStatus = rpc.declare({
 	method: 'test_all_status',
 	expect: { '': {} }
 });
-
-// Per-probe timeout passed to the clash API's delay endpoint. 3 s is a
-// balance — a working proxy answers gstatic.com/generate_204 in well under
-// a second, and a node that needs longer is unlikely to be a useful pick.
-// The dominant time in a batch is the per-unreachable-node timeout, so
-// shorter values here directly shorten the batch.
-var TEST_TIMEOUT_MS = 3000;
 
 
 // Color-coded latency badge. Maps a probe result `{ delay_ms?, error? }` to a
@@ -227,6 +216,12 @@ return baseclass.extend({
 			var nodeSection = node.querySelector('#cbi-prism-node');
 			if (nodeSection)
 				nodeSection.style.marginTop = '2em';
+			// A runner may already be in flight when this tab renders —
+			// the post-first-sync test forked by sync_subscription, or a
+			// Test all surviving the tab reload a sync triggers. Resume
+			// the progress poll so its results land in the cells.
+			if (clashOn)
+				self._resumeTestPoll();
 			return node;
 		});
 	},
@@ -456,10 +451,11 @@ return baseclass.extend({
 		});
 
 		// ── Latency + Test (grid-only) ───────────────────────────────────
-		// Both columns appear only when clash_api is enabled; otherwise the
-		// Test button would just emit a "clash API disabled" notification on
-		// every click. Reading the UCI flag from the loaded prism config
-		// (load() already pulled it in) keeps this synchronous.
+		// Both columns appear only when latency testing is enabled
+		// (clash_api_enabled); otherwise the Test button would just emit a
+		// "clash API disabled" notification on every click. Reading the
+		// UCI flag from the loaded prism config (load() already pulled it
+		// in) keeps this synchronous.
 		var clashOn = (uci.get('prism', 'global', 'clash_api_enabled') === '1');
 		if (clashOn) {
 			var oLatency = s.taboption('general', form.DummyValue, '_latency',
@@ -897,12 +893,53 @@ return baseclass.extend({
 		this._latencyCells[tag] = live;
 	},
 
-	// Single-node probe. `btn` is the row's Test button; spin it in place
-	// (preserves width/height so the row doesn't jump) until the RPC settles.
-	// Refuses while a "Test all" batch is in flight — both write the same
-	// /var/etc/prism/latency.json with no coordination, and a per-row probe
-	// during a batch silently rolls back the runner's progress on its next
-	// atomic write.
+	// Adopt a runner that is already in flight (forked by the backend
+	// after a subscription's first sync, or started before a tab reload):
+	// when the status file says running, drive the standard poll loop so
+	// cells refresh as its results land. The detached span stands in for
+	// the banner's elapsed element — _pollTestAll only touches it when it
+	// is connected to the DOM.
+	_resumeTestPoll: function() {
+		var self = this;
+		return callTestAllStatus().then(function(status) {
+			if (!status || !status.running || self._testAllRunning)
+				return;
+			self._testAllRunning = true;
+			return self._pollTestAll(E('span'), null);
+		}).catch(function() { /* no runner state — nothing to adopt */ });
+	},
+
+	// Poll the runner's status file until the run finishes (running flips
+	// false) or `maxMs` elapses. Quiet helper for the single-node path —
+	// the batch path drives its own loop with banner/elapsed UI in
+	// _pollTestAll.
+	_waitTestDone: function(maxMs) {
+		var startMs = Date.now();
+		return new Promise(function(resolve, reject) {
+			function tick() {
+				if (Date.now() - startMs > maxMs) {
+					reject(new Error(_('runner timed out (status file never cleared)')));
+					return;
+				}
+				callTestAllStatus().then(function(status) {
+					if (status && !status.running)
+						resolve(status);
+					else
+						setTimeout(tick, 1000);
+				}).catch(function() {
+					setTimeout(tick, 1000);
+				});
+			}
+			setTimeout(tick, 1000);
+		});
+	},
+
+	// Single-node probe: a one-tag run of the background runner (which
+	// spins up the ephemeral probe instance, probes, tears it down). `btn`
+	// is the row's Test button; spin it in place (preserves width/height
+	// so the row doesn't jump) until the run settles. Refuses while a
+	// "Test all" batch is in flight — the runner's lock would reject the
+	// second run anyway, and the UI guard gives a friendlier message.
 	_testOne: function(btn, tag) {
 		var self = this;
 		if (this._testAllRunning) {
@@ -911,20 +948,36 @@ return baseclass.extend({
 				'info');
 			return Promise.resolve();
 		}
+		this._testAllRunning = true;
 		var label = btn.textContent;
 		var w = btn.offsetWidth, h = btn.offsetHeight;
 		btn.classList.add('spinning');
 		btn.style.width  = w + 'px';
 		btn.style.height = h + 'px';
 		btn.textContent  = '';
-		return callTestNode(tag, TEST_TIMEOUT_MS).then(function(r) {
-			self._latency[tag] = r || {};
-			self._refreshLatencyCell(tag);
-		}).catch(function() {
+		return callTestAllStart([ tag ]).then(function(res) {
+			if (res && res.error)
+				throw new Error(res.error);
+			// Probe-instance startup (~a few seconds) + one probe; 60 s
+			// leaves generous headroom before declaring the runner stuck.
+			return self._waitTestDone(60 * 1000);
+		}).then(function(status) {
+			if (status && status.error)
+				throw new Error(status.error);
+			return callGetLastLatency().then(function(c) {
+				var results = (c && c.results) || {};
+				if (results[tag]) {
+					self._latency[tag] = results[tag];
+					self._refreshLatencyCell(tag);
+				}
+			});
+		}).catch(function(err) {
+			var detail = err && (err.message || String(err)) || _('unknown error');
 			ui.addNotification(null,
-				E('p', _('Test failed — check the Prism log on the Status page.')),
+				E('p', [ _('Test failed: '), detail ]),
 				'error');
 		}).finally(function() {
+			self._testAllRunning = false;
 			btn.style.width  = '';
 			btn.style.height = '';
 			btn.classList.remove('spinning');
@@ -966,11 +1019,10 @@ return baseclass.extend({
 		var self = this;
 		ui.showModal(_('Test all nodes'), [
 			E('p', {}, [
-				_('Probe latency for %d nodes? A background runner probes ' +
-				  'them in parallel and cells update as results arrive. A ' +
-				  'node that isn\'t in the running config — see Settings → ' +
-				  'Latency testing → "Include all nodes" — will report ' +
-				  '"proxy not in running config".')
+				_('Probe latency for %d nodes? A background runner starts a ' +
+				  'temporary sing-box test instance on the router, probes ' +
+				  'all nodes in parallel through it, and cells update as ' +
+				  'results arrive.')
 					.format(tags.length)
 			]),
 			E('div', { 'class': 'right' }, [
@@ -985,15 +1037,15 @@ return baseclass.extend({
 	},
 
 	// "Test all": fork the background runner on the device and poll for
-	// completion. The runner probes each tag via /proxies/<tag>/delay in
-	// parallel shell-forked batches and writes results into
-	// /var/etc/prism/latency.json; we refresh cells from that cache between
-	// polls so results land progressively. No long-running RPC, so LuCI's
-	// XHR timeout is a non-issue.
+	// completion. The runner starts the ephemeral probe instance, probes
+	// each tag via /proxies/<tag>/delay in parallel shell-forked batches
+	// and writes results into /var/etc/prism/latency.json; we refresh
+	// cells from that cache between polls so results land progressively.
+	// No long-running RPC, so LuCI's XHR timeout is a non-issue.
 	//
 	// `tags` is optional: pass a list to scope the run to a subset (the
 	// per-subscription "Test all in this subscription" button does this);
-	// omit/empty to probe every node in the hidden _prism_test_all group.
+	// omit/empty to probe every node Prism knows about.
 	_doTestAll: function(tags) {
 		if (this._testAllRunning) {
 			ui.addNotification(null,

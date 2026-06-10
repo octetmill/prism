@@ -9,8 +9,10 @@
 --
 -- This is the single piece that translates Prism's source-of-truth (UCI +
 -- /etc/prism/nodes/*.json) into something sing-box can consume. Procd's
--- start_service calls this script before exec'ing sing-box, and the rpcd
--- get_config method calls it to build a preview.
+-- start_service calls this script before exec'ing sing-box, the rpcd
+-- get_config method calls it to build a preview, and the test-all-runner
+-- calls it with --probe to build the ephemeral latency-test instance's
+-- config (see build_probe_config below).
 --
 -- A user-merge slot at /etc/prism/extra.json (top-level JSON object) is
 -- shallow-merged into the generated config so power users can override or
@@ -40,6 +42,11 @@ local DNSMASQ_DROPIN = "/var/etc/prism/dnsmasq-managed.conf"
 -- Loopback DNS listener port for managed DNS: build_inbounds opens the
 -- dns-in inbound here and build_dnsmasq_dropin points dnsmasq at it.
 local DNS_IN_PORT    = 5335
+-- Ephemeral latency-test instance (--probe mode): clash API host:port and
+-- default output path. 9091 so the probe instance can run alongside the
+-- live instance's API on 9090. test-all-runner hardcodes the same values.
+local PROBE_CLASH_HOST  = "127.0.0.1:9091"
+local PROBE_CONFIG_PATH = "/var/etc/prism/sing-box-probe.json"
 
 local read_file = lib.read_file
 
@@ -62,6 +69,10 @@ local BASIC_AUTO_TAG = "basic-auto"
 -- read-only LuCI user invoking get_config cannot trigger file deletion or
 -- overwrite the dnsmasq drop-in on demand. Set in main() below.
 local PREVIEW_MODE = false
+-- --probe: build the ephemeral latency-test instance's config instead of
+-- the production one (build_probe_config below). Implies the same
+-- side-effect suppression as --preview. Set in main() below.
+local PROBE_MODE = false
 
 local function read_mode(c)
 	local m = c:get("prism", "global", "mode")
@@ -616,16 +627,15 @@ local function build_node_from_uci(s)
 	return ob
 end
 
--- direct / block are builtin outbounds added at emission. basic-auto and
--- _prism_test_all are synthesised Basic-mode and clash-test groups; a node
--- — manual or from a (possibly hostile) subscription — carrying one of
--- those tags would collide and make sing-box reject the whole config, so
--- drop it before it reaches all_map.
+-- direct / block are builtin outbounds added at emission. basic-auto is
+-- the synthesised Basic-mode group; a node — manual or from a (possibly
+-- hostile) subscription — carrying one of those tags would collide and
+-- make sing-box reject the whole config, so drop it before it reaches
+-- all_map.
 local OUTBOUND_RESERVED_TAGS = {
 	direct           = true,
 	block            = true,
 	["basic-auto"]   = true,
-	_prism_test_all  = true,
 }
 
 -- ─── subscription payload sanitiser ─────────────────────────────────────
@@ -873,54 +883,42 @@ local function build_basic_outbounds(c)
 		all_ordered[#all_ordered + 1] = group
 	end
 
-	-- Emit: direct first, then every imported node + the synthesised group.
-	-- Basic doesn't prune to a `referenced` set — subscriptions are the whole
-	-- node universe and emitting them all keeps clash-API node testing usable.
+	-- Emit: direct first, then only the selected members + the synthesised
+	-- group. Unselected subscription nodes stay on disk — latency testing
+	-- probes them through the ephemeral --probe instance, so the running
+	-- config no longer needs to carry unreferenced nodes.
+	local member_set = {}
+	for _, t in ipairs(members) do member_set[t] = true end
 	local outbounds = {
 		{ type = "direct", tag = "direct", domain_resolver = "local" }
 	}
 	local endpoints = {}
-	local testable_tags = {}
 	for _, ob in ipairs(all_ordered) do
-		ob._source = nil
-		if ob._is_endpoint then
-			ob._is_endpoint = nil
-			endpoints[#endpoints + 1] = ob
-			testable_tags[#testable_tags + 1] = ob.tag
-		elseif ob.type == "wireguard" then
-			io.stderr:write("prism build-config: subscription WireGuard node '"
-				.. tostring(ob.tag) .. "' uses the legacy outbound schema; "
-				.. "it will not work on sing-box 1.13\n")
-			outbounds[#outbounds + 1] = ob
-			testable_tags[#testable_tags + 1] = ob.tag
-		else
-			outbounds[#outbounds + 1] = ob
-			if ob.type ~= "urltest" then
-				testable_tags[#testable_tags + 1] = ob.tag
+		if member_set[ob.tag] or ob.tag == BASIC_AUTO_TAG then
+			ob._source = nil
+			if ob._is_endpoint then
+				ob._is_endpoint = nil
+				endpoints[#endpoints + 1] = ob
+			elseif ob.type == "wireguard" then
+				io.stderr:write("prism build-config: subscription WireGuard node '"
+					.. tostring(ob.tag) .. "' uses the legacy outbound schema; "
+					.. "it will not work on sing-box 1.13\n")
+				outbounds[#outbounds + 1] = ob
+			else
+				outbounds[#outbounds + 1] = ob
 			end
 		end
-	end
-
-	if c:get("prism", "global", "clash_api_enabled") == "1"
-	   and #testable_tags > 0 then
-		outbounds[#outbounds + 1] = {
-			type      = "selector",
-			tag       = "_prism_test_all",
-			outbounds = testable_tags,
-			default   = testable_tags[1]
-		}
 	end
 
 	return outbounds, endpoints
 end
 
-local function build_outbounds(c)
-	if read_mode(c) == "basic" then return build_basic_outbounds(c) end
-
-	-- ── Step 1: load every node, preserving order, deduping by tag ────────
-	-- Manual nodes (UCI type="node") come first, ordered by their order field.
-	-- Subscription JSON files follow (sorted by filename for stability).
-	-- First-seen-wins deduplication means manual nodes always take precedence.
+-- Load every node Prism knows about, preserving order, deduping by tag.
+-- Manual nodes (UCI type="node") come first, ordered by their order field.
+-- Subscription JSON files follow (sorted by filename for stability).
+-- First-seen-wins deduplication means manual nodes always take precedence.
+-- Step 1 of build_outbounds, shared with build_probe_config.
+local function load_all_nodes(c)
 	local all_ordered = {}
 	local all_map     = {}
 	local seen        = {}
@@ -944,6 +942,14 @@ local function build_outbounds(c)
 
 	-- Subscription nodes (orphan-prune + parse) — same loader Basic uses.
 	load_subscription_nodes(c, all_ordered, all_map, seen)
+	return all_ordered, all_map
+end
+
+local function build_outbounds(c)
+	if read_mode(c) == "basic" then return build_basic_outbounds(c) end
+
+	-- ── Step 1: load every node, preserving order, deduping by tag ────────
+	local all_ordered, all_map = load_all_nodes(c)
 
 	-- ── Step 2: collect outbound tags referenced by the active route config ──
 	-- The final outbound catches anything no rule matched; each enabled rule
@@ -1117,19 +1123,12 @@ local function build_outbounds(c)
 		{ type = "direct", tag = "direct", domain_resolver = "local" }
 	}
 	local endpoints = {}
-	-- include_all_nodes: when the user has the clash API on and wants to be
-	-- able to test every known node (not just the ones the running config
-	-- happens to use), this flag loosens step 4's reference filter. Concrete
-	-- endpoint nodes pass through regardless; urltest groups still need to
-	-- be referenced because emitting them without their member expansion
-	-- (step 3) would land an unresolved group in sing-box.
-	local include_all = c:get("prism", "global", "include_all_nodes") == "1"
-	-- Collected for the hidden _prism_test_all batch-test group below: every
-	-- concrete-endpoint tag that ends up in `outbounds`, in emission order.
-	local testable_tags = {}
+	-- Only referenced nodes reach the running config — unreferenced
+	-- subscription nodes stay on disk. Latency testing does not need them
+	-- here: the test-all-runner probes every known node through a separate,
+	-- short-lived sing-box instance built by --probe (build_probe_config).
 	for _, ob in ipairs(all_ordered) do
-		local is_group = (ob.type == "urltest")
-		if referenced[ob.tag] or (include_all and not is_group) then
+		if referenced[ob.tag] then
 			-- Strip Prism-internal markers before handing the node to sing-box,
 			-- which rejects unknown fields. `_outbound_regex(_sources)` are
 			-- already nil'd in step 3; `_source` is the origin tag used by the
@@ -1139,7 +1138,6 @@ local function build_outbounds(c)
 				-- Prism-built WireGuard node → top-level endpoints array.
 				ob._is_endpoint = nil
 				endpoints[#endpoints + 1] = ob
-				testable_tags[#testable_tags + 1] = ob.tag
 			elseif ob.type == "wireguard" then
 				-- A WireGuard node from a subscription is still in the legacy
 				-- outbound schema. Leave it in outbounds (it works on 1.12)
@@ -1148,7 +1146,6 @@ local function build_outbounds(c)
 					.. tostring(ob.tag) .. "' uses the legacy outbound schema; "
 					.. "it will not work on sing-box 1.13\n")
 				outbounds[#outbounds + 1] = ob
-				testable_tags[#testable_tags + 1] = ob.tag
 			else
 				if ob.type == "urltest"
 				   and (type(ob.outbounds) ~= "table" or #ob.outbounds == 0) then
@@ -1163,33 +1160,9 @@ local function build_outbounds(c)
 						"' has no usable members; dropping the group\n")
 				else
 					outbounds[#outbounds + 1] = ob
-					if not is_group then
-						testable_tags[#testable_tags + 1] = ob.tag
-					end
 				end
 			end
 		end
-	end
-
-	-- Hidden selector group containing every concrete node that ended up in
-	-- the running config. The Nodes panel's "Test all" calls the clash API
-	-- /group/_prism_test_all/delay endpoint to probe every member in parallel
-	-- inside sing-box itself — one HTTP call, one rpcd worker, no fork-storm.
-	-- We use `selector` (not `urltest`) so sing-box doesn't auto-probe these
-	-- members at startup or on its own schedule — we only want probes when
-	-- the user clicks. Default is the first member, which sing-box requires
-	-- for selectors. The leading underscore in the tag avoids collision with
-	-- user-named nodes; the routing dropdown's "Default server" picker still
-	-- shows this tag, which is mildly ugly but harmless — see the matching
-	-- skip in routing.js / nodes.js if cosmetic exclusion is added later.
-	if c:get("prism", "global", "clash_api_enabled") == "1"
-	   and #testable_tags > 0 then
-		outbounds[#outbounds + 1] = {
-			type      = "selector",
-			tag       = "_prism_test_all",
-			outbounds = testable_tags,
-			default   = testable_tags[1]
-		}
 	end
 
 	return outbounds, endpoints
@@ -1325,6 +1298,32 @@ local function build_routing_dns_rules(prepared, fakeip_on)
 	return rules, per_outbound
 end
 
+-- The `local` DNS server entry: resolver for directly-routed traffic, and
+-- the bootstrap resolver for outbound endpoint hostnames (proxy node
+-- servers, the `remote` server's own SNI host). Always emitted, always
+-- detour:direct. It must not chain through local-net: with managed DNS
+-- active dnsmasq forwards back into sing-box, so resolving direct traffic
+-- or a node hostname via dnsmasq would loop. local_server picks the
+-- upstream — "wan" or blank auto-detects the WAN-assigned resolver,
+-- anything else is a literal address. tls://1.1.1.1 (literal IP, no
+-- recursion) is the fallback when WAN is down at boot; the iface hotplug
+-- regenerates the config once WAN comes up. Shared by build_dns and
+-- build_probe_config.
+local function build_local_dns_entry(c)
+	local local_server_value = c:get("prism", "dns", "local_server") or ""
+	local local_addr
+	if local_server_value == "" or local_server_value == "wan" then
+		local wan_dns = detect_wan_dns()
+		local_addr = (wan_dns and wan_dns ~= "") and wan_dns or "tls://1.1.1.1"
+	else
+		local_addr = local_server_value
+	end
+	local entry  = parse_dns_url(local_addr)
+	entry.tag    = "local"
+	entry.detour = "direct"
+	return entry
+end
+
 local function build_dns(c, prepared)
 	local strategy         = c:get("prism", "dns", "strategy") or ""
 	-- Mode-aware: Advanced reads the user's final-outbound knob, Basic derives
@@ -1332,7 +1331,6 @@ local function build_dns(c, prepared)
 	-- through the active proxy.
 	local default_outbound = compute_default_outbound(c)
 	if default_outbound == "direct" then default_outbound = "" end
-	local wan_dns          = detect_wan_dns()
 
 	-- "block" compiles to a reject rule, not an outbound, so for DNS it
 	-- behaves like "no default proxy": the remote server isn't detoured
@@ -1340,30 +1338,9 @@ local function build_dns(c, prepared)
 	local default_is_proxy = (default_outbound ~= "" and default_outbound ~= "direct"
 	                          and default_outbound ~= "block")
 
-	-- ── local: resolver for directly-routed traffic, and the bootstrap
-	-- resolver for outbound endpoint hostnames (proxy node servers, the
-	-- `remote` server's own SNI host). Always emitted, always detour:direct.
-	-- It must not chain through local-net: with managed DNS active dnsmasq
-	-- forwards back into sing-box, so resolving direct traffic or a node
-	-- hostname via dnsmasq would loop. local_server picks the upstream —
-	-- "wan" or blank auto-detects the WAN-assigned resolver, anything else
-	-- is a literal address. tls://1.1.1.1 (literal IP, no recursion) is the
-	-- fallback when WAN is down at boot; the iface hotplug regenerates the
-	-- config once WAN comes up.
-	local local_server_value = c:get("prism", "dns", "local_server") or ""
-	local local_addr
-	if local_server_value == "" or local_server_value == "wan" then
-		local_addr = (wan_dns and wan_dns ~= "") and wan_dns or "tls://1.1.1.1"
-	else
-		local_addr = local_server_value
-	end
-	local local_entry  = parse_dns_url(local_addr)
-	local_entry.tag    = "local"
-	local_entry.detour = "direct"
-
 	-- ── local-net: the on-router resolver (dnsmasq), for local domains only ──
 	local servers = {
-		local_entry,
+		build_local_dns_entry(c),
 		{ type = "udp", tag = "local-net", server = "127.0.0.1", server_port = 53, detour = "direct" }
 	}
 
@@ -1987,6 +1964,71 @@ local function apply_extra(c, config)
 	return config
 end
 
+-- ─── probe config (--probe): ephemeral latency-test instance ─────────────
+--
+-- The running config is lean — only nodes referenced by a rule or group
+-- reach sing-box. Latency testing needs every known node dialable, so
+-- test-all-runner spins up a second, short-lived sing-box instance from
+-- this config: every concrete node Prism knows about (manual + every
+-- subscription), a loopback clash API on its own port, and nothing else.
+-- No inbounds, no route rules, no rule-sets and no cache_file (the live
+-- instance holds a bbolt lock on cache.db). The runner probes
+-- /proxies/<tag>/delay on PROBE_CLASH_HOST and tears the instance down
+-- when the batch finishes.
+--
+-- Loop safety mirrors the production config: auto_detect_interface binds
+-- dials to the real upstream interface (escaping the live instance's TUN
+-- auto-route), and default_mark=255 makes firewall.sh's OUTPUT chain skip
+-- probe sockets in tproxy(_mixed) mode exactly like the live instance's
+-- own traffic — without these, probes would tunnel through the live proxy
+-- and measure the double-hop instead of the node.
+local function build_probe_config(c)
+	local all_ordered = load_all_nodes(c)
+
+	local outbounds = {
+		{ type = "direct", tag = "direct", domain_resolver = "local" }
+	}
+	local endpoints = {}
+	for _, ob in ipairs(all_ordered) do
+		-- Groups are skipped: their concrete members are all emitted
+		-- individually, and an unexpanded urltest would be rejected.
+		if ob.type ~= "urltest" then
+			ob._source = nil
+			ob._outbound_regex = nil
+			ob._outbound_regex_sources = nil
+			if ob._is_endpoint then
+				ob._is_endpoint = nil
+				endpoints[#endpoints + 1] = ob
+			else
+				outbounds[#outbounds + 1] = ob
+			end
+		end
+	end
+
+	local route = {
+		auto_detect_interface   = true,
+		default_domain_resolver = { server = "local" }
+	}
+	local imode = c:get("prism", "inbounds", "mode") or "tproxy"
+	if imode == "tproxy" or imode == "tproxy_mixed" then
+		route.default_mark = 255
+	end
+
+	local config = {
+		log       = { level = "warn", timestamp = true },
+		dns       = { servers = { build_local_dns_entry(c) }, final = "local" },
+		outbounds = outbounds,
+		route     = route,
+		experimental = {
+			clash_api = { external_controller = PROBE_CLASH_HOST }
+		}
+	}
+	if #endpoints > 0 then
+		config.endpoints = endpoints
+	end
+	return config
+end
+
 local function write_atomic(path, content)
 	local dir = path:match("^(.*)/[^/]+$")
 	if dir and dir ~= "" then
@@ -2013,11 +2055,14 @@ end
 
 local c = uci_mod.cursor()
 
--- Argv: build-config [--preview] [out_path]
+-- Argv: build-config [--preview|--probe] [out_path]
 -- --preview / -n: pure-read mode for get_config (no orphan deletion, no
 -- dnsmasq drop-in rewrite). out_path is required in preview mode so the
 -- caller controls where the preview goes (defaulting would clobber the
 -- live config_path).
+-- --probe: build the ephemeral latency-test instance config instead
+-- (side-effect-free like --preview; out_path defaults to
+-- PROBE_CONFIG_PATH, never the live config_path).
 local out_path
 local args = {}
 for _, a in ipairs(arg) do args[#args + 1] = a end
@@ -2025,16 +2070,21 @@ local i = 1
 while i <= #args do
 	if args[i] == "--preview" or args[i] == "-n" then
 		PREVIEW_MODE = true
+	elseif args[i] == "--probe" then
+		PROBE_MODE   = true
+		PREVIEW_MODE = true
 	elseif not out_path then
 		out_path = args[i]
 	end
 	i = i + 1
 end
 if not out_path or out_path == "" then
-	out_path = c:get("prism", "global", "config_path") or "/var/etc/prism/sing-box.json"
+	out_path = PROBE_MODE and PROBE_CONFIG_PATH
+		or c:get("prism", "global", "config_path") or "/var/etc/prism/sing-box.json"
 end
 
-local config = apply_extra(c, build_config(c))
+local config = PROBE_MODE and build_probe_config(c)
+	or apply_extra(c, build_config(c))
 c:close()
 
 -- Pretty-print, then unescape forward slashes. luci.jsonc wraps json-c, which

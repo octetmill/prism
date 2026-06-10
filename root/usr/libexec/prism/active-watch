@@ -143,12 +143,11 @@ end
 
 -- Extract the relevant slice of the /proxies response: one entry per
 -- urltest group, carrying the active member tag and (when available) its
--- most recent latency. Internal helper groups (tag starts with "_", e.g.
--- _prism_test_all — itself a Selector by sing-box type) are filtered out
--- here: the underscore-prefix check excludes them, and the type filter
--- below excludes any other Selector that might appear (Prism no longer
--- creates selector nodes, but a clash-format subscription could in theory
--- ship one — those are dropped at sanitisation time today, but the
+-- most recent latency. Internal helper groups (tag starts with "_") are
+-- filtered out here: the underscore-prefix check excludes them, and the
+-- type filter below excludes any Selector that might appear (Prism no
+-- longer creates selector nodes, but a clash-format subscription could in
+-- theory ship one — those are dropped at sanitisation time today, but the
 -- defensive filter costs nothing).
 local function group_state(parsed)
 	local out = {}

@@ -285,29 +285,33 @@ return baseclass.extend({
 
 		// ── Latency testing ──────────────────────────────────────────────
 		// Whole section is Advanced (same prism-advanced wrapper-class
-		// trick as Logging). Both flags bind to `global` and feed
-		// build-config's experimental.clash_api emission and step-4 node
-		// filter respectively.
+		// trick as Logging). The flag binds to `global` and feeds
+		// build-config's experimental.clash_api emission; node probes
+		// themselves run on an ephemeral sing-box instance started by the
+		// test runner, so the running config stays lean.
 		var sLatency = m.section(form.NamedSection, 'global', 'prism', _('Latency testing'),
 			_('Probe node round-trip time via sing-box\'s clash-compatible API. ' +
-			  'The API binds 127.0.0.1:9090 only — never exposed on the LAN.'));
+			  'The API binds 127.0.0.1 only — never exposed on the LAN.'));
 		sLatency.addremove = false;
 
 		var oClashApi = sLatency.option(form.Flag, 'clash_api_enabled',
 			_('Enable latency testing'),
 			_('Adds a loopback-only clash API listener to sing-box and a Test ' +
-			  'button next to each node on the Nodes tab.'));
+			  'button next to each node on the Nodes tab. Tests run on a ' +
+			  'temporary second sing-box instance, so every known node is ' +
+			  'testable without bloating the running config.'));
 		oClashApi.rmempty = false;
 
-		var oIncludeAll = sLatency.option(form.Flag, 'include_all_nodes',
-			_('Include all nodes in the running config'),
-			_('Subscription nodes only reach sing-box (and become testable) when ' +
-			  'a routing rule or group member references them. Enable this to ' +
-			  'emit every known node into the generated config, regardless. ' +
-			  'Cost: a few hundred bytes per node on tmpfs; idle nodes are not ' +
-			  'dialed unless used.'));
-		oIncludeAll.rmempty = false;
-		oIncludeAll.depends('clash_api_enabled', '1');
+		var oAutoTest = sLatency.option(form.Value, 'auto_test_hours',
+			_('Auto-test interval (hours)'),
+			_('Probe every node automatically each N hours, so the Latency ' +
+			  'column stays fresh without clicking Test all. Runs from the ' +
+			  'hourly maintenance tick after due subscription syncs, so newly ' +
+			  'imported nodes are included. 0 disables.'));
+		oAutoTest.datatype = 'uinteger';
+		oAutoTest.placeholder = '0';
+		oAutoTest['default'] = '0';
+		oAutoTest.depends('clash_api_enabled', '1');
 
 		// ── Logging ──────────────────────────────────────────────────────
 		// Entire section is Advanced — its wrapper div gets the
