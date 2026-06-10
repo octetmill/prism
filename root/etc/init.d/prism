@@ -17,18 +17,8 @@ DNSMASQ_DROPIN_SRC=/var/etc/prism/dnsmasq-managed.conf
 # an enabled service resumes naturally on next boot).
 PAUSE_MARKER=/var/run/prism.paused
 
-# Log a Prism control-plane event to syslog. $1 is the severity
-# (info/notice/warn/err); the remaining args form the message.
-prism_log() {
-	local level
-	level="$1"
-	shift
-	# Normalise 'warn' -> 'warning' so the Status-page log filter (which
-	# keys SEV by POSIX names) classifies it correctly. busybox logger
-	# accepts both spellings.
-	[ "$level" = "warn" ] && level=warning
-	logger -p "daemon.$level" -t prism "$@"
-}
+# prism_log — shared with firewall.sh
+. /usr/libexec/prism/common.sh
 
 install_crons() {
 	# Prism drives every periodic task from two cron entries: one hourly

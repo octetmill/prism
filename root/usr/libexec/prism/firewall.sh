@@ -46,52 +46,59 @@ uci_get() { uci -q get "prism.$1.$2" 2>/dev/null; }
 # so the host's traffic never touches sing-box. Only invoked for tproxy /
 # tproxy_mixed modes; in tun mode build-config emits the equivalent
 # source_ip_cidr direct rule into the sing-box config instead.
+#
+# One awk pass over `uci show prism` instead of three `uci get` forks (plus
+# a grep) per section — everything needed is already in that one dump, and
+# at ~4 forks per bypass entry the old loop scaled with the bypass list on
+# every service start. Validation matches the old greps exactly: nft accepts
+# only colon-separated MACs (stricter than the JS validator), the IPv6 shape
+# check (2-7 colons, hex groups up to 4 chars, optional /prefix) catches
+# typos before nft -f errors out on the whole ruleset. `uci show` always
+# wraps option values in single quotes; substr() peels them without the awk
+# program needing a literal quote character.
 emit_bypasses() {
-	local section enabled kind value
-	uci -q show prism 2>/dev/null | sed -n 's/^prism\.\([^=]*\)=bypass$/\1/p' | \
-	while read -r section; do
-		enabled=$(uci_get "$section" enabled)
-		[ "$enabled" = "0" ] && continue
-		kind=$(uci_get "$section" kind)
-		value=$(uci_get "$section" value)
-		[ -z "$value" ] && continue
-		case "$kind" in
-			mac)
-				# Reject anything that isn't a plausible MAC. nft accepts
-				# only colon-separated MACs, not dash- or dot-separated, so
-				# the regex is stricter than the JS validator.
-				echo "$value" | grep -qE '^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$' \
-					&& echo "		ether saddr $value accept"
-				;;
-			ip)
-				case "$value" in
-					*.*)
-						echo "$value" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$' \
-							&& echo "		ip saddr $value accept"
-						;;
-					*:*)
-						# Permissive IPv6 shape check: 2-7 colons, hex groups
-						# up to 4 chars, optional /prefix. Catches typos
-						# ("abc::", "fe80:gg::") before nft -f errors out on
-						# the whole ruleset.
-						echo "$value" | grep -qE '^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}(/[0-9]{1,3})?$' \
-							&& echo "		ip6 saddr $value accept"
-						;;
-				esac
-				;;
-		esac
-	done
+	uci -q show prism 2>/dev/null | awk '
+		/^prism\.[^.=]+=bypass$/ {
+			sec = substr($0, 7, index($0, "=") - 7)
+			if (!(sec in seen)) { seen[sec] = 1; ord[++n] = sec; enabled[sec] = "1" }
+			next
+		}
+		/^prism\./ {
+			eq = index($0, "=")
+			if (eq < 9) next
+			key = substr($0, 7, eq - 7)
+			dot = index(key, ".")
+			if (!dot) next
+			sec = substr(key, 1, dot - 1)
+			if (!(sec in seen)) next
+			opt = substr(key, dot + 1)
+			val = substr($0, eq + 2, length($0) - eq - 2)
+			if (opt == "enabled")    enabled[sec] = val
+			else if (opt == "kind")  kind[sec]    = val
+			else if (opt == "value") value[sec]   = val
+		}
+		END {
+			for (i = 1; i <= n; i++) {
+				sec = ord[i]
+				if (enabled[sec] == "0") continue
+				v = value[sec]
+				if (v == "") continue
+				if (kind[sec] == "mac") {
+					if (v ~ /^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$/)
+						printf "\t\tether saddr %s accept\n", v
+				} else if (kind[sec] == "ip") {
+					if (v ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(\/[0-9]+)?$/)
+						printf "\t\tip saddr %s accept\n", v
+					else if (v ~ /^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}(\/[0-9]{1,3})?$/)
+						printf "\t\tip6 saddr %s accept\n", v
+				}
+			}
+		}
+	'
 }
 
-# Log a Prism control-plane event to syslog. $1 is the severity
-# (info/notice/warn/err); the remaining args form the message.
-prism_log() {
-	local level
-	level="$1"
-	shift
-	[ "$level" = "warn" ] && level=warning
-	logger -p "daemon.$level" -t prism "$@"
-}
+# prism_log
+. /usr/libexec/prism/common.sh
 
 lan_device() {
 	local dev
@@ -293,9 +300,10 @@ stop() {
 	remove_iprules
 }
 
+# Only start/stop are used (by /etc/init.d/prism); start is already
+# idempotent — it begins with stop — so a separate restart adds nothing.
 case "$1" in
 	start)   start ;;
 	stop)    stop; prism_log info "firewall: TPROXY ruleset removed" ;;
-	restart) stop; start ;;
-	*) echo "usage: $0 start|stop|restart" >&2; exit 1 ;;
+	*) echo "usage: $0 start|stop" >&2; exit 1 ;;
 esac
