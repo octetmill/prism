@@ -832,6 +832,70 @@ local function read_latency_cache()
 	return parsed
 end
 
+local TEST_STATUS_PATH = "/var/etc/prism/.test-all-status"
+local TEST_TAGS_PATH   = "/var/etc/prism/.test-all-tags"
+local TEST_RUNNER      = "/usr/libexec/prism/test-all-runner"
+
+-- True when a runner is currently alive per its status file. The runner's
+-- own /var/lock/prism-test-all lock is the authoritative gate; this
+-- pre-check exists so callers can avoid writing a tag file that a
+-- lock-refused fork would leave behind to scope someone else's next full
+-- run (the runner consumes the file only when it actually runs). A stale
+-- running=true from a SIGKILL'd runner is treated as idle after 60 s
+-- without an updated_at advance.
+local function test_runner_busy()
+	local raw = read_file(TEST_STATUS_PATH)
+	if not raw or raw == "" or not _jsonc_ok then return false end
+	local ok, st = pcall(_jsonc.parse, raw)
+	if not ok or type(st) ~= "table" or not st.running then return false end
+	if type(st.updated_at) == "number"
+	   and (os.time() - st.updated_at) < 60 then
+		return true
+	end
+	log_prism("warn", "test runner status stale ("
+		.. tostring(os.time() - (tonumber(st.updated_at) or 0))
+		.. "s), reclaiming")
+	return false
+end
+
+-- Write the optional tag list and fork the runner detached (all FDs
+-- redirected so the parent rpcd worker can exit without waiting on the
+-- child's pipes). Tag-file protocol: one tag per line; absent file means
+-- "probe every known node" — argv would run into shell-quoting hazards
+-- with emoji and CJK tags. Returns true, or false + an error token.
+local function fork_test_runner(tags)
+	os.execute("mkdir -p /var/etc/prism 2>/dev/null")
+	local lines = {}
+	if type(tags) == "table" then
+		for _, t in ipairs(tags) do
+			if type(t) == "string" and t ~= "" then
+				lines[#lines + 1] = t
+			end
+		end
+	end
+	if #lines > 0 then
+		local f = io.open(TEST_TAGS_PATH, "w")
+		if f then
+			f:write(table.concat(lines, "\n"))
+			f:close()
+		end
+	else
+		os.remove(TEST_TAGS_PATH)
+	end
+	-- Pre-flight: the fork-and-forget below loses any exec failure
+	-- (missing or non-executable runner after a partial upgrade) because
+	-- the shell only reports back the fork exit, not the child's. Test
+	-- executability synchronously so callers get a clear error instead of
+	-- waiting on a status file no runner will ever write.
+	if os.execute("test -x " .. TEST_RUNNER) ~= 0 then
+		log_prism("err", "test runner missing or non-executable at " .. TEST_RUNNER)
+		os.remove(TEST_TAGS_PATH)
+		return false, "runner unavailable"
+	end
+	os.execute(TEST_RUNNER .. " </dev/null >/dev/null 2>&1 &")
+	return true
+end
+
 -- Node storage:
 --   Manual nodes: UCI sections of type "node" in /etc/config/prism.
 --     Each section stores individual protocol fields (tag, type, server,
@@ -1153,6 +1217,10 @@ local function sync_one(id)
 	os.remove(tmp_body)
 
 	local status, node_count
+	-- Set when this sync is the subscription's FIRST successful import (no
+	-- nodes file existed before the write) — the trigger for the scoped
+	-- post-add latency test below.
+	local first_import_tags
 	if fetch_ok and body ~= "" then
 		-- Single pass: identify the format and extract its nodes at once.
 		local fmt, nodes = parse_subscription(body)
@@ -1177,9 +1245,18 @@ local function sync_one(id)
 			end
 			log_prism("info", "sync '" .. sub_name .. "' nodes: " .. listed)
 
+			local had_file = lib.file_exists(nodes_file(uid))
 			if write_nodes_file(uid, nodes) then
 				log_prism("info", string.format("sync '%s': %d nodes saved to %s",
 					sub_name, count, nodes_file(uid)))
+				if not had_file then
+					first_import_tags = {}
+					for _, n in ipairs(nodes) do
+						if type(n.tag) == "string" and n.tag ~= "" then
+							first_import_tags[#first_import_tags + 1] = n.tag
+						end
+					end
+				end
 			else
 				log_prism("err", "sync '" .. sub_name .. "': failed to write nodes file")
 			end
@@ -1214,6 +1291,25 @@ local function sync_one(id)
 	end
 	c2:commit("prism")
 	c2:close()
+
+	-- Post-add latency test: a subscription's FIRST successful import gets
+	-- a runner pass scoped to its new tags, so the Latency cells fill in
+	-- without a manual Test-all. Re-syncs do not trigger (the periodic
+	-- auto-test covers drift), and a busy runner skips the trigger
+	-- entirely — its lock drops concurrent forks rather than queueing
+	-- them, and the tag file must not be written for a fork that will be
+	-- dropped. The UI's Nodes tab resumes the progress poll on render
+	-- when it finds a runner in flight.
+	if first_import_tags and #first_import_tags > 0 then
+		local c3 = uci_cursor()
+		local clash_on = (c3:get("prism", "global", "clash_api_enabled") == "1")
+		c3:close()
+		if clash_on and not test_runner_busy() then
+			log_prism("info", "sync '" .. sub_name .. "': first import, testing "
+				.. #first_import_tags .. " new node(s)")
+			fork_test_runner(first_import_tags)
+		end
+	end
 
 	return { status = status, node_count = (status == "ok") and node_count or old_count }
 end
@@ -1874,64 +1970,17 @@ local methods = {
 			if enabled ~= "1" then
 				return { error = "clash API disabled" }
 			end
-			-- If a previous runner is still alive (status file present
-			-- with running=true), refuse — two runners would race on the
-			-- cache file. The runner also takes /var/lock/prism-test-all
-			-- so a SIGKILL'd runner cannot wedge future runs: even if its
-			-- status file still says running=true, the freshness check
-			-- below treats it as stale after 60s of no updated_at advance.
-			local raw = read_file("/var/etc/prism/.test-all-status")
-			if raw and raw ~= "" and _jsonc_ok then
-				local ok, st = pcall(_jsonc.parse, raw)
-				if ok and type(st) == "table" and st.running then
-					local fresh = type(st.updated_at) == "number"
-						and (os.time() - st.updated_at) < 60
-					if fresh then
-						return { error = "test already running" }
-					end
-					log_prism("warn", "test_all: previous runner status stale ("
-						.. tostring(os.time() - (st.updated_at or 0))
-						.. "s), reclaiming")
-				end
+			-- If a previous runner is still alive, refuse — two runners
+			-- would race on the cache file (the runner's own lock also
+			-- guards this, but failing here keeps the tag file from
+			-- leaking into someone else's run; see test_runner_busy).
+			if test_runner_busy() then
+				return { error = "test already running" }
 			end
-			-- Hand the runner an optional tag list. We write one tag per
-			-- line to /var/etc/prism/.test-all-tags so the runner picks
-			-- it up before its argv-less fork — passing the list as argv
-			-- runs into shell-quoting hazards with emoji and CJK tags.
-			os.execute("mkdir -p /var/etc/prism 2>/dev/null")
-			local tag_path = "/var/etc/prism/.test-all-tags"
-			if type(args.tags) == "table" and #args.tags > 0 then
-				local lines = {}
-				for _, t in ipairs(args.tags) do
-					if type(t) == "string" and t ~= "" then
-						lines[#lines + 1] = t
-					end
-				end
-				if #lines > 0 then
-					local f = io.open(tag_path, "w")
-					if f then
-						f:write(table.concat(lines, "\n"))
-						f:close()
-					end
-				end
-			else
-				os.remove(tag_path)
+			local ok, err = fork_test_runner(args.tags)
+			if not ok then
+				return { error = err }
 			end
-			-- Pre-flight: the fork-and-forget below loses any exec failure
-			-- (missing or non-executable runner after a partial upgrade)
-			-- because the shell only reports back the fork exit, not the
-			-- child's. Test executability synchronously so the UI gets a
-			-- clear error instead of spinning forever waiting for a
-			-- status file no runner will ever write.
-			local runner = "/usr/libexec/prism/test-all-runner"
-			if os.execute("test -x " .. runner) ~= 0 then
-				log_prism("err", "test_all: runner is missing or non-executable at " .. runner)
-				return { error = "runner unavailable" }
-			end
-			-- Fork-and-forget: redirect all FDs so the parent rpcd worker
-			-- can exit without waiting on the child's pipes. The Lua
-			-- runner then survives this RPC's return.
-			os.execute(runner .. " </dev/null >/dev/null 2>&1 &")
 			return { started = true }
 		end
 	},

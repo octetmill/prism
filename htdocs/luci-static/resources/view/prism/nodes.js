@@ -216,6 +216,12 @@ return baseclass.extend({
 			var nodeSection = node.querySelector('#cbi-prism-node');
 			if (nodeSection)
 				nodeSection.style.marginTop = '2em';
+			// A runner may already be in flight when this tab renders —
+			// the post-first-sync test forked by sync_subscription, or a
+			// Test all surviving the tab reload a sync triggers. Resume
+			// the progress poll so its results land in the cells.
+			if (clashOn)
+				self._resumeTestPoll();
 			return node;
 		});
 	},
@@ -885,6 +891,22 @@ return baseclass.extend({
 			live.push(el);
 		}
 		this._latencyCells[tag] = live;
+	},
+
+	// Adopt a runner that is already in flight (forked by the backend
+	// after a subscription's first sync, or started before a tab reload):
+	// when the status file says running, drive the standard poll loop so
+	// cells refresh as its results land. The detached span stands in for
+	// the banner's elapsed element — _pollTestAll only touches it when it
+	// is connected to the DOM.
+	_resumeTestPoll: function() {
+		var self = this;
+		return callTestAllStatus().then(function(status) {
+			if (!status || !status.running || self._testAllRunning)
+				return;
+			self._testAllRunning = true;
+			return self._pollTestAll(E('span'), null);
+		}).catch(function() { /* no runner state — nothing to adopt */ });
 	},
 
 	// Poll the runner's status file until the run finishes (running flips
