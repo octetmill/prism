@@ -26,18 +26,14 @@ var callReloadIfChanged = rpc.declare({
 });
 
 return baseclass.extend({
-	// Spin the button in place (fixed width/height so the row doesn't
-	// jump), sync the subscription, reload sing-box only if the active
-	// outbound set changed, then remount the panel from re-read UCI.
+	// Sync the subscription, reload sing-box only if the active outbound
+	// set changed, then remount the panel from re-read UCI. The button
+	// spinner is owned by form.Button's ui.createHandlerFn wrapper, which
+	// adds .spinning/disabled while the promise returned here is pending —
+	// do not touch the button's class, label or size in this handler.
 	// `panel` is the calling panel instance (its _prismHost is set by
 	// main.js when the panel mounts).
 	handleSync: function(panel, ev, section_id) {
-		var btn = ev.currentTarget, label = btn.textContent;
-		var w = btn.offsetWidth, h = btn.offsetHeight;
-		btn.classList.add('spinning');
-		btn.style.width  = w + 'px';
-		btn.style.height = h + 'px';
-		btn.textContent  = '';
 		return callSyncSubscription(section_id).then(function(res) {
 			var ok = res && res.status === 'ok';
 			ui.addNotification(null, E('p',
@@ -63,11 +59,6 @@ return baseclass.extend({
 			});
 		}).catch(function() {
 			ui.addNotification(null, E('p', _('Sync failed.')), 'error');
-		}).finally(function() {
-			btn.classList.remove('spinning');
-			btn.style.width  = '';
-			btn.style.height = '';
-			btn.textContent  = label;
 		});
 	}
 });
