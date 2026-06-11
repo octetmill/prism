@@ -163,7 +163,10 @@ end
 
 -- Pull a host and numeric port out of "host:port" or "[v6host]:port".
 local function split_host_port(s)
-	s = s:match("^%s*(.-)%s*$")
+	-- The authority ends at the first '/' (RFC 3986): subscription
+	-- generators commonly emit "host:port/?query", and a kept path would
+	-- make the trailing-digits port match below fail on every such URI.
+	s = s:match("^%s*(.-)%s*$"):gsub("/.*$", "")
 	local h, p = s:match("^%[([^%]]+)%]:(%d+)$")
 	if not h then h, p = s:match("^(.+):(%d+)$") end
 	return h, tonumber(p)
@@ -751,11 +754,13 @@ local function parse_subscription(body)
 		return "clash", extract_clash(trimmed)
 	end
 
-	-- Base64-encoded URI list: content is entirely base64 alphabet characters
+	-- Base64-encoded URI list: content is entirely base64 alphabet
+	-- characters. A plain URI list can never pass this check (every URI
+	-- contains ':'), so a match IS base64 — return even with 0 nodes so a
+	-- failed parse is logged as format=base64 rather than unknown.
 	local stripped = trimmed:gsub("%s", "")
 	if #stripped >= 16 and stripped:match("^[A-Za-z0-9+/%-_=]+$") then
-		local nodes = extract_uris(base64_decode(stripped))
-		if #nodes > 0 then return "base64", nodes end
+		return "base64", extract_uris(base64_decode(stripped))
 	end
 
 	-- Plain URI list
