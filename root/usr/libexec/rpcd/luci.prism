@@ -1132,6 +1132,33 @@ local function sync_lock_release()
 	os.execute("lock -u " .. SYNC_LOCK .. " 2>/dev/null")
 end
 
+-- sing-box version is static between package upgrades; cache the first
+-- line of `sing-box version` (e.g. "sing-box version 1.12.4") in tmpfs so
+-- callers — the 5s Overview poll, every subscription sync — do not fork
+-- sing-box on each call. /var is tmpfs, so the cache is cleared on reboot
+-- and re-detected fresh. Returns nil when sing-box is not present.
+local function singbox_version()
+	local VCACHE = "/var/etc/prism/.singbox-version"
+	local version = read_file(VCACHE)
+	if version then
+		version = version:gsub("%s+$", "")
+		if version == "" then version = nil end
+	end
+	if not version then
+		local vf = io.popen("/usr/bin/sing-box version 2>/dev/null")
+		if vf then
+			version = vf:read("*l")
+			vf:close()
+		end
+		if version and version ~= "" then
+			os.execute("mkdir -p /var/etc/prism 2>/dev/null")
+			local wf = io.open(VCACHE, "w")
+			if wf then wf:write(version); wf:close() end
+		end
+	end
+	return version
+end
+
 -- Fetch a subscription URL and update its UCI state.
 -- Returns a result table { status, node_count } on success.
 local function sync_one(id)
@@ -1178,10 +1205,16 @@ local function sync_one(id)
 	local safe_url = url:gsub("'", "'\\''")
 	os.execute("mkdir -p /var/etc/prism 2>/dev/null")
 	local tmp_body = "/var/etc/prism/sub-" .. id .. ".tmp"
-	local ua_flag = ""
-	if user_agent ~= "" then
-		ua_flag = " -U '" .. user_agent:gsub("'", "'\\''") .. "'"
+	-- Default UA: identify as the installed sing-box rather than as
+	-- uclient-fetch — providers increasingly gate the reply (or pick its
+	-- format) on a recognisable client UA. An explicit user_agent on the
+	-- subscription overrides this.
+	if user_agent == "" then
+		local v = singbox_version()
+		local num = v and v:match("(%d%S*)")
+		user_agent = num and ("sing-box/" .. num) or "sing-box"
 	end
+	local ua_flag = " -U '" .. user_agent:gsub("'", "'\\''") .. "'"
 	local fetch_cmd = "uclient-fetch -q --timeout=15" .. ua_flag .. " -O '" .. tmp_body .. "' '" .. safe_url .. "' 2>/dev/null"
 	local fetch_ok = (os.execute(fetch_cmd) == 0)
 
@@ -1312,28 +1345,7 @@ local methods = {
 
 			local running = service_running()
 
-			-- sing-box version is static between package upgrades; cache it in
-			-- tmpfs so the Overview poll (every 5s while the tab is open) does
-			-- not fork sing-box on each call. /var is tmpfs, so the cache is
-			-- cleared on reboot and re-detected fresh.
-			local VCACHE = "/var/etc/prism/.singbox-version"
-			local version = read_file(VCACHE)
-			if version then
-				version = version:gsub("%s+$", "")
-				if version == "" then version = nil end
-			end
-			if not version then
-				local vf = io.popen("/usr/bin/sing-box version 2>/dev/null")
-				if vf then
-					version = vf:read("*l")
-					vf:close()
-				end
-				if version and version ~= "" then
-					os.execute("mkdir -p /var/etc/prism 2>/dev/null")
-					local wf = io.open(VCACHE, "w")
-					if wf then wf:write(version); wf:close() end
-				end
-			end
+			local version = singbox_version()
 
 			-- Transient pause marker: present when the user clicked Stop on
 			-- the Status page without disabling the persistent `enabled`

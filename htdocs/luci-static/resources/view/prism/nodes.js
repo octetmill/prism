@@ -229,7 +229,7 @@ return baseclass.extend({
 
 		var oUA = s.option(form.Value, 'user_agent', _('User-Agent'));
 		oUA.modalonly = true;
-		oUA.placeholder = _('Leave blank for default');
+		oUA.placeholder = _('sing-box/<installed version>');
 
 		var oSync = s.option(form.Button, '_sync', _('Sync'));
 		oSync.modalonly = false;
