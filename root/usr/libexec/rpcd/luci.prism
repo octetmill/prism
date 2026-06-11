@@ -9,6 +9,12 @@
 -- causing every subsequent call to fail with "Object not found".
 local _jsonc_ok, _jsonc = pcall(require, "luci.jsonc")
 
+-- Shared helpers, loaded via dofile() with an absolute path (cwd-independent).
+-- prismlib.lua ships in this package alongside this handler, so unlike the
+-- optional luci.jsonc it is always present when the handler is.
+local lib = dofile("/usr/libexec/prism/prismlib.lua")
+local read_file = lib.read_file
+
 -- Minimal JSON serialiser used when luci.jsonc is unavailable.
 -- Only handles the flat tables produced by this handler.
 local function _json_encode(v)
@@ -35,6 +41,23 @@ local function _json_encode(v)
 end
 
 local function json_stringify(v)
+	return _json_encode(v)
+end
+
+-- Serialise a `call` reply. Prefer luci.jsonc's C encoder: get_logs pushes
+-- up to 1000 syslog strings through here on every 2s Status-page poll, and
+-- the pure-Lua fallback runs 5 chained gsub's per string. One semantic
+-- difference: luci.jsonc encodes an empty Lua table as [] where the
+-- fallback emits {} — fine inside call replies (every nested empty here is
+-- a list the JS side iterates or indexes), but the top level must stay an
+-- object for rpcd's exec plugin, so an all-empty reply takes the fallback.
+-- The `list` reply stays on json_stringify: rpcd parses its nested arg
+-- tables for method registration and must see them as objects.
+local function json_stringify_reply(v)
+	if _jsonc_ok and not (type(v) == "table" and next(v) == nil) then
+		local ok, s = pcall(_jsonc.stringify, v)
+		if ok and s then return s end
+	end
 	return _json_encode(v)
 end
 
@@ -594,34 +617,24 @@ end
 -- { tag, type, server, server_port, payload } node tables. parse_subscription
 -- routes a body to exactly one extractor, so the body is parsed a single time.
 
--- Tags Prism synthesises or sing-box treats as built-ins. A subscription
--- node carrying one of these would collide with the generated outbound
--- and either break the config or silently shadow the builtin in UI
--- dropdowns. Drop them at parse time so they never reach the nodes JSON
--- or list_subscription_nodes. Mirrors build-config's OUTBOUND_RESERVED_TAGS.
-local RESERVED_TAGS = {
-	direct          = true,
-	block           = true,
-	["basic-auto"]  = true,
-}
+-- Reserved tags are dropped at parse time so they never reach the nodes
+-- JSON or list_subscription_nodes; build-config drops them again at
+-- emission time. One shared table in prismlib keeps the filters in step.
+local RESERVED_TAGS = lib.RESERVED_TAGS
 
 -- SingBox JSON: the outbounds array, minus builtin and group outbounds.
--- ALLOWED_PROTOCOL is the same whitelist build-config's sanitiser enforces;
--- having it here too means an unsupported type (notably `ssh`, `tor`, or
--- a future sing-box outbound that takes a filesystem path argument) is
--- rejected at parse time and never written to /etc/prism/nodes/*.json.
+-- lib.ALLOWED_PROTOCOLS is the same whitelist build-config's sanitiser
+-- enforces; applying it here too means an unsupported type (notably `ssh`,
+-- `tor`, or a future sing-box outbound that takes a filesystem path
+-- argument) is rejected at parse time and never written to
+-- /etc/prism/nodes/*.json.
 local function extract_singbox(body)
 	local nodes = {}
 	if not _jsonc_ok then return nodes end
 	local ok, cfg = pcall(_jsonc.parse, body)
 	if not ok or not cfg or type(cfg.outbounds) ~= "table" then return nodes end
-	local ALLOWED_PROTOCOL = {
-		vless = true, vmess = true, trojan = true, shadowsocks = true,
-		hysteria2 = true, tuic = true, anytls = true, socks = true,
-		wireguard = true,
-	}
 	for _, ob in ipairs(cfg.outbounds) do
-		if type(ob) == "table" and ob.tag and ALLOWED_PROTOCOL[ob.type]
+		if type(ob) == "table" and ob.tag and lib.ALLOWED_PROTOCOLS[ob.type]
 		   and not RESERVED_TAGS[ob.tag]
 		   and not ob.tag:find("[%c]") then
 			nodes[#nodes + 1] = {
@@ -798,15 +811,6 @@ local function migrate_legacy_selectors()
 	c:close()
 end
 
--- Shared helpers, loaded via dofile() with an absolute path (cwd-independent).
--- prismlib.lua ships in this package alongside this handler, so unlike the
--- optional luci.jsonc it is always present when the handler is. Declared up
--- here so the latency-cache helpers below can use read_file — they ran
--- before this binding existed in an earlier draft and crashed with
--- "attempt to call global 'read_file' (a nil value)".
-local lib = dofile("/usr/libexec/prism/prismlib.lua")
-local read_file = lib.read_file
-
 -- ─── Node latency probes ──────────────────────────────────────────────────
 -- All probes run through the background test-all-runner, which builds an
 -- ephemeral probe config (`build-config --probe`: every known node + a
@@ -913,7 +917,7 @@ end
 -- out for anonymous sections. The install-time migration renames every
 -- pre-uid section into shape; the UI Add path mints the uid up front.
 
-local NODES_DIR = "/etc/prism/nodes"
+local NODES_DIR = lib.NODES_DIR
 
 local function nodes_file(uid)
 	local safe = uid:gsub("[^%w%-_]", "_")
@@ -949,31 +953,13 @@ local function stabilise_section_name(c, section_id)
 	return new_id
 end
 
-local function ensure_nodes_dir()
-	os.execute("mkdir -p " .. NODES_DIR .. " 2>/dev/null")
-end
-
 -- True when procd reports the named `singbox` procd instance is running.
--- Must walk the parsed JSON to that specific instance: the prism service
--- may also carry an `active_watch` instance when clash API is enabled,
--- and a substring grep for `"running":true` would happily match either
--- one — exactly the LAN-blackhole defeat from the code review. We can't
--- rely on ubus's `instance` parameter to scope the response either: on
--- some procd versions (observed on OpenWrt 24.10 builds) the parameter
--- is accepted but ignored, and the reply still carries every instance.
 -- Authoritative (procd's own view), distinct from the UCI `enabled` flag.
+-- The instance walk lives in lib.singbox_instance — see the comment there
+-- for why the specific instance must be addressed.
 local function service_running()
-	local f = io.popen("ubus call service list '{\"name\":\"prism\"}' 2>/dev/null")
-	if not f then return false end
-	local out = f:read("*a") or ""
-	f:close()
-	if out == "" or not _jsonc_ok then return false end
-	local ok, parsed = pcall(_jsonc.parse, out)
-	if not ok or type(parsed) ~= "table" then return false end
-	local svc = parsed.prism
-	if type(svc) ~= "table" or type(svc.instances) ~= "table" then return false end
-	local inst = svc.instances.singbox
-	return type(inst) == "table" and inst.running == true
+	local inst = lib.singbox_instance(_jsonc_ok and _jsonc or nil)
+	return inst ~= nil and inst.running == true
 end
 
 -- Detect whether the active outbound set changed since sing-box was last
@@ -1024,20 +1010,12 @@ local function read_nodes_file(uid)
 	return parsed
 end
 
+-- write_secure: nodes file contains every subscription node's payload,
+-- which in turn carries uuid/password/uri for each proxy. Default umask
+-- 0022 would let any local non-root daemon read them.
 local function write_nodes_file(uid, nodes)
-	ensure_nodes_dir()
 	if not _jsonc_ok then return false end
-	local path = nodes_file(uid)
-	local tmp  = path .. ".tmp"
-	local f = io.open(tmp, "w")
-	if not f then return false end
-	f:write(_jsonc.stringify(nodes))
-	f:close()
-	-- 0600: nodes file contains every subscription node's payload, which
-	-- in turn carries uuid/password/uri for each proxy. Default umask 0022
-	-- would let any local non-root daemon read them.
-	os.execute("chmod 0600 '" .. tmp:gsub("'", "'\\''") .. "' 2>/dev/null")
-	return os.rename(tmp, path) ~= nil
+	return lib.write_secure(nodes_file(uid), _jsonc.stringify(nodes))
 end
 
 -- Set of uids for which a current `subscription` UCI section exists. The
@@ -1063,16 +1041,12 @@ end
 -- a subscription in the UI and its file being removed to at most one hour.
 local function prune_orphan_nodes()
 	local valid = valid_sub_uids()
-	local f = io.popen("find " .. NODES_DIR .. " -maxdepth 1 -name '*.json' 2>/dev/null")
-	if not f then return end
-	for filepath in f:lines() do
-		local uid = filepath:match("/([^/]+)%.json$")
-		if uid and not valid[uid] then
-			os.remove(filepath)
-			log_prism("info", "sync: pruned orphan nodes file " .. filepath)
+	for _, nf in ipairs(lib.node_files()) do
+		if not valid[nf.uid] then
+			os.remove(nf.path)
+			log_prism("info", "sync: pruned orphan nodes file " .. nf.path)
 		end
 	end
-	f:close()
 end
 
 -- Return all nodes merged into a single ordered list.
@@ -1082,7 +1056,9 @@ end
 local function list_all_nodes()
 	local all = {}
 
-	-- Manual nodes from UCI
+	-- Manual nodes plus the valid-subscription uid set from one cursor —
+	-- this runs in the list_outbounds request path, so don't pay for a
+	-- second UCI load.
 	local c = uci_cursor()
 	local manual = {}
 	c:foreach("prism", "node", function(s)
@@ -1094,6 +1070,10 @@ local function list_all_nodes()
 			server_port = tonumber(s.server_port) or 0,
 			order       = tonumber(s.order) or 0
 		}
+	end)
+	local valid = {}
+	c:foreach("prism", "subscription", function(s)
+		valid[s[".name"]] = true
 	end)
 	c:close()
 	table.sort(manual, function(a, b)
@@ -1113,19 +1093,14 @@ local function list_all_nodes()
 	-- indistinguishable from manual nodes — and worse, the prefix-less tags
 	-- can collide with valid subscription tags. Read-only here; the explicit
 	-- delete happens in prune_orphan_nodes().
-	local valid = valid_sub_uids()
-	local f = io.popen("find " .. NODES_DIR .. " -maxdepth 1 -name '*.json' 2>/dev/null | sort")
-	if not f then return all end
-	for filepath in f:lines() do
-		local uid = filepath:match("/([^/]+)%.json$")
-		if uid and valid[uid] then
-			for _, n in ipairs(read_nodes_file(uid)) do
-				n.subscription = uid
+	for _, nf in ipairs(lib.node_files()) do
+		if valid[nf.uid] then
+			for _, n in ipairs(read_nodes_file(nf.uid)) do
+				n.subscription = nf.uid
 				all[#all + 1] = n
 			end
 		end
 	end
-	f:close()
 	return all
 end
 
@@ -1267,12 +1242,7 @@ local function sync_one(id)
 		log_prism("err", "sync '" .. sub_name .. "': fetch failed — check URL or network")
 	end
 
-	local tf = io.popen("date '+%Y-%m-%d %H:%M'")
-	local now = ""
-	if tf then
-		now = (tf:read("*a") or ""):gsub("%s+$", "")
-		tf:close()
-	end
+	local now = os.date("%Y-%m-%d %H:%M")
 
 	local c2 = uci_cursor()
 	-- Extra parens around c2:get force single-value semantics: on this
@@ -1289,6 +1259,9 @@ local function sync_one(id)
 	if status == "ok" then
 		c2:set("prism", id, "node_count", tostring(node_count))
 	end
+	-- Read the clash flag (used by the first-import test below) off this
+	-- cursor instead of opening a third one a few lines later.
+	local clash_on = (c2:get("prism", "global", "clash_api_enabled") == "1")
 	c2:commit("prism")
 	c2:close()
 
@@ -1301,9 +1274,6 @@ local function sync_one(id)
 	-- dropped. The UI's Nodes tab resumes the progress poll on render
 	-- when it finds a runner in flight.
 	if first_import_tags and #first_import_tags > 0 then
-		local c3 = uci_cursor()
-		local clash_on = (c3:get("prism", "global", "clash_api_enabled") == "1")
-		c3:close()
 		if clash_on and not test_runner_busy() then
 			log_prism("info", "sync '" .. sub_name .. "': first import, testing "
 				.. #first_import_tags .. " new node(s)")
@@ -1493,22 +1463,12 @@ local methods = {
 				log_prism("warning", "config: extra.json rejected — invalid JSON object")
 				return { ok = false, error = "invalid JSON object" }
 			end
-			os.execute("mkdir -p /etc/prism 2>/dev/null && chmod 0700 /etc/prism 2>/dev/null")
-			local tmp = "/etc/prism/extra.json.tmp"
-			local f = io.open(tmp, "w")
-			if not f then
-				log_prism("warning", "config: extra.json rejected — cannot write " .. tmp)
-				return { ok = false, error = "cannot write " .. tmp }
-			end
-			f:write(raw)
-			f:close()
-			-- 0600: extra.json may contain overrides with credentials,
-			-- secret URLs, or per-protocol passwords.
-			os.execute("chmod 0600 '" .. tmp .. "' 2>/dev/null")
-			if not os.rename(tmp, "/etc/prism/extra.json") then
-				os.remove(tmp)
-				log_prism("warning", "config: extra.json rejected — rename failed")
-				return { ok = false, error = "rename failed" }
+			-- write_secure: extra.json may contain overrides with
+			-- credentials, secret URLs, or per-protocol passwords.
+			local wok, werr = lib.write_secure("/etc/prism/extra.json", raw)
+			if not wok then
+				log_prism("warning", "config: extra.json rejected — " .. werr)
+				return { ok = false, error = werr }
 			end
 			log_prism("notice", string.format("config: extra.json updated (%d bytes)", #raw))
 			return { ok = true }
@@ -1558,7 +1518,14 @@ local methods = {
 			c:close()
 
 			local prism, singbox = {}, {}
-			local f = io.popen("logread 2>/dev/null")
+			-- Prefilter in the pipeline so the per-line Lua loop below only
+			-- sees candidate lines — this runs on every 2s Status-page poll
+			-- and the full syslog ring buffer can be hundreds of KB. The
+			-- grep patterns are deliberately broader than the Lua matches
+			-- (no anchoring spaces), so the Lua classification still decides.
+			local f = io.popen(
+				"logread 2>/dev/null | grep -e 'prism:' -e 'sing-box'"
+			)
 			if f then
 				for line in f:lines() do
 					if line:find(" prism: ", 1, true) then
@@ -1583,14 +1550,6 @@ local methods = {
 				return out
 			end
 			return { prism = tail(prism), singbox = tail(singbox) }
-		end
-	},
-
-	reload = {
-		call = function()
-			log_prism("notice", "service: manual reload")
-			os.execute("/etc/init.d/prism reload >/dev/null 2>&1")
-			return {}
 		end
 	},
 
@@ -1770,19 +1729,7 @@ local methods = {
 	-- DNS settings tab to label the "WAN DNS" auto-detect choice.
 	get_wan_dns = {
 		call = function()
-			local wan_dns = nil
-			local wf = io.popen("ubus call network.interface.wan status 2>/dev/null")
-			if wf then
-				local wout = wf:read("*a") or ""
-				wf:close()
-				if _jsonc_ok and wout ~= "" then
-					local wok, wst = pcall(_jsonc.parse, wout)
-					if wok and wst and type(wst["dns-server"]) == "table" then
-						wan_dns = wst["dns-server"][1]
-					end
-				end
-			end
-			return { wan_dns = wan_dns }
+			return { wan_dns = lib.detect_wan_dns(_jsonc_ok and _jsonc or nil) }
 		end
 	},
 
@@ -1844,7 +1791,6 @@ local methods = {
 				if s.type == "urltest" then
 					if s.tag and s.tag ~= "" then
 						uci_groups[s.tag] = {
-							type      = s.type,
 							interval  = s.urltest_interval or "",
 							tolerance = s.urltest_tolerance or ""
 						}
@@ -1868,7 +1814,7 @@ local methods = {
 			-- surface it with the same shape the urltest's UCI peers
 			-- would.
 			local SYNTHESISED = {
-				["basic-auto"] = { type = "urltest", interval = "5m", tolerance = "50" },
+				["basic-auto"] = { interval = "5m", tolerance = "50" },
 			}
 
 			local out = {}
@@ -2032,13 +1978,9 @@ local methods = {
 	-- network fetch is the separate refresh_rulesets RPC (write side).
 	list_rulesets = {
 		call = function()
-			local CACHE = "/etc/prism/rulesets-cache.json"
-			local f = io.open(CACHE, "r")
-			if not f then return { names = {}, age = nil } end
-			local s = f:read("*a")
-			f:close()
-			local ok, obj = pcall(json_parse, s)
-			if not (ok and type(obj) == "table") then
+			local s = read_file("/etc/prism/rulesets-cache.json")
+			local obj = s and json_parse(s) or nil
+			if type(obj) ~= "table" then
 				return { names = {}, age = nil }
 			end
 			local age = (type(obj.ts) == "number") and (os.time() - obj.ts) or nil
@@ -2083,11 +2025,21 @@ elseif cmd == "call" then
 
 	-- One-shot migration of legacy selector node sections. No-op on a
 	-- clean install; on an upgrade this fixes UCI before any RPC reads it.
-	pcall(migrate_legacy_selectors)
+	-- Gated by a tmpfs marker so the UCI load + node foreach runs once per
+	-- boot, not on every RPC call (the Status page polls every 2s). If the
+	-- marker can't be written (e.g. /var/etc/prism not creatable) the gate
+	-- degrades to the old run-every-call behaviour.
+	local MIGRATE_MARKER = "/var/etc/prism/.selector-migrated"
+	if not lib.file_exists(MIGRATE_MARKER) then
+		pcall(migrate_legacy_selectors)
+		os.execute("mkdir -p /var/etc/prism 2>/dev/null")
+		local mf = io.open(MIGRATE_MARKER, "w")
+		if mf then mf:close() end
+	end
 
 	local ok, result = pcall(def.call, args)
 	-- Always exit 0: rpcd's exec plugin maps non-zero exit to
 	-- UBUS_STATUS_NOT_FOUND, which LuCI surfaces as "Object not found".
 	-- Errors are communicated through the JSON payload instead.
-	print(json_stringify(ok and result or { error = tostring(result) }))
+	print(json_stringify_reply(ok and result or { error = tostring(result) }))
 end

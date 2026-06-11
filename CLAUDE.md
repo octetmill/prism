@@ -140,7 +140,7 @@ verbatim, the apk `.PKGINFO` translates `all` → `noarch` (apk rejects the toke
 include $(TOPDIR)/rules.mk
 
 LUCI_TITLE:=LuCI interface for sing-box
-LUCI_DEPENDS:=+luci-base +luci-lib-jsonc +sing-box +rpcd +rpcd-mod-rpcsys
+LUCI_DEPENDS:=+luci-base +luci-lib-jsonc +sing-box +rpcd
 LUCI_PKGARCH:=all
 
 PKG_NAME:=luci-app-prism
@@ -758,11 +758,10 @@ Declared in `LUCI_DEPENDS` in the Makefile. All packages below must be listed th
 | `luci-lib-jsonc` | JSON parsing in `luci.prism`, `build-config`, `fetch-catalog` — used unconditionally |
 | `sing-box (>=1.12)` | The proxy engine Prism manages; the 1.12 schema is hard-coded in `build-config` |
 | `rpcd` | Privilege-separated RPC daemon |
-| `rpcd-mod-rpcsys` | Provides `sys.exec` and service control via rpcd |
 | `uclient-fetch` | Used by `sync-subscriptions` to download remote subscription URLs |
 | `ca-bundle` | TLS certificate validation for HTTPS subscription URLs |
 | `lua` | `/usr/bin/lua` 5.1 interpreter — every rpcd handler and helper script (`build-config`, `fetch-catalog`, `luci.prism`) has a `#!/usr/bin/env lua` shebang. Not transitively pulled in by `luci-base` or `luci-lib-jsonc` on apk (those only link `liblua5.1.5`), so it must be declared explicitly. |
-| `libuci-lua` | Lua `uci` binding — `build-config` does `require "uci"` to read prism's UCI config. Also not transitive through `luci-base` on apk. |
+| `libuci-lua` | Lua `uci` binding — `build-config` and `active-watch` do `require "uci"` to read prism's UCI config. Also not transitive through `luci-base` on apk. |
 | `nftables-json` | Provides `/usr/sbin/nft`, used by `firewall.sh` to load the `inet prism` table. The bare name `nftables` is not a real package on 24.10/25.12 — it was split into `nftables-json` (what fw4 uses) and `nftables-nojson`. We pick `-json` because it matches the default install and won't conflict with fw4. |
 
 ### Assumed present (do not redeclare)

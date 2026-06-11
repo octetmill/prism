@@ -9,6 +9,7 @@
 'require ui';
 'require view.prism.lib.ordersave as ordersave';
 'require view.prism.lib.formpanel as formpanel';
+'require view.prism.lib.subs as subs';
 'require view.prism.uid as uid';
 
 var callListOutbounds = rpc.declare({
@@ -232,12 +233,29 @@ function condLabel(kind, invert) {
 	return (invert ? _('NOT') + ' ' : '') + (KIND_SHORT[kind] || kind);
 }
 
+// rule name → [condition sections], grouped in one pass over the condition
+// sections. The grid's Conditions column calls readConditions once per rule
+// row; without the grouping that is a full scan of every condition section
+// per row — O(rules × conditions) on each render. All cfgvalue calls of one
+// render pass run synchronously, so the cache lives for the current
+// microtask only and is rebuilt fresh after any modal save re-render.
+var _condsByRule = null;
+function condsByRule() {
+	if (!_condsByRule) {
+		_condsByRule = {};
+		uci.sections('prism', 'condition').forEach(function(c) {
+			if (!c.rule) return;
+			(_condsByRule[c.rule] = _condsByRule[c.rule] || []).push(c);
+		});
+		Promise.resolve().then(function() { _condsByRule = null; });
+	}
+	return _condsByRule;
+}
+
 // Read the `condition` child sections belonging to a rule, ordered. Each
 // condition is a UCI section of type `condition` with a `rule` back-reference.
 function readConditions(rule_name) {
-	var list = uci.sections('prism', 'condition').filter(function(c) {
-		return c.rule === rule_name;
-	});
+	var list = (condsByRule()[rule_name] || []).slice();
 	list.sort(function(a, b) {
 		return (parseInt(a.order, 10) || 0) - (parseInt(b.order, 10) || 0);
 	});
@@ -599,49 +617,38 @@ return baseclass.extend({
 		});
 		rsTokens.sort();
 
-		// Map sub_id → human-readable name and display order. Two subscriptions
-		// can carry nodes with identical tags; the label shown in the server
-		// dropdown must make clear which subscription a tag comes from, and
-		// the listing order must match the Servers tab's Subscriptions
-		// section. Manual nodes (subscription === '') sort to the top, in
-		// section order.
-		// Keyed by the subscription's section name (its uid) — that is what
-		// `ob.subscription` carries (the stable file key the rpcd handler
-		// emits for every subscription node).
-		var subName = {}, subOrder = {};
-		uci.sections('prism', 'subscription').forEach(function(sub, idx) {
-			var u = sub['.name'];
-			subName[u]  = sub.name || u;
-			subOrder[u] = idx;
-		});
-		function groupKey(sub_id) {
-			if (!sub_id) return 0;
-			if (sub_id in subOrder) return 1 + subOrder[sub_id];
-			return Infinity;
-		}
+		// Subscription name/order lookups shared with nodes.js / status.js
+		// via lib/subs.js — see that module for the uid-keying rationale.
+		var subName = subs.nameMap(), subOrder = subs.orderMap();
 
 		// Returns the list of proxy (non-builtin) outbound tags in the same
 		// order they were added to the widget. Callers that need to wire
 		// `depends()` on "outbound is a proxy" use this to OR a clause for
 		// each tag — LuCI has no "not equals" depends.
+		// Manual nodes/groups come from the staged UCI view via
+		// subs.manualNodes(), NOT from list_outbounds: the RPC reads
+		// committed state only, so a tag rename staged by the Nodes panel
+		// (whose propagation also rewrote the rule references now shown
+		// here) would otherwise leave the rules pointing at a choice this
+		// dropdown doesn't offer until Save & Apply. Subscription nodes
+		// have no UCI section and keep coming from the RPC.
 		function addServers(o) {
 			o.value('direct', _('direct (no proxy)'));
 			o.value('block',  _('block (drop)'));
-			var entries = outbounds.map(function(ob, i) {
-				var label = (ob.subscription && subName[ob.subscription])
-					? subName[ob.subscription] + '/' + ob.tag
-					: ob.tag;
-				return {
+			var entries = [];
+			subs.manualNodes().forEach(function(n, i) {
+				entries.push({ tag: n.tag, label: n.tag, group: 0, idx: i });
+			});
+			outbounds.forEach(function(ob, i) {
+				if (!ob.subscription) return;  // manual handled above
+				entries.push({
 					tag:   ob.tag,
-					label: label,
-					group: groupKey(ob.subscription),
+					label: subs.labelFor(ob.tag, ob.subscription, subName),
+					group: subs.groupKey(ob.subscription, subOrder),
 					idx:   i
-				};
+				});
 			});
-			entries.sort(function(a, b) {
-				if (a.group !== b.group) return a.group - b.group;
-				return a.idx - b.idx;
-			});
+			entries.sort(subs.entryCompare);
 			var tags = [];
 			entries.forEach(function(e) {
 				o.value(e.tag, e.label);
@@ -681,10 +688,7 @@ return baseclass.extend({
 		// config use uid-as-name too, so cross-references stay stable across
 		// any structural change to /etc/config/prism. `anonymous` still
 		// hides the name in the UI.
-		var gridHandleAdd = s.handleAdd;
-		s.handleAdd = function(ev, name) {
-			return gridHandleAdd.call(this, ev, name || uid.generate());
-		};
+		uid.installGridAdd(s);
 
 		var oEnabled = s.option(form.Flag, 'enabled', _('On'));
 		oEnabled['default'] = '1';
@@ -756,10 +760,7 @@ return baseclass.extend({
 		// type). Conditions reference rule-sets by their `label` field,
 		// not by section name, so the change is cosmetic for customrs
 		// alone — but it keeps the schema rule the same across the board.
-		var csHandleAdd = cs.handleAdd;
-		cs.handleAdd = function(ev, name) {
-			return csHandleAdd.call(this, ev, name || uid.generate());
-		};
+		uid.installGridAdd(cs);
 
 		var oLabel = cs.option(form.Value, 'label', _('Label'));
 		oLabel.rmempty = false;
@@ -801,10 +802,7 @@ return baseclass.extend({
 		bp.addbtntitle = _('Add');
 		bp.modaltitle = function() { return _('Bypass'); };
 
-		var bpHandleAdd = bp.handleAdd;
-		bp.handleAdd = function(ev, name) {
-			return bpHandleAdd.call(this, ev, name || uid.generate());
-		};
+		uid.installGridAdd(bp);
 
 		var bpEnabled = bp.option(form.Flag, 'enabled', _('On'));
 		bpEnabled['default'] = '1';

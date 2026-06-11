@@ -74,12 +74,13 @@ local function flush_log()
 	end
 end
 
--- One GET to the loopback clash API. Returns the parsed response object,
--- or nil on any failure (port not listening yet, malformed body, etc.).
--- Transient failures are silent: the daemon retries on the next tick.
-local function fetch_proxies()
+-- One GET to a loopback clash API path ("/proxies", "/connections").
+-- Returns the parsed response object, or nil on any failure (port not
+-- listening yet, malformed body, etc.). Transient failures are silent:
+-- the daemon retries on the next tick.
+local function fetch_json(api_path)
 	local f = io.popen("uclient-fetch --timeout=5 -qO- 'http://"
-		.. CLASH_HOST .. "/proxies' 2>/dev/null")
+		.. CLASH_HOST .. api_path .. "' 2>/dev/null")
 	if not f then return nil end
 	local body = f:read("*a") or ""
 	f:close()
@@ -89,56 +90,30 @@ local function fetch_proxies()
 	return parsed
 end
 
--- One GET to /connections. Returns the parsed response (an object with
--- `downloadTotal`, `uploadTotal`, optionally `memory`, and `connections`
--- as an array), or nil on any failure. Same silent-retry contract as
--- fetch_proxies — the daemon picks up next tick when sing-box is back.
-local function fetch_connections()
-	local f = io.popen("uclient-fetch --timeout=5 -qO- 'http://"
-		.. CLASH_HOST .. "/connections' 2>/dev/null")
-	if not f then return nil end
-	local body = f:read("*a") or ""
-	f:close()
-	if body == "" then return nil end
-	local ok, parsed = pcall(jsonc.parse, body)
-	if not ok or type(parsed) ~= "table" then return nil end
-	return parsed
-end
-
--- Write the throughput / counters snapshot read by the Status page's
--- Traffic row. Atomic via rename, same as save_snapshot. The Status
--- page tolerates a missing file (renders dashes) so a write skip on
--- malformed data is fine.
-local function save_clash_stats(stats)
-	os.execute("mkdir -p /var/etc/prism 2>/dev/null && chmod 0700 /var/etc/prism 2>/dev/null")
-	local tmp = STATS_SNAP .. ".tmp"
+-- Atomically write one JSON snapshot (0600, tmp + rename). The consumers
+-- (the get_active_groups / get_clash_stats RPCs) tolerate a missing file,
+-- so a write skip on failure is fine. The containing /var/etc/prism is
+-- created 0700 once at startup below — no per-tick mkdir/chmod forks; at
+-- ~200ms per busybox fork on MIPS they add up fast at a 10s cadence.
+local function save_json(path, tbl)
+	local tmp = path .. ".tmp"
 	local f = io.open(tmp, "w")
 	if not f then return end
-	f:write(jsonc.stringify(stats))
+	f:write(jsonc.stringify(tbl))
 	f:close()
 	os.execute("chmod 0600 '" .. tmp .. "' 2>/dev/null")
-	os.rename(tmp, STATS_SNAP)
+	os.rename(tmp, path)
 end
 
 -- Ask procd for sing-box's current pid. Returns the pid (a positive
 -- number) on success, or nil when procd reports the instance as
 -- stopped / missing / unparseable. Pid changes are our authoritative
--- signal that sing-box restarted between ticks — a fetch_proxies gap
+-- signal that sing-box restarted between ticks — a /proxies fetch gap
 -- only catches restarts slow enough to fail at least one 10s poll, and
 -- a config-save-driven restart commonly completes inside that window.
 local function singbox_pid()
-	local f = io.popen("ubus call service list '{\"name\":\"prism\",\"instance\":\"singbox\"}' 2>/dev/null")
-	if not f then return nil end
-	local out = f:read("*a") or ""
-	f:close()
-	if out == "" then return nil end
-	local ok, parsed = pcall(jsonc.parse, out)
-	if not ok or type(parsed) ~= "table" then return nil end
-	local svc = parsed.prism
-	if type(svc) ~= "table" or type(svc.instances) ~= "table" then return nil end
-	local inst = svc.instances.singbox
-	if type(inst) ~= "table" then return nil end
-	return tonumber(inst.pid)
+	local inst = lib.singbox_instance(jsonc)
+	return inst and tonumber(inst.pid) or nil
 end
 
 -- Extract the relevant slice of the /proxies response: one entry per
@@ -174,14 +149,7 @@ local function group_state(parsed)
 end
 
 local function save_snapshot(state)
-	os.execute("mkdir -p /var/etc/prism 2>/dev/null && chmod 0700 /var/etc/prism 2>/dev/null")
-	local tmp = SNAPSHOT .. ".tmp"
-	local f = io.open(tmp, "w")
-	if not f then return end
-	f:write(jsonc.stringify({ groups = state, updated_at = os.time() }))
-	f:close()
-	os.execute("chmod 0600 '" .. tmp .. "' 2>/dev/null")
-	os.rename(tmp, SNAPSHOT)
+	save_json(SNAPSHOT, { groups = state, updated_at = os.time() })
 end
 
 local function load_snapshot()
@@ -204,6 +172,11 @@ end
 -- the syslog timeline.
 local FAIL_WARN_AFTER = 6  -- ~one minute of failures at 10s ticks
 local POST_EVENT_WINDOW_S = 60  -- relabel-late-arrivals horizon, see below
+
+-- Create the snapshot directory once, 0700 (it cannot vanish on tmpfs
+-- while the daemon runs) — save_json relies on it existing so the write
+-- path stays fork-light at the 10s tick cadence.
+lib.secure_mkdir("/var/etc/prism")
 
 local previous = load_snapshot()
 local primed   = next(previous) ~= nil
@@ -270,12 +243,17 @@ end
 -- between procd reconciliations. Without it the loop keeps polling 9090
 -- after the user disables clash, eventually logging 'clash API
 -- unreachable for N polls' for a feature they explicitly turned off.
+-- Read via the libuci binding — fork-free, unlike `uci -q get` — with a
+-- fresh cursor per tick so a committed flip is seen immediately.
 local function clash_enabled()
-	local f = io.popen("uci -q get prism.global.clash_api_enabled 2>/dev/null")
-	if not f then return true end  -- can't tell → keep polling
-	local v = f:read("*a") or ""
-	f:close()
-	return (v:match("^%s*(%S*)") == "1")
+	local ok, enabled = pcall(function()
+		local c = require("uci").cursor()
+		local v = c:get("prism", "global", "clash_api_enabled")
+		c:close()
+		return v == "1"
+	end)
+	if not ok then return true end  -- can't tell → keep polling
+	return enabled
 end
 
 while true do
@@ -288,7 +266,7 @@ while true do
 		flush_log()
 		os.execute("sleep " .. tostring(POLL_S))
 	else
-	local parsed = fetch_proxies()
+	local parsed = fetch_json("/proxies")
 	if parsed then
 		if fail_streak >= FAIL_WARN_AFTER then
 			logmsg("info", string.format(
@@ -333,7 +311,7 @@ while true do
 			for tag in pairs(current)  do known_pre_event[tag] = true end
 			post_event_until = os.time() + POST_EVENT_WINDOW_S
 			log_initial(current, event_context)
-		elseif primed then
+		else
 			local in_window = (os.time() < post_event_until)
 			-- Member changed within a still-existing group: the central
 			-- diagnostic — this is the "is my urltest flipping too
@@ -403,7 +381,7 @@ while true do
 		-- we just did. A pid change in this tick or a counter regression
 		-- both mean "the previous baseline is invalid"; zero the rate
 		-- and re-baseline so the next tick's diff is honest.
-		local conns = fetch_connections()
+		local conns = fetch_json("/connections")
 		if conns then
 			local total_up   = tonumber(conns.uploadTotal)   or 0
 			local total_down = tonumber(conns.downloadTotal) or 0
@@ -422,7 +400,7 @@ while true do
 					down_bps = math.floor((total_down - prev_total_down) / dt)
 				end
 			end
-			save_clash_stats({
+			save_json(STATS_SNAP, {
 				up_bps     = up_bps,
 				down_bps   = down_bps,
 				total_up   = total_up,

@@ -91,9 +91,8 @@ return view.extend({
 			this._renderModeStyles()
 		]);
 
-		var route = this._initialRoute();
 		var self = this;
-		return Promise.resolve(this._activate(route.group, route.sub)).then(function() {
+		return Promise.resolve(this._activate(this._initialRoute())).then(function() {
 			return self._shell;
 		});
 	},
@@ -119,22 +118,17 @@ return view.extend({
 
 	// Save & Apply reloads the page; restore the last active tab from LuCI's
 	// session store — the same mechanism the stock form-tab pages use to
-	// survive an apply. No URL hash is involved.
+	// survive an apply. No URL hash is involved. Stored ids from prior
+	// layouts may carry a `group/sub` shape — only the group part is used.
 	_initialRoute: function() {
 		var raw = session.getLocalData('prism.activeTab') || '';
-		var parts = raw.split('/');
-		var group = parts[0] || this._tabs[0].id;
+		var group = raw.split('/')[0] || this._tabs[0].id;
 		// Redirect stored ids from prior layouts so a Save & Apply (which
 		// reloads the page) lands on the equivalent merged tab instead of
 		// silently falling back to the first tab.
 		if (TAB_REDIRECT[group])
 			group = TAB_REDIRECT[group];
-		group = this._redirectForMode(group);
-		// Old settings/<sub> ids now collapse to the single Settings tab.
-		var sub = parts[1] || null;
-		if (group === 'settings')
-			sub = null;
-		return { group: group, sub: sub };
+		return this._redirectForMode(group);
 	},
 
 	_buildMenu: function(items, activeId, onClick) {
@@ -293,10 +287,10 @@ return view.extend({
 	// Re-mount the currently active panel (used by panels after an async
 	// action — e.g. a subscription sync — changes UCI out of band).
 	remountActive: function() {
-		return this._activate(this._activeGroup, this._activeSub);
+		return this._activate(this._activeGroup);
 	},
 
-	_activate: function(groupId, subId) {
+	_activate: function(groupId) {
 		var self = this;
 		var gen = ++this._mountGen;
 
@@ -313,36 +307,15 @@ return view.extend({
 		var group = this._tabs.filter(function(t) { return t.id === groupId; })[0] || this._tabs[0];
 		groupId = group.id;
 
-		var leaf = group, sub = null;
-		if (group.children) {
-			sub = group.children.filter(function(c) { return c.id === subId; })[0]
-				|| group.children[0];
-			subId = sub.id;
-			leaf = sub;
-		} else {
-			subId = null;
-		}
 		this._activeGroup = groupId;
-		this._activeSub = subId;
-		session.setLocalData('prism.activeTab',
-			groupId + (subId ? '/' + subId : ''));
+		session.setLocalData('prism.activeTab', groupId);
 
 		dom.content(this._topMenu, this._buildMenu(this._tabs, groupId, function(id) {
-			self._activate(id, null);
+			self._activate(id);
 		}));
 
-		var mountTarget;
-		if (group.children) {
-			var subMenu = E('ul', { 'class': 'cbi-tabmenu' },
-				this._buildMenu(group.children, subId, function(id) {
-					self._activate(groupId, id);
-				}));
-			mountTarget = E('div', { 'class': 'prism-subtab-content' }, []);
-			dom.content(this._content, [ subMenu, mountTarget ]);
-		} else {
-			dom.content(this._content, []);
-			mountTarget = this._content;
-		}
+		dom.content(this._content, []);
+		var mountTarget = this._content;
 
 		if (this._footer && this._footer.parentNode)
 			this._footer.parentNode.removeChild(this._footer);
@@ -352,7 +325,7 @@ return view.extend({
 		// class — use the panel instance directly (do not `new` it). Reuse
 		// across activations is safe: switches are sequential and each
 		// render() rebuilds the panel's DOM and state.
-		var panel = leaf.panel;
+		var panel = group.panel;
 		panel._prismHost = this;
 		this._panel = panel;
 

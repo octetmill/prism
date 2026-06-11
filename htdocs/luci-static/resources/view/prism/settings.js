@@ -387,8 +387,7 @@ return baseclass.extend({
 
 		// Extra-overrides panel — same class so it hides with the rest.
 		var extraSection = E('div', {
-			'class': 'cbi-section prism-advanced',
-			'id':    'prism-extra-section'
+			'class': 'cbi-section prism-advanced'
 		}, [
 			E('h3', {}, [ _('Raw sing-box overrides') ]),
 			E('div', { 'class': 'cbi-section-descr' }, [

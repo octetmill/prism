@@ -23,11 +23,12 @@
 //   [View full log] [View generated config]
 //   sing-box X.Y.Z · Mode
 //
-// Two 2s pollers — one for service status (badge + actions + footer), one
-// for the log tail. Both are torn down on tab switch via _teardown. The
-// full log viewer and the generated-config preview live in on-demand
-// modals (the prior Diagnostics panel rendered them inline; here they
-// would crowd the glance-first layout).
+// One 2s poller drives the whole dashboard — service status (badge +
+// actions + footer), groups, traffic and the log tails are fetched in a
+// single batched tick on one rescheduled setTimeout, torn down on tab
+// switch via _teardown. The full log viewer and the generated-config
+// preview live in on-demand modals (the prior Diagnostics panel rendered
+// them inline; here they would crowd the glance-first layout).
 //
 // The active-node line shows `routing.final_outbound` from UCI — the tag
 // of the default node the rule chain falls through to (a group counts as a
@@ -42,6 +43,8 @@
 'require rpc';
 'require ui';
 'require uci';
+'require view.prism.lib.subs as subs';
+'require view.prism.lib.badges as badges';
 
 var callGetStatus = rpc.declare({
 	object: 'luci.prism',
@@ -210,19 +213,11 @@ function formatActiveNode(tag, outbounds) {
 	if (tag === 'direct') return _('direct (no proxy)');
 	if (tag === 'block')  return _('block (drop)');
 	if (TAG_DISPLAY[tag])  return TAG_DISPLAY[tag];
-	// Keyed by the subscription's section name (its uid) — that is what
-	// `ob.subscription` carries.
-	var subName = {};
-	uci.sections('prism', 'subscription').forEach(function(sub) {
-		var u = sub['.name'];
-		subName[u] = sub.name || u;
-	});
+	var subName = subs.nameMap();
 	for (var i = 0; i < (outbounds || []).length; i++) {
 		var ob = outbounds[i];
 		if (ob.tag !== tag) continue;
-		if (ob.subscription && subName[ob.subscription])
-			return subName[ob.subscription] + '/' + ob.tag;
-		return ob.tag;
+		return subs.labelFor(ob.tag, ob.subscription, subName);
 	}
 	return tag;
 }
@@ -287,7 +282,6 @@ function downloadConfig(json) {
 
 return baseclass.extend({
 	_statusTimer: null,
-	_logTimer:    null,
 
 	load: function() {
 		// All RPCs degrade gracefully — a missing one leaves the relevant
@@ -444,7 +438,6 @@ return baseclass.extend({
 		// visible.
 		requestAnimationFrame(L.bind(function() {
 			this._scheduleStatusRefresh();
-			this._scheduleLogRefresh();
 			['prism-log-prism', 'prism-log-singbox'].forEach(function(id) {
 				var el = document.getElementById(id);
 				if (el) el.scrollTop = el.scrollHeight;
@@ -541,27 +534,12 @@ return baseclass.extend({
 		];
 	},
 
-	// Compact latency badge. Thresholds mirror nodes.js formatLatency
-	// (300/600 ms green→yellow→red) so the Status Groups column and the
-	// Nodes Latency column agree on what 'yellow' means.
+	// Compact latency badge — the shared lib/badges.js renderer, so the
+	// Status Groups column and the Nodes Latency column agree on the
+	// 300/600 ms green→yellow→red thresholds.
 	_renderLatency: function(ms) {
-		if (typeof ms !== 'number' || ms <= 0)
-			return E('span', { 'style': 'opacity:0.5;' }, [ '—' ]);
-		// Bootstrap's `.label.important` is blue and it has no red label
-		// class, so use the theme's error/danger CSS var inline for the
-		// ≥600 ms band — see formatLatency in nodes.js for the same fix.
-		var attrs = {
-			'style': 'padding:1px 6px; border-radius:3px; font-size:0.85em; text-transform:none;'
-		};
-		if (ms >= 600) {
-			attrs['class'] = 'label';
-			attrs['style'] += ' background-color: var(--danger-color, var(--error-color, var(--error-color-high, #d9534f))); color: var(--on-danger-color, var(--on-error-color, #fff));';
-		} else if (ms >= 300) {
-			attrs['class'] = 'label warning';
-		} else {
-			attrs['class'] = 'label success';
-		}
-		return E('span', attrs, [ ms + 'ms' ]);
+		return badges.formatLatency(
+			(typeof ms === 'number' && ms > 0) ? { delay_ms: ms } : null);
 	},
 
 	// "urltest · every 1m0s · ±50ms" — surfaces the configured tuning right
@@ -665,10 +643,7 @@ return baseclass.extend({
 		}
 		return [
 			E('h4', { 'style': 'margin:0.2em 0 0.4em;' }, [ _('Groups') ]),
-			E('table', {
-				'class': 'table cbi-section-table',
-				'id': 'prism-groups-table'
-			}, [
+			E('table', { 'class': 'table cbi-section-table' }, [
 				E('tbody', {}, rows)
 			])
 		];
@@ -935,16 +910,33 @@ return baseclass.extend({
 		if (wantMem) set('prism-traffic-mem', formatBytes(stats.mem_inuse));
 	},
 
+	_updateLogTail: function(data) {
+		[['prism-log-prism', data.prism],
+		 ['prism-log-singbox', data.singbox]].forEach(function(pair) {
+			var el = document.getElementById(pair[0]);
+			if (!el) return;
+			el.value = formatLog(pair[1]);
+			el.scrollTop = el.scrollHeight;
+		});
+	},
+
+	// One poll tick: status badge/actions, groups, traffic, and the two log
+	// tails. All four reads fan out in parallel and LuCI batches rpc calls
+	// issued in the same tick into one HTTP request, so the whole dashboard
+	// costs one round trip per POLL_MS. Also called directly by the action
+	// handlers so the page reflects a start/stop/toggle immediately.
 	_refreshStatusNow: function() {
 		var self = this;
 		return Promise.all([
 			callGetStatus().catch(function() { return {}; }),
 			callGetActiveGroups().catch(function() { return { groups: [] }; }),
-			callGetClashStats().catch(function() { return {}; })
+			callGetClashStats().catch(function() { return {}; }),
+			callGetLogs(TAIL_LINES).catch(function() { return {}; })
 		]).then(function(r) {
 			self._updateStatus(r[0] || {});
 			self._updateGroups(r[1] || { groups: [] });
 			self._updateClashStats(r[2] || {});
+			self._updateLogTail(r[3] || {});
 			self._scheduleStatusRefresh();
 		});
 	},
@@ -957,55 +949,13 @@ return baseclass.extend({
 		if (this._statusTimer)
 			clearTimeout(this._statusTimer);
 		this._statusTimer = setTimeout(L.bind(function() {
-			// Fan out both reads in parallel so the tick still fits the
-			// 2s budget even when one side stalls. The active-groups read
-			// is a cheap file read on the daemon's tmpfs snapshot, so the
-			// extra round trip is negligible.
-			Promise.all([
-				callGetStatus().catch(function() { return {}; }),
-				callGetActiveGroups().catch(function() { return { groups: [] }; }),
-				callGetClashStats().catch(function() { return {}; })
-			]).then(L.bind(function(r) {
-				this._updateStatus(r[0] || {});
-				this._updateGroups(r[1] || { groups: [] });
-				this._updateClashStats(r[2] || {});
-			}, this))
-				// Swallowed by design: a transient WAN outage or a brief
-				// rpcd hiccup should not pile error notifications onto the
-				// user every 2 seconds. The next tick retries — visible
-				// failure modes (sing-box stopped, clash disabled) come
-				// through as well-typed empty results.
-				.catch(function() {})
-				.finally(L.bind(this._scheduleStatusRefresh, this));
-		}, this), POLL_MS);
-	},
-
-	// ── Log tail polling ──────────────────────────────────────────────────
-
-	_refreshLogTail: function() {
-		return callGetLogs(TAIL_LINES).then(function(data) {
-			data = data || {};
-			[['prism-log-prism', data.prism],
-			 ['prism-log-singbox', data.singbox]].forEach(function(pair) {
-				var el = document.getElementById(pair[0]);
-				if (!el) return;
-				el.value = formatLog(pair[1]);
-				el.scrollTop = el.scrollHeight;
-			});
-		});
-	},
-
-	_scheduleLogRefresh: function() {
-		if (this._logTimer)
-			clearTimeout(this._logTimer);
-		if (!document.getElementById('prism-log-singbox')) return;
-		this._logTimer = setTimeout(L.bind(function() {
-			this._refreshLogTail()
-				// Same swallow-and-retry pattern as the status poll:
-				// log fetch can blip during rpcd reload; the next tick
-				// will succeed and the textarea re-populates.
-				.catch(function() {})
-				.finally(L.bind(this._scheduleLogRefresh, this));
+			// Errors are swallowed by design: a transient WAN outage or a
+			// brief rpcd hiccup should not pile error notifications onto
+			// the user every 2 seconds — visible failure modes (sing-box
+			// stopped, clash disabled) come through as well-typed empty
+			// results. _refreshStatusNow reschedules on success; reschedule
+			// here on failure so the next tick retries.
+			this._refreshStatusNow().catch(L.bind(this._scheduleStatusRefresh, this));
 		}, this), POLL_MS);
 	},
 
@@ -1102,10 +1052,6 @@ return baseclass.extend({
 		if (this._statusTimer) {
 			clearTimeout(this._statusTimer);
 			this._statusTimer = null;
-		}
-		if (this._logTimer) {
-			clearTimeout(this._logTimer);
-			this._logTimer = null;
 		}
 	},
 

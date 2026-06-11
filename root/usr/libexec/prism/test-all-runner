@@ -48,12 +48,12 @@ local STATUS  = "/var/etc/prism/.test-all-status"
 local LATENCY = "/var/etc/prism/latency.json"
 local TMPDIR  = "/tmp/prism-latency-pending"
 
--- Probe instance plumbing. Host/port and config path must match
--- build-config's PROBE_CLASH_HOST / PROBE_CONFIG_PATH.
+-- Probe instance plumbing. Host/port and config path are shared with
+-- build-config through prismlib so the two sides cannot drift.
 local SINGBOX       = "/usr/bin/sing-box"
 local BUILD_CONFIG  = "/usr/libexec/prism/build-config"
-local PROBE_HOST    = "127.0.0.1:9091"
-local PROBE_CONFIG  = "/var/etc/prism/sing-box-probe.json"
+local PROBE_HOST    = lib.PROBE_CLASH_HOST
+local PROBE_CONFIG  = lib.PROBE_CONFIG_PATH
 local PROBE_PIDFILE = "/var/etc/prism/.sing-box-probe.pid"
 local PROBE_LOG     = "/var/etc/prism/sing-box-probe.log"
 local PROBE_START_TIMEOUT_S = 15   -- readiness wait for the probe instance
@@ -72,20 +72,9 @@ local function log_syslog(prio, msg)
 		.. shell_quote("test-all: " .. msg) .. " 2>/dev/null")
 end
 
-local function write_atomic(path, content)
-	local dir = path:gsub("/[^/]+$", "")
-	if dir ~= "" then
-		os.execute("mkdir -p '" .. dir .. "' 2>/dev/null"
-			.. " && chmod 0700 '" .. dir .. "' 2>/dev/null")
-	end
-	local tmp = path .. ".tmp"
-	local f = io.open(tmp, "w")
-	if not f then return false end
-	f:write(content)
-	f:close()
-	os.execute("chmod 0600 '" .. tmp .. "' 2>/dev/null")
-	return os.rename(tmp, path) ~= nil
-end
+-- Atomic 0600 write into a 0700 directory — the status/latency files sit
+-- next to the probe config, which carries every node's credentials.
+local write_atomic = lib.write_secure
 
 local function update_status(state)
 	state.updated_at = os.time()

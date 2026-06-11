@@ -17,18 +17,8 @@ DNSMASQ_DROPIN_SRC=/var/etc/prism/dnsmasq-managed.conf
 # an enabled service resumes naturally on next boot).
 PAUSE_MARKER=/var/run/prism.paused
 
-# Log a Prism control-plane event to syslog. $1 is the severity
-# (info/notice/warn/err); the remaining args form the message.
-prism_log() {
-	local level
-	level="$1"
-	shift
-	# Normalise 'warn' -> 'warning' so the Status-page log filter (which
-	# keys SEV by POSIX names) classifies it correctly. busybox logger
-	# accepts both spellings.
-	[ "$level" = "warn" ] && level=warning
-	logger -p "daemon.$level" -t prism "$@"
-}
+# prism_log — shared with firewall.sh
+. /usr/libexec/prism/common.sh
 
 install_crons() {
 	# Prism drives every periodic task from two cron entries: one hourly
@@ -222,6 +212,9 @@ start_service() {
 	# disabled service to stop.
 	[ "$enabled" = "1" ] || return 1
 
+	config_get config_path global config_path /var/etc/prism/sing-box.json
+	config_get mode inbounds mode tproxy
+
 	# Transient pause: the Status page Stop button writes PAUSE_MARKER and
 	# calls /etc/init.d/prism stop, so the service stops without flipping
 	# the persistent `enabled` flag. Honour the marker here too — any later
@@ -255,9 +248,6 @@ start_service() {
 			return 1
 		fi
 	fi
-
-	config_get config_path global config_path /var/etc/prism/sing-box.json
-	config_get mode inbounds mode tproxy
 
 	# Several safety nets rely on config_path living on tmpfs (/var/etc/prism):
 	# the "refuse to start with no working config after reboot" gate at line

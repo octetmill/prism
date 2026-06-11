@@ -97,20 +97,10 @@ jobs:
             echo "Release $TAG does not exist — creating it"
             NOTES_FILE=$(mktemp)
             DL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
-            {
-              echo "Release $TAG"
-              echo ""
-              echo "**APK** (OpenWrt 25.12+)"
-              echo "_apk-tools 3.x does not accept remote URLs directly — download first._"
-              echo '```'
-              echo "wget -O /tmp/prism.apk ${DL}/luci-app-prism-${VERSION}-r${RELEASE}-openwrt-25.12.apk && apk add --allow-untrusted /tmp/prism.apk && service rpcd reload"
-              echo '```'
-              echo ""
-              echo "**IPK** (OpenWrt ≤24.10 / opkg)"
-              echo '```'
-              echo "wget -O /tmp/prism.ipk ${DL}/luci-app-prism_${VERSION}-${RELEASE}_all-openwrt-24.10.ipk && opkg install /tmp/prism.ipk && service rpcd reload"
-              echo '```'
-            } > "$NOTES_FILE"
+            echo "Release $TAG" | .github/workflows/release-notes.sh \
+              "${DL}/luci-app-prism-${VERSION}-r${RELEASE}-openwrt-25.12.apk" \
+              "${DL}/luci-app-prism_${VERSION}-${RELEASE}_all-openwrt-24.10.ipk" \
+              > "$NOTES_FILE"
             gh release create "$TAG" \
               dist/*-openwrt-25.12.apk dist/*-openwrt-25.12.apk.sha256 \
               dist/*-openwrt-24.10.ipk dist/*-openwrt-24.10.ipk.sha256 \

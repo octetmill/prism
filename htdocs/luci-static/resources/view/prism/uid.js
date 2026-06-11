@@ -14,10 +14,21 @@
 return baseclass.extend({
 	generate: function() {
 		var bytes = new Uint8Array(8);
-		(window.crypto || window.msCrypto).getRandomValues(bytes);
+		window.crypto.getRandomValues(bytes);
 		var s = '';
 		for (var i = 0; i < bytes.length; i++)
 			s += ('0' + bytes[i].toString(16)).slice(-2);
 		return s;
+	},
+
+	// Wrap a GridSection's handleAdd so the Add button mints a uid as the
+	// new section's name before the modal opens. Every prism section type
+	// uses uid section names (see above), so every grid panel needs this.
+	installGridAdd: function(section) {
+		var generate = this.generate;
+		var gridHandleAdd = section.handleAdd;
+		section.handleAdd = function(ev, name) {
+			return gridHandleAdd.call(this, ev, name || generate());
+		};
 	}
 });

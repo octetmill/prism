@@ -21,28 +21,15 @@
 'require baseclass';
 'require form';
 'require rpc';
-'require ui';
 'require uci';
 'require view.prism.lib.formpanel as formpanel';
+'require view.prism.lib.subs as subs';
+'require view.prism.lib.subsync as subsync';
 'require view.prism.uid as uid';
 
-var callListSubNodes = rpc.declare({
+var callListOutbounds = rpc.declare({
 	object: 'luci.prism',
-	method: 'list_subscription_nodes',
-	params: ['id'],
-	expect: { '': { nodes: [] } }
-});
-
-var callSyncSubscription = rpc.declare({
-	object: 'luci.prism',
-	method: 'sync_subscription',
-	params: ['id'],
-	expect: { '': {} }
-});
-
-var callReloadIfChanged = rpc.declare({
-	object: 'luci.prism',
-	method: 'reload_if_changed',
+	method: 'list_outbounds',
 	expect: { '': {} }
 });
 
@@ -58,7 +45,8 @@ var COUNTRIES = [
 
 return baseclass.extend({
 	load: function() {
-		// One UCI snapshot + one RPC per subscription for node listings. The
+		// One UCI snapshot + one list_outbounds RPC covering every
+		// subscription — one rpcd fork instead of one per subscription. The
 		// host already loaded prism; re-loading is cheap (cached) and keeps
 		// the panel self-contained if it is ever mounted standalone.
 		return uci.load('prism').then(function() {
@@ -71,45 +59,30 @@ return baseclass.extend({
 			if (uci.get('prism', 'basic') == null) {
 				uci.add('prism', 'prism', 'basic');
 			}
-			var subs = uci.sections('prism', 'subscription');
-			var calls = subs.map(function(sub) {
-				return callListSubNodes(sub['.name']).catch(function() {
-					// Mark the failure so the panel can surface it
-					// instead of silently dropping the sub's servers
-					// from the picker (which previously looked
-					// indistinguishable from "this sub has no nodes").
-					return { nodes: [], _failed: true };
-				});
-			});
-			return Promise.all(calls).then(function(results) {
-				// Clash-format subscriptions may carry urltest groups
-				// alongside individual nodes. Basic's "pick N, auto-wrap in
-				// basic-auto" flow only makes sense for concrete servers —
-				// wrapping a group inside another group is valid in sing-box
-				// but confusing in a "Default server(s)" picker. Filter
-				// group types out so the dropdown only offers real endpoints.
-				var GROUP_TYPES = { urltest: true };
-				var nodes = [];
-				var failed = [];
-				results.forEach(function(r, i) {
-					var subId   = subs[i]['.name'];
-					var subName = subs[i].name || subId;
-					if (r._failed) { failed.push(subName); return; }
-					(r.nodes || []).forEach(function(n) {
-						if (n.tag && !GROUP_TYPES[n.type]) nodes.push({
-							tag: n.tag, sub_id: subId, sub_name: subName
-						});
+			// A failed RPC degrades to an empty picker (the Server field
+			// then shows its "No nodes yet" hint) rather than killing the
+			// tab.
+			return callListOutbounds().catch(function() { return {}; });
+		}).then(function(res) {
+			// Keep subscription nodes only (manual nodes are an Advanced
+			// concept), and filter group types out: clash-format
+			// subscriptions may carry urltest groups alongside individual
+			// nodes, and Basic's "pick N, auto-wrap in basic-auto" flow
+			// only makes sense for concrete servers — wrapping a group
+			// inside another group is valid in sing-box but confusing in a
+			// "Default server(s)" picker.
+			var GROUP_TYPES = { urltest: true };
+			var subName = subs.nameMap();
+			var nodes = [];
+			(((res || {}).outbounds) || []).forEach(function(ob) {
+				if (ob.tag && ob.subscription && !GROUP_TYPES[ob.type])
+					nodes.push({
+						tag:      ob.tag,
+						sub_id:   ob.subscription,
+						sub_name: subName[ob.subscription] || ob.subscription
 					});
-				});
-				if (failed.length) {
-					ui.addNotification(null, E('p',
-						_('Could not load nodes from %d subscription(s): %s. ' +
-						  'Try syncing them on the Subscriptions section.')
-							.format(failed.length, failed.join(', '))),
-						'warning');
-				}
-				return nodes;
 			});
+			return nodes;
 		});
 	},
 
@@ -133,10 +106,7 @@ return baseclass.extend({
 		// Create every subscription as a NAMED section whose name is a
 		// random 16-hex uid — same scheme as the Advanced Nodes panel.
 		// /etc/prism/nodes/<uid>.json is keyed by that name.
-		var subsHandleAdd = sSubs.handleAdd;
-		sSubs.handleAdd = function(ev, name) {
-			return subsHandleAdd.call(this, ev, name || uid.generate());
-		};
+		uid.installGridAdd(sSubs);
 
 		var oSubEnabled = sSubs.option(form.Flag, 'enabled', _('Enabled'));
 		oSubEnabled["default"] = '1';
@@ -175,37 +145,7 @@ return baseclass.extend({
 		oSubSync.inputtitle = _('Sync');
 		oSubSync.inputstyle = 'apply';
 		oSubSync.onclick = function(ev, section_id) {
-			var btn = ev.currentTarget, label = btn.textContent;
-			var w = btn.offsetWidth, h = btn.offsetHeight;
-			btn.classList.add('spinning');
-			btn.style.width  = w + 'px';
-			btn.style.height = h + 'px';
-			btn.textContent  = '';
-			return callSyncSubscription(section_id).then(function(res) {
-				var ok = res && res.status === 'ok';
-				ui.addNotification(null, E('p',
-					ok ? _('Synced: %d nodes.').format(res.node_count || 0)
-					   : _('Sync failed.')),
-					ok ? 'info' : 'warning');
-				if (!ok) return;
-				return callReloadIfChanged().then(function(r) {
-					if (r && r.reloaded)
-						ui.addNotification(null,
-							E('p', _('Active node changed — sing-box reloaded.')), 'info');
-					ui.hideModal();
-					uci.unload('prism');
-					return uci.load('prism').then(function() {
-						return self._prismHost.remountActive();
-					});
-				});
-			}).catch(function() {
-				ui.addNotification(null, E('p', _('Sync failed.')), 'error');
-			}).finally(function() {
-				btn.style.width  = '';
-				btn.style.height = '';
-				btn.textContent  = label;
-				btn.classList.remove('spinning');
-			});
+			return subsync.handleSync(self, ev, section_id);
 		};
 
 		// ── Default server(s) ───────────────────────────────────────────
@@ -273,9 +213,8 @@ return baseclass.extend({
 		return m.render().then(L.bind(this._postRender, this));
 	},
 
-	// Append the advanced-present banner (when applicable) and the
-	// bottom-of-panel "Switch to Advanced mode" link below the form, before
-	// the host's footer attaches.
+	// Append the bottom-of-panel "Switch to Advanced mode" link below the
+	// form, before the host's footer attaches.
 	_postRender: function(formNode) {
 		var self = this;
 
@@ -290,9 +229,7 @@ return baseclass.extend({
 			'.cbi-map.prism-basic .cbi-section{margin-top:2em}'
 		]));
 
-		var extras = [];
-
-		extras.push(E('div', {
+		formNode.appendChild(E('div', {
 			'class': 'cbi-section',
 			'style': 'margin-top:1em; text-align:right; font-size:0.9em'
 		}, [
@@ -305,8 +242,6 @@ return baseclass.extend({
 				}
 			}, [ _('Switch to Advanced mode →') ])
 		]));
-
-		extras.forEach(function(el) { formNode.appendChild(el); });
 		return formNode;
 	},
 

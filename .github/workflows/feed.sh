@@ -64,9 +64,10 @@ if [ -n "${FEED_SRC_DIR:-}" ]; then
 	cp "$FEED_SRC_DIR"/*.ipk "$DL_DIR"/ 2>/dev/null || true
 else
 	require_cmd gh
-	# All release tags except the rolling "snapshot" pre-release.
-	gh release list --limit 200 --json tagName,isPrerelease \
-		--jq '.[] | select(.tagName | startswith("v")) | .tagName' \
+	# All release tags except the rolling "snapshot" pre-release — the
+	# v-prefix filter alone excludes it (its tag is literally "snapshot").
+	gh release list --limit 200 --json tagName \
+		--jq '.[].tagName | select(startswith("v"))' \
 		> "$DL_DIR/tags.txt" || die "gh release list failed"
 	[ -s "$DL_DIR/tags.txt" ] || die "no v* releases found — nothing to publish"
 	while IFS= read -r tag; do
@@ -149,9 +150,13 @@ for ipk in "$OPKG_DIR"/*.ipk; do
 	fname="$(basename "$ipk")"
 	size="$(wc -c < "$ipk")"
 	sha="$(sha256sum "$ipk" | awk '{print $1}')"
-	# Pull ./control out of the package's control.tar.gz.
-	ctrl="$(ipk_control_tar "$ipk" | tar -xzO ./control 2>/dev/null || \
-	        ipk_control_tar "$ipk" | tar -xzO control)"
+	# Pull ./control out of the package's control.tar.gz. Extract the
+	# control archive once, then try both member spellings against the
+	# extracted copy instead of re-running ar/tar over the whole package
+	# for the fallback.
+	ipk_control_tar "$ipk" > "$DL_DIR/ctrl.tgz"
+	ctrl="$(tar -xzOf "$DL_DIR/ctrl.tgz" ./control 2>/dev/null || \
+	        tar -xzOf "$DL_DIR/ctrl.tgz" control)"
 	{
 		printf '%s\n' "$ctrl" | sed '/^[[:space:]]*$/d'
 		printf 'Filename: %s\n' "$fname"
