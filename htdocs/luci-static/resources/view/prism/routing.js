@@ -676,7 +676,7 @@ return baseclass.extend({
 		s.addremove = true;
 		s.sortable  = true;
 		s.anonymous = true;
-		s.addbtntitle = _('Add');
+		s.addbtntitle = _('Add rule');
 		s.modaltitle = function() { return _('Routing rule'); };
 
 		// Create each rule as a NAMED section whose name is a 16-hex uid.
@@ -754,7 +754,7 @@ return baseclass.extend({
 			  'routing rule by its label.'));
 		cs.addremove = true;
 		cs.anonymous = true;
-		cs.addbtntitle = _('Add');
+		cs.addbtntitle = _('Add rule-set');
 
 		// Uid-as-section-name (uniform with every other anonymous prism
 		// type). Conditions reference rule-sets by their `label` field,
@@ -799,7 +799,7 @@ return baseclass.extend({
 			  'Mixed mode; IP bypass works in all modes.'));
 		bp.addremove = true;
 		bp.anonymous = true;
-		bp.addbtntitle = _('Add');
+		bp.addbtntitle = _('Add bypass');
 		bp.modaltitle = function() { return _('Bypass'); };
 
 		uid.installGridAdd(bp);
