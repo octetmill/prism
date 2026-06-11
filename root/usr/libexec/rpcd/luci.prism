@@ -1211,7 +1211,9 @@ local function sync_one(id)
 	-- subscription overrides this.
 	if user_agent == "" then
 		local v = singbox_version()
-		local num = v and v:match("(%d%S*)")
+		-- major.minor only ("sing-box/1.12"): field testing showed at least
+		-- one provider rejects the UA with the full patch version appended.
+		local num = v and (v:match("(%d+%.%d+)") or v:match("(%d%S*)"))
 		user_agent = num and ("sing-box/" .. num) or "sing-box"
 	end
 	local ua_flag = " -U '" .. user_agent:gsub("'", "'\\''") .. "'"
