@@ -667,7 +667,11 @@ return baseclass.extend({
 			])
 		]);
 		return callListSubscriptionNodes(section_id).then(function(res) {
-			var nodes = (res && res.nodes) || [];
+			// luci.jsonc serialises an empty Lua array as `{}`, so a
+			// subscription with no nodes arrives as an object, not [].
+			// Coerce so `.length`/`.forEach` below behave and the empty
+			// case shows the "No nodes" hint rather than a blank table.
+			var nodes = (res && Array.isArray(res.nodes)) ? res.nodes : [];
 			var content;
 			if (nodes.length === 0) {
 				content = E('p', {}, [

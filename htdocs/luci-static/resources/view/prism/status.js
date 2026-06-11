@@ -301,7 +301,12 @@ return baseclass.extend({
 	render: function(results) {
 		var status     = (results && results[0]) || {};
 		var logsData   = (results && results[1]) || {};
-		var outbounds  = ((results && results[2]) || {}).outbounds || [];
+		// luci.jsonc serialises an empty Lua array as `{}`, so list_outbounds
+		// arrives as an object (not []) when no nodes exist. Coerce defensively
+		// — same guard the Nodes and Routing panels use — so the runtimeInfo()
+		// .forEach below doesn't blow up the whole tab on a fresh install.
+		var rawOut     = ((results && results[2]) || {}).outbounds;
+		var outbounds  = Array.isArray(rawOut) ? rawOut : [];
 		var groupsData = (results && results[3]) || { groups: [] };
 		var statsData  = (results && results[4]) || {};
 		var prismText  = formatLog(logsData.prism);
