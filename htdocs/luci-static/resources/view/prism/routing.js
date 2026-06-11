@@ -617,40 +617,19 @@ return baseclass.extend({
 		});
 		rsTokens.sort();
 
-		// Subscription name/order lookups shared with nodes.js / status.js
-		// via lib/subs.js — see that module for the uid-keying rationale.
-		var subName = subs.nameMap(), subOrder = subs.orderMap();
-
 		// Returns the list of proxy (non-builtin) outbound tags in the same
 		// order they were added to the widget. Callers that need to wire
 		// `depends()` on "outbound is a proxy" use this to OR a clause for
 		// each tag — LuCI has no "not equals" depends.
-		// Manual nodes/groups come from the staged UCI view via
-		// subs.manualNodes(), NOT from list_outbounds: the RPC reads
-		// committed state only, so a tag rename staged by the Nodes panel
-		// (whose propagation also rewrote the rule references now shown
-		// here) would otherwise leave the rules pointing at a choice this
-		// dropdown doesn't offer until Save & Apply. Subscription nodes
-		// have no UCI section and keep coming from the RPC.
+		// The choice list itself comes from subs.serverEntries — shared
+		// with the Status tab's default-node switcher (and documented
+		// there: manual nodes from the staged UCI view, subscription
+		// nodes from the RPC).
 		function addServers(o) {
 			o.value('direct', _('direct (no proxy)'));
 			o.value('block',  _('block (drop)'));
-			var entries = [];
-			subs.manualNodes().forEach(function(n, i) {
-				entries.push({ tag: n.tag, label: n.tag, group: 0, idx: i });
-			});
-			outbounds.forEach(function(ob, i) {
-				if (!ob.subscription) return;  // manual handled above
-				entries.push({
-					tag:   ob.tag,
-					label: subs.labelFor(ob.tag, ob.subscription, subName),
-					group: subs.groupKey(ob.subscription, subOrder),
-					idx:   i
-				});
-			});
-			entries.sort(subs.entryCompare);
 			var tags = [];
-			entries.forEach(function(e) {
+			subs.serverEntries(outbounds).forEach(function(e) {
 				o.value(e.tag, e.label);
 				tags.push(e.tag);
 			});
