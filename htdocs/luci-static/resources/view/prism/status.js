@@ -35,8 +35,9 @@
 // node here). Subscription nodes render as "<subscription>/<tag>" so two
 // nodes that happen to share a tag across subscriptions can be told apart;
 // manual nodes and groups render as the bare tag. Same formatting as the
-// Routing tab's dropdown. Read-only here; a follow-up may turn it into an
-// inline group switcher.
+// Routing tab's dropdown. In Advanced mode it is an inline switcher (see
+// _renderNodeSwitcher); Basic mode keeps the read-only text — its server
+// picker lives on the Basic tab.
 
 'use strict';
 'require baseclass';
@@ -257,6 +258,7 @@ function runtimeInfo(outbounds) {
 	}).length;
 
 	return {
+		tag:       tag,
 		active:    formatActiveNode(tag, outbounds),
 		ruleCount: ruleCount,
 		uiMode:    uiMode
@@ -322,6 +324,7 @@ return baseclass.extend({
 		var active   = info.active;
 		var mode     = uci.get('prism', 'inbounds', 'mode') || 'tproxy';
 		var subCount = uci.sections('prism', 'subscription').length;
+		var manualCount = uci.sections('prism', 'node').length;
 
 		var self = this;
 
@@ -339,6 +342,18 @@ return baseclass.extend({
 					'style': 'display:flex; align-items:center; gap:0.6em;'
 				}, this._renderEnable(status.enabled))
 			]),
+
+			// ── Get started ────────────────────────────────────────────
+			// First-run checklist, shown only while nothing at all is
+			// configured (no subscriptions, no nodes of any kind). It
+			// disappears after the first subscription or node exists; the
+			// later steps are then covered by the inline pointers (the
+			// no-default switcher placeholder, the Basic no-server
+			// warning). Static per render — adding a node happens on
+			// another tab, and returning here re-renders the panel.
+			(subCount === 0 && manualCount === 0 && outbounds.length === 0)
+				? this._renderGetStarted(info.uiMode)
+				: '',
 
 			// ── Runtime row ────────────────────────────────────────────
 			// Hidden entirely when the master switch is off — nothing to
@@ -539,6 +554,173 @@ return baseclass.extend({
 		];
 	},
 
+	// Clickable pointer to another Prism tab — routes through the host's
+	// _activate so it behaves exactly like clicking the tab itself
+	// (panel teardown, session-store update). Same host-delegation
+	// pattern as basic.js _switchToAdvanced.
+	_tabLink: function(tabId, label) {
+		var self = this;
+		return E('a', {
+			'href': '#',
+			'click': function(ev) {
+				ev.preventDefault();
+				if (self._prismHost)
+					self._prismHost._activate(tabId);
+			}
+		}, [ label ]);
+	},
+
+	// First-run checklist — the three steps from a fresh install to
+	// traffic flowing, with the tab names as live links. Mode-aware:
+	// Basic does everything on one tab, Advanced spans Nodes + Routing.
+	_renderGetStarted: function(uiMode) {
+		var steps;
+		if (uiMode === 'basic') {
+			steps = [
+				E('li', {}, [
+					_('Add a subscription on the '),
+					this._tabLink('basic', _('Basic')),
+					_(' tab and press Sync.')
+				]),
+				E('li', {}, [
+					_('Pick one or more servers under "Default server(s)" on the same tab.')
+				]),
+				E('li', {}, [ _('Tick "Enable Prism" above.') ])
+			];
+		} else {
+			steps = [
+				E('li', {}, [
+					_('Add a subscription on the '),
+					this._tabLink('nodes', _('Nodes')),
+					_(' tab and press Sync — or configure a node manually there.')
+				]),
+				E('li', {}, [
+					_('Pick the default node on the '),
+					this._tabLink('routing', _('Routing')),
+					_(' tab — or right here on the runtime row, once nodes exist.')
+				]),
+				E('li', {}, [ _('Tick "Enable Prism" above.') ])
+			];
+		}
+		return E('div', { 'class': 'cbi-section' }, [
+			E('h4', { 'style': 'margin:0.4em 0 0.3em;' }, [ _('Get started') ]),
+			E('div', { 'class': 'cbi-section-descr' }, [
+				_('Nothing is configured yet — three steps to get traffic flowing:')
+			]),
+			E('ol', { 'style': 'margin:0.4em 0 0.4em 1.6em; line-height:1.7;' }, steps)
+		]);
+	},
+
+	// Inline default-node switcher (Advanced mode only). Offers the same
+	// choice list as the Routing tab's "Default node" dropdown — both come
+	// from subs.serverEntries, so the two controls cannot diverge.
+	// Changing it commits and applies immediately: Status is the
+	// immediate-action surface (Enable, Stop/Start/Restart all act on
+	// click), and a default-node change is only useful once applied.
+	// Group-member forcing via the clash API is deliberately NOT attempted
+	// here — sing-box's urltest groups pick members by latency, and forced
+	// selection would need verification on real hardware first.
+	_renderNodeSwitcher: function(currentTag) {
+		var self = this;
+		currentTag = currentTag || '';
+		var sel = E('select', {
+			'class': 'cbi-input-select',
+			'style': 'font-size:0.85em; max-width:20em;',
+			'title': _('Default node — traffic not matched by any routing rule goes here. Changing it applies immediately.'),
+			'change': function(ev) { self._handleNodeSwitch(ev.currentTarget); }
+		});
+		if (!currentTag)
+			sel.appendChild(E('option', { 'value': '', 'disabled': 'disabled' }, [ _('— no default —') ]));
+		sel.appendChild(E('option', { 'value': 'direct' }, [ _('direct (no proxy)') ]));
+		sel.appendChild(E('option', { 'value': 'block'  }, [ _('block (drop)') ]));
+		var seen = { direct: true, block: true };
+		subs.serverEntries(this._outbounds).forEach(function(e) {
+			sel.appendChild(E('option', { 'value': e.tag }, [ e.label ]));
+			seen[e.tag] = true;
+		});
+		// A dangling final_outbound (node deleted, subscription gone) still
+		// shows as the selected value instead of silently displaying the
+		// first option as if it were active.
+		if (currentTag && !seen[currentTag])
+			sel.appendChild(E('option', { 'value': currentTag }, [
+				currentTag + ' ' + _('(missing)')
+			]));
+		sel.value = currentTag;
+		sel._prismCurrent = currentTag;
+		return sel;
+	},
+
+	_handleNodeSwitch: function(sel) {
+		var self = this;
+		var newTag = sel.value;
+		var oldTag = sel._prismCurrent || '';
+		if (!newTag || newTag === oldTag)
+			return;
+		var label = (sel.selectedIndex >= 0)
+			? sel.options[sel.selectedIndex].text : newTag;
+		// Apply commits the whole staged set — when edits from other tabs
+		// are riding along, never commit them silently (same courtesy the
+		// mode switch extends to staged changes).
+		return uci.changes().then(function(changes) {
+			var n = 0;
+			for (var k in changes) {
+				if (changes.hasOwnProperty(k) && Array.isArray(changes[k]))
+					n += changes[k].length;
+			}
+			if (n === 0)
+				return self._applyNodeSwitch(sel, oldTag, newTag);
+			ui.showModal(_('Set default node?'), [
+				E('p', {}, [
+					_('Setting the default node to "%s" applies immediately — and will also commit %d change(s) staged by earlier edits.')
+						.format(label, n)
+				]),
+				E('div', { 'class': 'right' }, [
+					E('button', {
+						'class': 'btn',
+						'click': function() {
+							sel.value = oldTag;
+							ui.hideModal();
+						}
+					}, [ _('Cancel') ]),
+					' ',
+					E('button', {
+						'class': 'btn cbi-button cbi-button-apply',
+						'click': function() {
+							ui.hideModal();
+							self._applyNodeSwitch(sel, oldTag, newTag);
+						}
+					}, [ _('Apply') ])
+				])
+			]);
+		});
+	},
+
+	_applyNodeSwitch: function(sel, oldTag, newTag) {
+		sel.disabled = true;
+		if (!uci.get('prism', 'routing'))
+			uci.add('prism', 'routing', 'routing');
+		uci.set('prism', 'routing', 'final_outbound', newTag);
+		return uci.save().then(function() {
+			// Same plain (non-rollback) apply the panel footers use — see
+			// formpanel.saveApply for why the rollback ceremony is skipped.
+			// It commits the staged set, the procd config trigger reloads
+			// sing-box, and the page reload lands back on this tab via the
+			// session store with the new node showing.
+			return ui.changes.apply();
+		}).catch(function(err) {
+			// The staged write failed — reload the UCI cache so the local
+			// edit cannot ride along with an unrelated Save later, then
+			// put the control back.
+			uci.unload('prism');
+			return uci.load('prism').then(function() {
+				sel.disabled = false;
+				sel.value = oldTag;
+				ui.addNotification(null, E('p', _('Failed to set the default node: ') +
+					((err && err.message) ? err.message : err)), 'error');
+			});
+		});
+	},
+
 	// Compact latency badge — the shared lib/badges.js renderer, so the
 	// Status Groups column and the Nodes Latency column agree on the
 	// 300/600 ms green→yellow→red thresholds.
@@ -675,9 +857,17 @@ return baseclass.extend({
 				E('span', { 'style': 'opacity:0.6; font-weight:normal;' }, [
 					_('via')
 				]),
-				E('strong', { 'id': 'prism-active-node' }, [
-					active || _('— no default')
-				]),
+				// Advanced: inline default-node switcher. Basic: read-only
+				// text — the server pick is a multi-select that lives on
+				// the Basic tab, and the synthesised basic-auto tag is not
+				// a thing the user should rebind from here.
+				isBasic
+					? E('strong', { 'id': 'prism-active-node' }, [
+						active || _('— no default')
+					])
+					: E('span', { 'id': 'prism-active-node' }, [
+						this._renderNodeSwitcher(info.tag)
+					]),
 				E('span', {
 					'id': 'prism-status-actions',
 					'style': 'margin-left:auto; display:flex; gap:0.3em; font-size:0.88em;'
@@ -699,8 +889,11 @@ return baseclass.extend({
 			rows.push(E('div', {
 				'class': 'alert-message warning',
 				'style': 'margin-top:0.6em;'
-			}, [ _('No server selected — open the Basic tab and pick at least ' +
-			       'one server, otherwise traffic bypasses the proxy.') ]));
+			}, [
+				_('No server selected — open the '),
+				this._tabLink('basic', _('Basic tab')),
+				_(' and pick at least one server, otherwise traffic bypasses the proxy.')
+			]));
 		}
 		if (!isBasic) {
 			rows.push(E('div', { 'style': 'margin-top:0.5em;' }, [
