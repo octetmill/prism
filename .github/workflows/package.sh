@@ -234,6 +234,12 @@ find "$STAGE_DIR/www/luci-static/resources/view/prism" -type f -name '*.js' | \
 # 644 otherwise, independent of the build host's umask.
 cp -R "$REPO_DIR/root/." "$STAGE_DIR/"
 chmod -R u=rwX,go=rX "$STAGE_DIR"
+# extra.json is rewritten with mode 0600 by the rpcd handler the moment the
+# user saves overrides (the file may then carry credentials / secret URLs);
+# ship the {} default at the same mode so the path never exists with wider
+# permissions than its security model assumes. rpcd and build-config both
+# run as root, so 0600 costs nothing.
+chmod 600 "$STAGE_DIR/etc/prism/extra.json"
 # Strip Lua and shell comments from the staged tree. Path-based dispatch
 # in strip_comments matches the helper files by exact name, plus any
 # *.lua / *.sh file.
