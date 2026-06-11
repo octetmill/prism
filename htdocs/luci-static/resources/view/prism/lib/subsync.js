@@ -25,19 +25,46 @@ var callReloadIfChanged = rpc.declare({
 	expect: { '': {} }
 });
 
+// Busy-state restyle for the Sync button: hide the label and center the
+// wheel instead of the themes' default (label kept, button widened by
+// `.spinning`'s padding-left:32px). The label is hidden with transparent
+// color — not by emptying it — and the button's natural width is pinned
+// with border-box sizing, so the size cannot change while spinning. The
+// ::before override unifies both supported themes' spinner geometry
+// (bootstrap: 20px mask box at left:6px; material: 32px background box,
+// background-size 16px centered) into one 20px box centered both ways.
+var SPIN_CSS =
+	'.prism-sync-spin.spinning {' +
+	' box-sizing: border-box; overflow: hidden; color: transparent !important; }' +
+	'.prism-sync-spin.spinning::before {' +
+	' left: calc(50% - 10px); top: calc(50% - 10px);' +
+	' bottom: auto; width: 20px; height: 20px; }';
+
+function ensureSpinStyle() {
+	if (!document.getElementById('prism-sync-spin-style'))
+		document.head.appendChild(
+			E('style', { 'id': 'prism-sync-spin-style' }, [ SPIN_CSS ]));
+}
+
 return baseclass.extend({
-	// Spin the button in place (fixed width/height so the row doesn't
-	// jump), sync the subscription, reload sing-box only if the active
-	// outbound set changed, then remount the panel from re-read UCI.
-	// `panel` is the calling panel instance (its _prismHost is set by
-	// main.js when the panel mounts).
+	// Sync the subscription, reload sing-box only if the active outbound
+	// set changed, then remount the panel from re-read UCI. The .spinning
+	// class itself is owned by form.Button's ui.createHandlerFn wrapper
+	// (added before this handler runs, removed when the returned promise
+	// settles); this handler only adds the scoping class for the centered
+	// variant above and pins the width. `panel` is the calling panel
+	// instance (its _prismHost is set by main.js when the panel mounts).
 	handleSync: function(panel, ev, section_id) {
-		var btn = ev.currentTarget, label = btn.textContent;
-		var w = btn.offsetWidth, h = btn.offsetHeight;
+		var btn = ev.currentTarget;
+		ensureSpinStyle();
+		// The wrapper's .spinning (padding-left 32px) is already applied —
+		// lift it for one synchronous layout pass to measure the button's
+		// natural width, then pin that width for the spinning state.
+		btn.classList.remove('spinning');
+		var w = btn.offsetWidth;
 		btn.classList.add('spinning');
-		btn.style.width  = w + 'px';
-		btn.style.height = h + 'px';
-		btn.textContent  = '';
+		btn.classList.add('prism-sync-spin');
+		btn.style.width = w + 'px';
 		return callSyncSubscription(section_id).then(function(res) {
 			var ok = res && res.status === 'ok';
 			ui.addNotification(null, E('p',
@@ -64,10 +91,10 @@ return baseclass.extend({
 		}).catch(function() {
 			ui.addNotification(null, E('p', _('Sync failed.')), 'error');
 		}).finally(function() {
-			btn.classList.remove('spinning');
-			btn.style.width  = '';
-			btn.style.height = '';
-			btn.textContent  = label;
+			// A failed or no-op sync keeps the same DOM (no remount) —
+			// return the button to its label state.
+			btn.classList.remove('prism-sync-spin');
+			btn.style.width = '';
 		});
 	}
 });

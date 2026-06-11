@@ -131,7 +131,7 @@ msgid "User-Agent"
 msgstr ""
 
 #: htdocs/luci-static/resources/view/prism/nodes.js:274
-msgid "Leave blank for default"
+msgid "sing-box/<installed version>"
 msgstr ""
 
 #: htdocs/luci-static/resources/view/prism/nodes.js:276
