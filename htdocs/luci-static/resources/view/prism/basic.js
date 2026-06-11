@@ -74,7 +74,12 @@ return baseclass.extend({
 			var GROUP_TYPES = { urltest: true };
 			var subName = subs.nameMap();
 			var nodes = [];
-			(((res || {}).outbounds) || []).forEach(function(ob) {
+			// luci.jsonc serialises an empty Lua array as `{}`, so an
+			// empty outbound list arrives as an object, not []. Coerce
+			// defensively so the .forEach doesn't blow up the tab on a
+			// fresh install with no subscriptions synced yet.
+			var rawOut = (res || {}).outbounds;
+			(Array.isArray(rawOut) ? rawOut : []).forEach(function(ob) {
 				if (ob.tag && ob.subscription && !GROUP_TYPES[ob.type])
 					nodes.push({
 						tag:      ob.tag,
