@@ -579,6 +579,12 @@ return baseclass.extend({
 		// built-in filter field inside the opened dropdown panel.
 		o.widget = 'select';
 		memberList.forEach(function(m) { o.value(m.tag, m.label); });
+		// With no nodes yet (fresh install), transformChoices() returns null,
+		// which slips past ui.Dropdown's `typeof` null check and crashes the
+		// Add modal on Object.keys(null). Coerce to {}.
+		o.transformChoices = function() {
+			return form.MultiValue.prototype.transformChoices.apply(this) || {};
+		};
 		o.modalonly = true;
 		o.depends({ type: 'urltest', urltest_mode: 'manual' });
 

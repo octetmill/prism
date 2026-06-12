@@ -166,6 +166,13 @@ return baseclass.extend({
 		// Advanced's urltest member picker uses, with a search field for long
 		// node lists.
 		oServer.widget = 'select';
+		// transformChoices() returns null when no .value() entries exist (a
+		// fresh install with nothing synced); ui.Dropdown's null check uses
+		// `typeof`, which null passes, so Object.keys(null) then kills the
+		// whole tab. Coerce to {} for an empty-but-rendering dropdown.
+		oServer.transformChoices = function() {
+			return form.MultiValue.prototype.transformChoices.apply(this) || {};
+		};
 		oServer.rmempty = true;
 		oServer.placeholder = _('— pick one or more —');
 		if (nodes.length === 0) {

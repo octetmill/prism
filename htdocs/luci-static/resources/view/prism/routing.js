@@ -834,7 +834,11 @@ return baseclass.extend({
 				sort:        false,
 				optional:    false,
 				placeholder: this.placeholder,
-				validate:    this.getValidator(section_id),
+				// L.bind instead of this.getValidator(): getValidator was
+				// added to form.js after the 24.10.0 release, so it is
+				// missing on 24.10's stock luci-base. For a plain-function
+				// .validate the two are equivalent.
+				validate:    L.bind(this.validate, this, section_id),
 				disabled:    this.map.readonly
 			});
 			var node = widget.render();
