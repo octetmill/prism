@@ -36,9 +36,14 @@ return baseclass.extend({
 	//  green   < 300 ms   (workable proxy path)
 	//  yellow  < 600 ms   (degraded)
 	//  red     ≥ 600 ms   or any error
-	formatLatency: function(result) {
+	// `detailed` appends the tested-time as dimmed inline text. The default
+	// keeps it in the title tooltip only, which suits dense grid columns
+	// but is mouse-only — pass true where there's room (the
+	// subscription-nodes modal) so touch and keyboard users see it too.
+	formatLatency: function(result, detailed) {
 		if (!result)
 			return E('span', { 'style': 'opacity:0.45;' }, [ '—' ]);
+		var badge;
 		if (typeof result.delay_ms === 'number') {
 			var ms = result.delay_ms;
 			var attrs = {
@@ -53,18 +58,27 @@ return baseclass.extend({
 				attrs['class'] = 'label';
 				attrs['style'] += DANGER_STYLE;
 			}
-			return E('span', attrs, [ ms + ' ms' ]);
+			badge = E('span', attrs, [ ms + ' ms' ]);
+		} else {
+			// Probe failed: the cached `error` string is sing-box's own
+			// message (mapped via probe_node), e.g. "timeout", "proxy not
+			// in running config". Show it on hover so the cell doesn't
+			// grow to the longest error length.
+			var msg = result.error || _('error');
+			badge = E('span', {
+				'class': 'label',
+				'style': 'padding:1px 6px; border-radius:3px; text-transform:none; cursor:help;' +
+				         DANGER_STYLE,
+				'title': msg + (result.tested_at ? '\n' + _('Tested %s').format(relTime(result.tested_at)) : '')
+			}, [ msg.length > 14 ? msg.substring(0, 13) + '…' : msg ]);
 		}
-		// Probe failed: the cached `error` string is sing-box's own message
-		// (mapped via probe_node), e.g. "timeout", "proxy not in running
-		// config". Show it on hover so the cell doesn't grow to the longest
-		// error length.
-		var msg = result.error || _('error');
-		return E('span', {
-			'class': 'label',
-			'style': 'padding:1px 6px; border-radius:3px; text-transform:none; cursor:help;' +
-			         DANGER_STYLE,
-			'title': msg + (result.tested_at ? '\n' + _('Tested %s').format(relTime(result.tested_at)) : '')
-		}, [ msg.length > 14 ? msg.substring(0, 13) + '…' : msg ]);
+		if (!detailed || !result.tested_at)
+			return badge;
+		return E('span', { 'style': 'white-space:nowrap;' }, [
+			badge, ' ',
+			E('span', { 'style': 'opacity:0.55; font-size:0.85em;' }, [
+				_('tested %s').format(relTime(result.tested_at))
+			])
+		]);
 	}
 });

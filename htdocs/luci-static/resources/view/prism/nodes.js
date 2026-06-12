@@ -700,8 +700,11 @@ return baseclass.extend({
 					];
 					if (clashOn) {
 						var tag = n.tag || '';
-						var span = E('span', {}, [ formatLatency(self._latency[tag]) ]);
-						self._registerLatencyCell(tag, span);
+						// Detailed variant: the modal has room to show the
+						// tested-time inline, where the grid's tooltip-only
+						// rendering is mouse-only.
+						var span = E('span', {}, [ formatLatency(self._latency[tag], true) ]);
+						self._registerLatencyCell(tag, span, true);
 						cells.push(E('td', { 'class': 'td' }, [ span ]));
 						cells.push(E('td', { 'class': 'td cbi-section-actions' }, [
 							E('button', {
@@ -810,8 +813,12 @@ return baseclass.extend({
 	// surrogate-pair escaping in CSS selectors isn't portable — browsers
 	// vary in whether they accept '\d83c\dded' as a single character. A
 	// JS string key sidesteps the issue entirely.
-	_registerLatencyCell: function(tag, element) {
+	// `detailed` is remembered on the element so a refresh re-renders the
+	// cell with the same variant it was created with (the modal's cells
+	// carry the inline tested-time, the grid's do not).
+	_registerLatencyCell: function(tag, element, detailed) {
 		if (!tag) return;
+		element._prismDetailed = !!detailed;
 		var arr = this._latencyCells[tag];
 		if (!arr) { arr = []; this._latencyCells[tag] = arr; }
 		arr.push(element);
@@ -829,7 +836,7 @@ return baseclass.extend({
 			var el = arr[i];
 			if (!el || !el.isConnected) continue;
 			while (el.firstChild) el.removeChild(el.firstChild);
-			el.appendChild(formatLatency(result));
+			el.appendChild(formatLatency(result, el._prismDetailed));
 			live.push(el);
 		}
 		this._latencyCells[tag] = live;

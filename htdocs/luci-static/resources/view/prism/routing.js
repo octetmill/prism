@@ -461,6 +461,10 @@ var ConditionList = form.DummyValue.extend({
 			var rmBtn = E('button', {
 				'class': 'btn cbi-button cbi-button-remove',
 				'style': 'flex:0 0 auto',
+				// The glyph alone is invisible to screen readers and has no
+				// hover hint — name the action explicitly.
+				'title': _('Remove this condition'),
+				'aria-label': _('Remove this condition'),
 				'click': function(ev) {
 					ev.preventDefault();
 					rowsEl.removeChild(row);
