@@ -75,5 +75,32 @@ return baseclass.extend({
 		if (a.group !== b.group) return a.group - b.group;
 		if (a.idx   !== b.idx)   return a.idx   - b.idx;
 		return a.label < b.label ? -1 : a.label > b.label ? 1 : 0;
+	},
+
+	// Ordered { tag, label } choices for any "pick a node" control: manual
+	// nodes/groups first (from the staged UCI view — see manualNodes for
+	// why not list_outbounds), then subscription nodes grouped in
+	// subscription-section order. Shared by the Routing tab's outbound
+	// dropdowns and the Status tab's default-node switcher so the two
+	// lists cannot diverge. `outbounds` is a list_outbounds result; the
+	// builtin direct/block choices are the caller's to add.
+	serverEntries: function(outbounds) {
+		var self = this;
+		var names = this.nameMap(), order = this.orderMap();
+		var entries = [];
+		this.manualNodes().forEach(function(n, i) {
+			entries.push({ tag: n.tag, label: n.tag, group: 0, idx: i });
+		});
+		(outbounds || []).forEach(function(ob, i) {
+			if (!ob || !ob.subscription) return;  // manual handled above
+			entries.push({
+				tag:   ob.tag,
+				label: self.labelFor(ob.tag, ob.subscription, names),
+				group: self.groupKey(ob.subscription, order),
+				idx:   i
+			});
+		});
+		entries.sort(this.entryCompare);
+		return entries;
 	}
 });

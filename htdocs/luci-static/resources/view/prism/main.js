@@ -80,6 +80,12 @@ return view.extend({
 
 	render: function() {
 		this._mountGen = 0;
+		// Tabs that staged UCI changes while active (dot in the tab bar) and
+		// the staged-change count at the last tab activation — growth between
+		// activations is attributed to the tab being left. Both reset on the
+		// page reload an apply/revert performs.
+		this._dirtyTabs = {};
+		this._stagedBaseline = 0;
 		this._mode = this._readMode();
 		this._tabs = (this._mode === 'basic') ? TABS_BASIC : TABS_ADVANCED;
 		this._topMenu = E('ul', { 'class': 'cbi-tabmenu' }, []);
@@ -132,16 +138,63 @@ return view.extend({
 	},
 
 	_buildMenu: function(items, activeId, onClick) {
+		var self = this;
 		var els = items.map(function(it) {
 			return E('li', { 'class': it.id === activeId ? 'cbi-tab' : 'cbi-tab-disabled' }, [
 				E('a', {
 					'href': '#',
 					'click': function(ev) { ev.preventDefault(); onClick(it.id); }
-				}, [ it.label ])
+				}, [
+					it.label,
+					// Dot on tabs that staged changes — the color is
+					// inherited from the tab label so it works on every
+					// theme; the title carries the explanation.
+					self._dirtyTabs[it.id] ? E('span', {
+						'style': 'margin-left:0.3em;',
+						'title': _('Changes from this tab are staged but not yet applied')
+					}, [ '•' ]) : ''
+				])
 			]);
 		});
 		els.push(this._buildModeChip());
 		return els;
+	},
+
+	// (Re)render the top tab bar from current state — called on every tab
+	// activation and whenever the dirty-tab set changes.
+	_renderMenu: function() {
+		var self = this;
+		dom.content(this._topMenu, this._buildMenu(this._tabs, this._activeGroup, function(id) {
+			self._activate(id);
+		}));
+	},
+
+	// Re-read the server-side staged-change count, attribute any growth
+	// since the previous activation to the tab just left, and refresh the
+	// dirty dots plus the footer note. Called after each panel mount and
+	// after a footer Save; Save & Apply and Reset both end in a page
+	// reload, so they need no refresh. Errors are swallowed — this is a
+	// purely informational surface and must never break a tab switch.
+	_refreshStagedState: function(leavingId) {
+		var self = this;
+		return uci.changes().then(function(changes) {
+			var n = _changeCount(changes);
+			if (leavingId && leavingId !== self._activeGroup && n > self._stagedBaseline)
+				self._dirtyTabs[leavingId] = true;
+			if (n === 0)
+				self._dirtyTabs = {};  // applied or reverted out of band
+			self._stagedBaseline = n;
+			self._renderMenu();
+			var note = document.getElementById('prism-staged-note');
+			if (note) {
+				if (n > 0) {
+					note.textContent = _('%d change(s) already staged — Save & Apply commits them all, including edits from other tabs.').format(n);
+					note.style.display = '';
+				} else {
+					note.style.display = 'none';
+				}
+			}
+		}).catch(function() {});
 	},
 
 	// Right-aligned mode toggle that lives inside the top tab bar (margin-left:
@@ -253,11 +306,15 @@ return view.extend({
 	},
 
 	_renderModeStyles: function() {
+		// Theme variables with literal fallbacks (same pattern as
+		// lib/badges.js) — hardcoded #666/#000 disappeared against the
+		// dark Material theme's background.
 		return E('style', {}, [
 			'.cbi-tabmenu .prism-mode-chip{margin-left:auto;border:none;background:none}' +
-			'.cbi-tabmenu .prism-mode-chip a{padding:0.4em 0.6em;color:#666;' +
+			'.cbi-tabmenu .prism-mode-chip a{padding:0.4em 0.6em;' +
+				'color:var(--text-color-medium, #666);' +
 				'font-size:0.85em;text-decoration:none}' +
-			'.cbi-tabmenu .prism-mode-chip a:hover{color:#000}'
+			'.cbi-tabmenu .prism-mode-chip a:hover{color:var(--text-color-high, #000)}'
 		]);
 	},
 
@@ -268,14 +325,29 @@ return view.extend({
 		if (!hasApply && !hasSave && !hasReset)
 			return null;
 
+		var host = this;
 		return E('div', { 'class': 'cbi-page-actions' }, [
+			// Populated by _refreshStagedState when staged changes exist:
+			// all panels share one UCI config, so Save & Apply commits
+			// more than what is visible on the current tab — say so right
+			// next to the button that does it.
+			E('span', {
+				'id': 'prism-staged-note',
+				'style': 'display:none; margin-right:0.8em; font-size:0.9em; opacity:0.7;'
+			}),
 			hasApply ? E('button', {
 				'class': 'btn cbi-button cbi-button-apply',
 				'click': ui.createHandlerFn(panel, 'handleSaveApply')
 			}, [ _('Save & Apply') ]) : '',
 			hasSave ? E('button', {
 				'class': 'btn cbi-button cbi-button-save',
-				'click': ui.createHandlerFn(panel, 'handleSave')
+				// Save stages without applying — refresh the staged note
+				// so the new count shows up immediately.
+				'click': ui.createHandlerFn(panel, function(ev) {
+					return Promise.resolve(this.handleSave(ev)).then(function() {
+						return host._refreshStagedState();
+					});
+				})
 			}, [ _('Save') ]) : '',
 			hasReset ? E('button', {
 				'class': 'btn cbi-button cbi-button-reset',
@@ -293,6 +365,9 @@ return view.extend({
 	_activate: function(groupId) {
 		var self = this;
 		var gen = ++this._mountGen;
+		// The tab being left — staged-change growth since its activation is
+		// attributed to it by _refreshStagedState below.
+		var leaving = this._activeGroup;
 
 		if (this._panel && typeof this._panel._teardown === 'function') {
 			// Swallowed by design: _teardown's job is to clear timers
@@ -310,9 +385,7 @@ return view.extend({
 		this._activeGroup = groupId;
 		session.setLocalData('prism.activeTab', groupId);
 
-		dom.content(this._topMenu, this._buildMenu(this._tabs, groupId, function(id) {
-			self._activate(id);
-		}));
+		this._renderMenu();
 
 		dom.content(this._content, []);
 		var mountTarget = this._content;
@@ -343,6 +416,7 @@ return view.extend({
 					self._footer = footer;
 					self._shell.appendChild(footer);
 				}
+				return self._refreshStagedState(leaving);
 			});
 		}).catch(function(err) {
 			if (gen !== self._mountGen) return;
