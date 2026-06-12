@@ -700,8 +700,11 @@ return baseclass.extend({
 					];
 					if (clashOn) {
 						var tag = n.tag || '';
-						var span = E('span', {}, [ formatLatency(self._latency[tag]) ]);
-						self._registerLatencyCell(tag, span);
+						// Detailed variant: the modal has room to show the
+						// tested-time inline, where the grid's tooltip-only
+						// rendering is mouse-only.
+						var span = E('span', {}, [ formatLatency(self._latency[tag], true) ]);
+						self._registerLatencyCell(tag, span, true);
 						cells.push(E('td', { 'class': 'td' }, [ span ]));
 						cells.push(E('td', { 'class': 'td cbi-section-actions' }, [
 							E('button', {
@@ -712,13 +715,46 @@ return baseclass.extend({
 							}, [ _('Test') ])
 						]));
 					}
-					rows.push(E('tr', { 'class': 'tr cbi-section-table-row' }, cells));
+					var row = E('tr', { 'class': 'tr cbi-section-table-row' }, cells);
+					// Searchable text for the filter box below — tag, type
+					// and server cover everything a user would hunt by.
+					row._prismFilter = ((n.tag || '') + ' ' + (n.type || '')
+						+ ' ' + srv).toLowerCase();
+					rows.push(row);
 				}
-				content = E('div', {
-					'style': 'max-height:75vh; overflow:auto;'
-				}, [
-					E('table', { 'class': 'table cbi-section-table' }, rows)
-				]);
+				var table = E('table', { 'class': 'table cbi-section-table' }, rows);
+				var pieces = [
+					E('div', { 'style': 'max-height:70vh; overflow:auto;' }, [ table ])
+				];
+				// Subscriptions commonly carry 100+ nodes — a substring
+				// filter beats scroll-hunting. Hidden for short lists,
+				// where it would only be clutter.
+				if (nodes.length >= 10) {
+					var countEl = E('span', {
+						'style': 'opacity:0.6; font-size:0.9em; white-space:nowrap;'
+					}, [ '%d / %d'.format(nodes.length, nodes.length) ]);
+					var filterEl = E('input', {
+						'type': 'text',
+						'class': 'cbi-input-text',
+						'style': 'flex:1 1 auto;',
+						'placeholder': _('Type to filter by name, type or server…'),
+						'input': function(ev) {
+							var q = ev.currentTarget.value.trim().toLowerCase();
+							var shown = 0;
+							table.querySelectorAll('tr').forEach(function(tr) {
+								if (tr._prismFilter == null) return;  // header row
+								var hit = (q === '' || tr._prismFilter.indexOf(q) !== -1);
+								tr.style.display = hit ? '' : 'none';
+								if (hit) shown++;
+							});
+							countEl.textContent = '%d / %d'.format(shown, nodes.length);
+						}
+					});
+					pieces.unshift(E('div', {
+						'style': 'display:flex; align-items:center; gap:0.6em; margin-bottom:0.5em;'
+					}, [ filterEl, countEl ]));
+				}
+				content = E('div', {}, pieces);
 			}
 			var footer = [
 				E('button', {
@@ -777,8 +813,12 @@ return baseclass.extend({
 	// surrogate-pair escaping in CSS selectors isn't portable — browsers
 	// vary in whether they accept '\d83c\dded' as a single character. A
 	// JS string key sidesteps the issue entirely.
-	_registerLatencyCell: function(tag, element) {
+	// `detailed` is remembered on the element so a refresh re-renders the
+	// cell with the same variant it was created with (the modal's cells
+	// carry the inline tested-time, the grid's do not).
+	_registerLatencyCell: function(tag, element, detailed) {
 		if (!tag) return;
+		element._prismDetailed = !!detailed;
 		var arr = this._latencyCells[tag];
 		if (!arr) { arr = []; this._latencyCells[tag] = arr; }
 		arr.push(element);
@@ -796,7 +836,7 @@ return baseclass.extend({
 			var el = arr[i];
 			if (!el || !el.isConnected) continue;
 			while (el.firstChild) el.removeChild(el.firstChild);
-			el.appendChild(formatLatency(result));
+			el.appendChild(formatLatency(result, el._prismDetailed));
 			live.push(el);
 		}
 		this._latencyCells[tag] = live;

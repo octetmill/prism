@@ -20,6 +20,7 @@
 'require baseclass';
 'require form';
 'require rpc';
+'require session';
 'require ui';
 'require view.prism.lib.formpanel as formpanel';
 
@@ -437,8 +438,16 @@ return baseclass.extend({
 		var toggle = E('label', { 'class': 'prism-adv-toggle' }, [
 			cb, E('span', {}, [ _('Show all fields') ])
 		]);
+		// Session-persisted (same store the host uses for the active tab),
+		// so power users who live in the advanced fields don't re-tick the
+		// box on every visit — and it survives the Save & Apply page reload.
+		if (session.getLocalData('prism.showAdvanced') === '1') {
+			cb.checked = true;
+			formNode.classList.add('prism-show-advanced');
+		}
 		cb.addEventListener('change', function() {
 			formNode.classList.toggle('prism-show-advanced', cb.checked);
+			session.setLocalData('prism.showAdvanced', cb.checked ? '1' : '');
 		});
 
 		formNode.insertBefore(toggle, formNode.firstChild);
