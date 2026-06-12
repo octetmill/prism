@@ -175,7 +175,7 @@ return baseclass.extend({
 		s.addremove = true;
 		s.sortable  = true;
 		s.anonymous = true;
-		s.addbtntitle = _('Add');
+		s.addbtntitle = _('Add subscription');
 		s.modaltitle = function() { return _('Subscription'); };
 
 		// Create every subscription as a NAMED section whose name is a
@@ -301,7 +301,7 @@ return baseclass.extend({
 		s.addremove = true;
 		s.sortable  = true;
 		s.anonymous = true;
-		s.addbtntitle = _('Add');
+		s.addbtntitle = _('Add node');
 		s.modaltitle = function() { return _('Node'); };
 
 		// Same uid-as-section-name pattern as the subscriptions section
@@ -886,31 +886,17 @@ return baseclass.extend({
 		return tags;
 	},
 
-	// Section "Test all" handler — confirms then dispatches.
+	// Section "Test all" handler — dispatches directly. Probing is
+	// non-destructive and the progress banner already reports what's
+	// running, so a confirm step only added friction (the per-subscription
+	// batch button never had one either).
 	_testAll: function() {
 		var tags = this._collectAllTags();
 		if (tags.length === 0) {
 			ui.addNotification(null, E('p', _('No nodes to test.')), 'info');
 			return;
 		}
-		var self = this;
-		ui.showModal(_('Test all nodes'), [
-			E('p', {}, [
-				_('Probe latency for %d nodes? A background runner starts a ' +
-				  'temporary sing-box test instance on the router, probes ' +
-				  'all nodes in parallel through it, and cells update as ' +
-				  'results arrive.')
-					.format(tags.length)
-			]),
-			E('div', { 'class': 'right' }, [
-				E('button', { 'class': 'btn', 'click': ui.hideModal }, [ _('Cancel') ]),
-				' ',
-				E('button', {
-					'class': 'btn cbi-button cbi-button-positive',
-					'click': function() { self._doTestAll(tags); }
-				}, [ _('Test all') ])
-			])
-		]);
+		return this._doTestAll(tags);
 	},
 
 	// "Test all": fork the background runner on the device and poll for

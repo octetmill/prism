@@ -531,10 +531,13 @@ return baseclass.extend({
 				'for': 'prism-enable-checkbox',
 				'style': 'font-size:1.15em; font-weight:bold; cursor:pointer; margin:0;'
 			}, [ _('Enable Prism') ]),
+			// "applies immediately" because this toggle commits through rpcd
+			// on click — unlike everything else in Prism, there is no
+			// Save & Apply step between the click and the service action.
 			E('span', { 'style': 'opacity:0.6; font-size:0.9em;' }, [
 				enabled
-					? _('— sing-box runs and autostarts at boot')
-					: _('— installed but dormant; no service, no autostart')
+					? _('— sing-box runs and autostarts at boot · applies immediately')
+					: _('— installed but dormant; no service, no autostart · applies immediately')
 			])
 		];
 	},
