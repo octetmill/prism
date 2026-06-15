@@ -106,7 +106,7 @@ root/
 ├── etc/
 │   ├── config/prism             # Default UCI config (conffile)
 │   ├── init.d/prism             # procd init script
-│   └── uci-defaults/            # One-time config migrations
+│   └── prism/extra.json         # Advanced overrides (conffile)
 └── usr/
     ├── libexec/prism/           # build-config, firewall.sh, fetch-catalog,
     │                            #   sync-subscriptions, watchdog, hourly, prismlib.lua
