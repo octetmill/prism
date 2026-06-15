@@ -112,17 +112,36 @@ wget -O /tmp/prism.apk https://github.com/octetmill/prism/releases/download/snap
 wget -O /tmp/prism.ipk https://github.com/octetmill/prism/releases/download/snapshot/luci-app-prism-snapshot.ipk && opkg install /tmp/prism.ipk && service rpcd reload
 ```
 
+### On iStoreOS and other OpenWrt forks
+
+iStoreOS is a downstream OpenWrt distribution; its active branch,
+`istoreos-24.10`, is OpenWrt **24.10** with **opkg / IPK**. Use the
+**OpenWrt 24.10 (opkg)** instructions above unchanged — no
+iStoreOS-specific build exists or is needed. Run `opkg update` first: the
+24.10 feed it inherits ships sing-box 1.12.x (well past Prism's `≥1.12`
+floor), and fw4/nftables is present by default. The same reasoning
+applies to other 24.10-based forks; a 25.12-based fork would use the apk
+instructions.
+
+One caveat unique to these forks: they make one-click proxy tools
+(OpenClash, PassWall, ShellCrash, …) easy to install, and each manages
+its own nftables redirect/TPROXY rules. Running one of those *and* Prism's
+transparent capture at the same time will conflict at runtime. Enable only
+one. Prism's rules live in their own table, so you can see what is loaded
+with `nft list table inet prism`.
+
 ## Requirements
 
-- OpenWrt **24.10** or **25.12+**.
+- OpenWrt **24.10** or **25.12+** (including forks such as iStoreOS —
+  see above).
 - **sing-box ≥ 1.12** (pulled in as a dependency).
 - **nftables.** Prism installs its own `inet prism` table via `nft`;
   iptables / fw3 are not supported. Both 24.10 and 25.12 ship
   fw4/nftables by default, so a stock install already qualifies.
 
 Everything else (`luci-base`, `luci-lib-jsonc`, `rpcd`,
-`rpcd-mod-rpcsys`, `uclient-fetch`, `ca-bundle`) is pulled in
-automatically.
+`uclient-fetch`, `ca-bundle`, `lua`, `libuci-lua`, `nftables-json`) is
+pulled in automatically.
 
 ## Upgrade and uninstall
 
@@ -172,7 +191,8 @@ apk add --force-overwrite --allow-untrusted /tmp/prism.apk
 # opkg install --force-reinstall /tmp/prism.ipk
 ```
 
-The shipped uci-defaults re-seed the config.
+Reinstalling restores the shipped default `/etc/config/prism` (it is a
+conffile, so the package only writes it back when it is absent).
 
 ## Contributing
 
