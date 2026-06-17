@@ -607,7 +607,7 @@ return baseclass.extend({
 			? data[1].outbounds : [];
 
 		// Autocomplete suggestions for the rule-set condition: "provider/name"
-		// tokens from the fetched catalog, plus any custom rule-set labels.
+		// tokens from the fetched catalog.
 		var rsNames = (data && data[2] && data[2].names) || {};
 		var rsTokens = [];
 		['sagernet', 'loyalsoldier', 'metacubex'].forEach(function(prov) {
@@ -615,9 +615,6 @@ return baseclass.extend({
 				rsNames[prov].forEach(function(name) {
 					rsTokens.push(prov + '/' + name);
 				});
-		});
-		uci.sections('prism', 'customrs').forEach(function(cs) {
-			if (cs.label) rsTokens.push(cs.label);
 		});
 		rsTokens.sort();
 
@@ -726,43 +723,6 @@ return baseclass.extend({
 		oCond.modalonly = true;
 		oCond.rsSuggest    = rsTokens;
 		oCond.protoSuggest = PROTOCOLS.slice().sort();
-
-		// ── custom rule-sets ────────────────────────────────────────────
-		// Lives in Routing because routing rules reference these by label;
-		// the global delivery / download-detour knobs that used to sit next
-		// to this section moved to Settings — they're set-once-and-forgotten
-		// config, not something the user tweaks while editing rules.
-		var cs = m.section(form.GridSection, 'customrs', _('Custom rule-sets'),
-			_('Rule-sets fetched from an explicit URL. Reference one in a ' +
-			  'routing rule by its label.'));
-		cs.addremove = true;
-		cs.anonymous = true;
-		cs.addbtntitle = _('Add rule-set');
-
-		// Uid-as-section-name (uniform with every other anonymous prism
-		// type). Conditions reference rule-sets by their `label` field,
-		// not by section name, so the change is cosmetic for customrs
-		// alone — but it keeps the schema rule the same across the board.
-		uid.installGridAdd(cs);
-
-		var oLabel = cs.option(form.Value, 'label', _('Label'));
-		oLabel.rmempty = false;
-		oLabel.validate = function(section_id, value) {
-			if (!value)
-				return _('A label is required.');
-			if (value.indexOf('/') >= 0)
-				return _('The label must not contain "/".');
-			return true;
-		};
-
-		var oUrl = cs.option(form.Value, 'url', _('URL'));
-		oUrl.rmempty = false;
-		oUrl.placeholder = 'https://…/rules.srs';
-
-		var oFmt = cs.option(form.ListValue, 'format', _('Format'));
-		oFmt.value('binary', _('Binary (.srs)'));
-		oFmt.value('source', _('Source (.json)'));
-		oFmt['default'] = 'binary';
 
 		// ── bypass ──────────────────────────────────────────────────────
 		// LAN clients listed here skip the proxy entirely — applied via
@@ -938,15 +898,14 @@ return baseclass.extend({
 		});
 		return m.render().then(function(node) {
 			// Breathing room between the rules grid's Add button and the
-			// Rule-set sources section. NamedSection renders its h3 and
+			// following section. NamedSection renders its h3 and
 			// description outside the `#cbi-{config}-{name}` options wrapper,
 			// so a margin on that wrapper only pushed the options down —
 			// target the heading by its text instead, which pushes the whole
 			// visual block down.
 			var gaps = { };
-			gaps[_('Rules')]            = '2em';
-			gaps[_('Custom rule-sets')] = '2em';
-			gaps[_('Bypass')]           = '2em';
+			gaps[_('Rules')]  = '2em';
+			gaps[_('Bypass')] = '2em';
 			node.querySelectorAll('h3').forEach(function(h) {
 				var g = gaps[h.textContent];
 				if (g) h.style.marginTop = g;
