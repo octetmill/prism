@@ -118,8 +118,20 @@ local function stop_probe()
 	os.remove(PROBE_CONFIG)
 end
 
+-- Cooperative lock so concurrent runners cannot race on STATUS / LATENCY /
+-- TMPDIR / the probe instance. OpenWrt's `lock` holds the lock via a
+-- backgrounded helper process that OUTLIVES this runner — it is NOT freed
+-- by the runner exiting, only by `lock -u` (or a reboot, since /var/lock is
+-- tmpfs). So every exit path after we acquire it must call release_lock();
+-- a leaked lock wedges every future run (each one fails `lock -n` and exits).
+-- bail() is the path that historically leaked it: a transient probe-startup
+-- failure left the lock held and froze the hourly auto-test indefinitely.
+local LOCK = "/var/lock/prism-test-all.lock"
+local function release_lock() os.execute("lock -u " .. LOCK .. " 2>/dev/null") end
+
 local function bail(msg)
 	stop_probe()
+	release_lock()
 	log_syslog("err", msg)
 	update_status({
 		running     = false,
@@ -129,17 +141,12 @@ local function bail(msg)
 	os.exit(1)
 end
 
--- Cooperative lock so concurrent runners cannot race on STATUS / LATENCY /
--- TMPDIR / the probe instance. Releases automatically when this process
--- exits (any signal, including SIGKILL), so a previously-killed runner does
--- not jam future runs the way a stale .test-all-status file on its own
--- would. The lock supersedes the status file as the busy gate.
-local LOCK = "/var/lock/prism-test-all.lock"
 os.execute("mkdir -p /var/lock 2>/dev/null")
 if os.execute("lock -n " .. LOCK .. " 2>/dev/null") ~= 0 then
+	-- Could not acquire: another runner owns it. We never held it, so do
+	-- NOT release — just step aside.
 	os.exit(0)
 end
-local function release_lock() os.execute("lock -u " .. LOCK .. " 2>/dev/null") end
 
 -- ─── start ───────────────────────────────────────────────────────────────
 local started_at = os.time()
@@ -235,6 +242,7 @@ end
 local total = #tags
 if total == 0 then
 	stop_probe()
+	release_lock()
 	update_status({
 		running     = false,
 		started_at  = started_at,
