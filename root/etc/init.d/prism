@@ -200,6 +200,13 @@ start_service() {
 		chmod 0700 "$d"
 	done
 
+	# Fix up any subscription whose node_count/status (plain UCI fields in
+	# the /etc/config/prism conffile) survived a reinstall while its
+	# /etc/prism/nodes/<uid>.json did not — see reconcile_subscriptions in
+	# luci.prism. Runs regardless of the `enabled` gate below, so the Nodes
+	# tab is honest even before the user re-enables/re-syncs anything.
+	ubus call luci.prism reconcile_subscriptions '{}' >/dev/null 2>&1
+
 	local enabled config_path mode cfg_warn chk tmp_cfg config_ok level
 
 	config_load prism
