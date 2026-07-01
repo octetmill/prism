@@ -4,7 +4,7 @@
 include $(TOPDIR)/rules.mk
 
 LUCI_TITLE:=LuCI interface for sing-box
-LUCI_DEPENDS:=+luci-base +luci-lib-jsonc +sing-box (>=1.12) +rpcd +uclient-fetch +ca-bundle +lua +libuci-lua +nftables-json
+LUCI_DEPENDS:=+luci-base +luci-lib-jsonc +sing-box (>=1.12) +rpcd +uclient-fetch +ca-bundle +lua +libuci-lua +nftables-json +kmod-nft-tproxy
 LUCI_PKGARCH:=all
 
 PKG_NAME:=luci-app-prism

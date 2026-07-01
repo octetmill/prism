@@ -763,6 +763,7 @@ Declared in `LUCI_DEPENDS` in the Makefile. All packages below must be listed th
 | `lua` | `/usr/bin/lua` 5.1 interpreter — every rpcd handler and helper script (`build-config`, `fetch-catalog`, `luci.prism`) has a `#!/usr/bin/env lua` shebang. Not transitively pulled in by `luci-base` or `luci-lib-jsonc` on apk (those only link `liblua5.1.5`), so it must be declared explicitly. |
 | `libuci-lua` | Lua `uci` binding — `build-config` and `active-watch` do `require "uci"` to read prism's UCI config. Also not transitive through `luci-base` on apk. |
 | `nftables-json` | Provides `/usr/sbin/nft`, used by `firewall.sh` to load the `inet prism` table. The bare name `nftables` is not a real package on 24.10/25.12 — it was split into `nftables-json` (what fw4 uses) and `nftables-nojson`. We pick `-json` because it matches the default install and won't conflict with fw4. |
+| `kmod-nft-tproxy` | Kernel module providing the `tproxy` nftables expression that `firewall.sh` emits for `tproxy`/`tproxy_mixed` inbound mode. `nftables-json` only supplies the userspace `nft` binary — the base OpenWrt install does not pull this kmod in on its own, so `nft -f` fails to load the whole `inet prism` table without it (see `docs/decisions.md`). |
 
 ### Assumed present (do not redeclare)
 

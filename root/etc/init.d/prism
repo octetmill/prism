@@ -349,16 +349,26 @@ start_service() {
 	prism_declare_active_watch
 
 	# Install TPROXY nftables rules + policy routing. No-op for tun mode.
-	[ -x "$FIREWALL" ] && "$FIREWALL" start
+	local firewall_ok=1
+	if [ -x "$FIREWALL" ]; then
+		"$FIREWALL" start || firewall_ok=0
+	fi
 
 	# Managed DNS: hand dnsmasq over to sing-box. The generated config has
 	# already passed `sing-box check`, so the drop-in can be installed
-	# unconditionally; when disabled, clear any stale drop-in.
+	# unconditionally; when disabled, clear any stale drop-in. But if the
+	# TPROXY ruleset failed to load, handing DNS to sing-box would resolve
+	# names (possibly into fake-IP ranges) with no ruleset in place to
+	# redirect the resulting traffic into sing-box — leaving LAN clients
+	# with addresses they can't reach. Keep dnsmasq on its own resolvers
+	# until the firewall step actually succeeds.
 	local managed_dns
 	config_get_bool managed_dns dns managed_dns 1
-	if [ "$managed_dns" = "1" ]; then
+	if [ "$managed_dns" = "1" ] && [ "$firewall_ok" = "1" ]; then
 		install_dns_dropin
 	else
+		[ "$managed_dns" = "1" ] && [ "$firewall_ok" = "0" ] && \
+			prism_log warn "dns: firewall setup failed, keeping dnsmasq on its own resolvers"
 		remove_dns_dropin
 	fi
 
