@@ -1023,6 +1023,33 @@ local function write_nodes_file(uid, nodes)
 	return lib.write_secure(nodes_file(uid), _jsonc.stringify(nodes))
 end
 
+-- Fix up subscription bookkeeping left stale by a reinstall. `/etc/config/prism`
+-- is a conffile and survives a sysupgrade "keep settings" reinstall, but
+-- /etc/prism/nodes/<uid>.json is plain runtime data with no fixed shipped
+-- filename to check against — it cannot be a conffile, and unless the router
+-- was also told to preserve the directory via /etc/sysupgrade.conf, the file
+-- is gone after reinstall while the subscription's `node_count`/`status`
+-- fields (just UCI options) come back untouched. Without this, the Nodes tab
+-- would show a subscription with its old node count and an "ok" status while
+-- zero of its nodes actually exist. Called at every boot (start_service), so
+-- the UI is honest before the user ever opens the tab.
+local function reconcile_subscriptions()
+	local c = uci_cursor()
+	local changed = false
+	c:foreach("prism", "subscription", function(s)
+		local id = s[".name"]
+		local count = tonumber(s.node_count) or 0
+		if count > 0 and not lib.file_exists(nodes_file(id)) then
+			c:set("prism", id, "node_count", "0")
+			c:set("prism", id, "status", "stale")
+			changed = true
+		end
+	end)
+	if changed then c:commit("prism") end
+	c:close()
+	return changed
+end
+
 -- Set of uids for which a current `subscription` UCI section exists. The
 -- subscription's section name IS its uid. A `<uid>.json` whose basename
 -- is not in this set is an orphan (subscription deleted, or hand-edit
@@ -1716,6 +1743,16 @@ local methods = {
 	reload_if_changed = {
 		call = function()
 			return { reloaded = reload_if_config_changed() }
+		end
+	},
+
+	-- Called once by /etc/init.d/prism at every start_service (boot + reload)
+	-- to fix up any subscription whose node_count/status UCI fields survived
+	-- a reinstall while its /etc/prism/nodes/<uid>.json did not. See
+	-- reconcile_subscriptions above.
+	reconcile_subscriptions = {
+		call = function()
+			return { changed = reconcile_subscriptions() }
 		end
 	},
 

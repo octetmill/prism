@@ -275,17 +275,20 @@ printf '%s\n' "$PKG_CONFFILES" > "$APKMETA_DIR/${PKG_NAME}.conffiles"
 # ---------------------------------------------------------------------------
 # Install scripts.
 #
-# post-install / post-upgrade: enable the init script and reload rpcd. The
-# `enable` is essential — this standalone builder does not go through the
-# OpenWrt SDK, so nothing else creates the /etc/rc.d/S95prism symlink. Without
-# it the init script is installed but never invoked at boot and Prism never
-# autostarts.
+# post-install / post-upgrade: register /etc/prism/nodes/ with sysupgrade so
+# a "keep settings" reinstall preserves subscription node data (it can't be a
+# conffile — conffiles compare shipped-file checksums, and these per-subscription
+# files are never shipped by the package), then enable the init script and
+# reload rpcd. The `enable` is essential — this standalone builder does not go
+# through the OpenWrt SDK, so nothing else creates the /etc/rc.d/S95prism
+# symlink. Without it the init script is installed but never invoked at boot
+# and Prism never autostarts.
 #
 # pre-deinstall: stop sing-box and remove the rc.d symlinks so an uninstall
 # leaves nothing running and no dangling /etc/rc.d/S95prism behind.
 
 POST_SCRIPT="$BUILD_DIR/post-install.sh"
-printf '#!/bin/sh\n[ -n "${IPKG_INSTROOT}" ] || {\n\t/etc/init.d/prism enable\n\tservice rpcd reload\n}\n' > "$POST_SCRIPT"
+printf '#!/bin/sh\n[ -n "${IPKG_INSTROOT}" ] || {\n\tgrep -qsF "/etc/prism/nodes/" /etc/sysupgrade.conf || echo "/etc/prism/nodes/" >> /etc/sysupgrade.conf\n\t/etc/init.d/prism enable\n\tservice rpcd reload\n}\n' > "$POST_SCRIPT"
 
 PRERM_SCRIPT="$BUILD_DIR/pre-deinstall.sh"
 printf '#!/bin/sh\n[ -n "${IPKG_INSTROOT}" ] || {\n\t/etc/init.d/prism stop\n\t/etc/init.d/prism disable\n}\n' > "$PRERM_SCRIPT"

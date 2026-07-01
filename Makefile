@@ -25,6 +25,7 @@ endef
 define Package/luci-app-prism/postinst
 #!/bin/sh
 [ -n "$${IPKG_INSTROOT}" ] || {
+	grep -qsF "/etc/prism/nodes/" /etc/sysupgrade.conf || echo "/etc/prism/nodes/" >> /etc/sysupgrade.conf
 	/etc/init.d/prism enable
 	service rpcd reload
 }
