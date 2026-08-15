@@ -433,6 +433,68 @@ end
 -- nested {...} maps; a naive key:value gmatch stops at the first whitespace
 -- inside a quoted name and truncates fields like '🇭🇰 HK1' to '🇭🇰'.
 
+-- Encode a Unicode code point as UTF-8 bytes. Lua 5.1 has no utf8 library
+-- and node names routinely carry non-BMP characters (flag emoji are
+-- regional-indicator pairs in the U+1F1E6-U+1F1FF range, 4-byte UTF-8).
+local function utf8_encode(cp)
+	if cp < 0x80 then
+		return string.char(cp)
+	elseif cp < 0x800 then
+		return string.char(0xC0 + math.floor(cp / 0x40),
+		                    0x80 + (cp % 0x40))
+	elseif cp < 0x10000 then
+		return string.char(0xE0 + math.floor(cp / 0x1000),
+		                    0x80 + (math.floor(cp / 0x40) % 0x40),
+		                    0x80 + (cp % 0x40))
+	else
+		return string.char(0xF0 + math.floor(cp / 0x40000),
+		                    0x80 + (math.floor(cp / 0x1000) % 0x40),
+		                    0x80 + (math.floor(cp / 0x40) % 0x40),
+		                    0x80 + (cp % 0x40))
+	end
+end
+
+-- Single-character YAML double-quoted escapes (YAML 1.1/1.2 core schema),
+-- keyed by the character following the backslash.
+local YAML_SHORT_ESCAPES = {
+	["0"] = "\0",         a = "\7",  b = "\8",   t = "\9",
+	n     = "\10",  v = "\11", f = "\12",  r = "\13",
+	e     = "\27",  ["\\"] = "\\", ['"'] = '"', ["/"] = "/",
+	N     = utf8_encode(0x85),   ["_"] = utf8_encode(0xA0),
+	L     = utf8_encode(0x2028), P = utf8_encode(0x2029),
+}
+
+-- Decode YAML backslash escapes inside a double-quoted scalar's raw content
+-- (outer quotes already stripped). \xXX / \uXXXX / \UXXXXXXXX are hex code
+-- point escapes; everything else is a single-character escape or, for an
+-- unrecognised backslash sequence, the escaped character verbatim.
+local function decode_dq_escapes(s)
+	local out, j, n = {}, 1, #s
+	while j <= n do
+		local c = s:sub(j, j)
+		if c == "\\" and j < n then
+			local esc = s:sub(j + 1, j + 1)
+			if esc == "x" then
+				out[#out + 1] = utf8_encode(tonumber(s:sub(j + 2, j + 3), 16) or 0)
+				j = j + 4
+			elseif esc == "u" then
+				out[#out + 1] = utf8_encode(tonumber(s:sub(j + 2, j + 5), 16) or 0)
+				j = j + 6
+			elseif esc == "U" then
+				out[#out + 1] = utf8_encode(tonumber(s:sub(j + 2, j + 9), 16) or 0)
+				j = j + 10
+			else
+				out[#out + 1] = YAML_SHORT_ESCAPES[esc] or esc
+				j = j + 2
+			end
+		else
+			out[#out + 1] = c
+			j = j + 1
+		end
+	end
+	return table.concat(out)
+end
+
 local function clash_read_quoted(s, i)
 	local q = s:sub(i, i)
 	if q ~= "'" and q ~= '"' then return nil, i end
@@ -446,14 +508,26 @@ local function clash_read_quoted(s, i)
 				out[#out + 1] = "'"
 				j = j + 2
 			else
-				return table.concat(out), j + 1
+				local content = table.concat(out)
+				if q == '"' then content = decode_dq_escapes(content) end
+				return content, j + 1
 			end
+		elseif q == '"' and c == "\\" then
+			-- Keep the escape sequence's backslash+marker verbatim; the hex
+			-- digits that may follow (for \x/\u/\U) are plain characters
+			-- and fall through to the else branch untouched. decode_dq_escapes
+			-- interprets the whole thing once the closing quote is found.
+			out[#out + 1] = c
+			out[#out + 1] = s:sub(j + 1, j + 1)
+			j = j + 2
 		else
 			out[#out + 1] = c
 			j = j + 1
 		end
 	end
-	return table.concat(out), j
+	local content = table.concat(out)
+	if q == '"' then content = decode_dq_escapes(content) end
+	return content, j
 end
 
 local function clash_read_value(s, i)
@@ -652,11 +726,44 @@ local function extract_singbox(body)
 	return nodes
 end
 
+-- Strip optional surrounding quotes from a whole-line-captured scalar value
+-- (block-style "key: value" lines, already sliced out by the caller's line
+-- regex) and decode double-quoted escapes. This does its own quote match
+-- rather than reusing clash_read_quoted because the value is already a
+-- complete, isolated slice with no need to hunt for the terminating quote.
+local function unquote_scalar(v)
+	local dq = v:match('^"(.*)"$')
+	if dq then return decode_dq_escapes(dq) end
+	local sq = v:match("^'(.*)'$")
+	if sq then return (sq:gsub("''", "'")) end
+	return v
+end
+
 -- Clash YAML: the proxies: list, in inline-flow or block style.
+--
+-- Sequence items under `proxies:` are valid YAML at *any* indentation,
+-- including flush with the key itself ("proxies:\n- name: ..."), which is
+-- what several real-world subscription generators emit. The indentation of
+-- the first entry dash seen is recorded as `entry_indent`; only dash lines
+-- at exactly that indentation start a new proxy. A dash line indented
+-- *deeper* than that (e.g. "  - h2" under a block-style "alpn:" list) is a
+-- nested list item, not a new proxy — its value is appended to the pending
+-- list field instead of flushing the entry early.
 local function extract_clash(body)
 	local nodes = {}
 	local in_proxies, fields = false, {}
+	local entry_indent = nil
+	local list_key, list_items = nil, nil
+
+	local function close_list()
+		if list_key and list_items and #list_items > 0 then
+			fields[list_key] = "[" .. table.concat(list_items, ", ") .. "]"
+		end
+		list_key, list_items = nil, nil
+	end
+
 	local function flush()
+		close_list()
 		local ob = build_clash_outbound(fields)
 		if ob and (RESERVED_TAGS[ob.tag] or ob.tag:find("[%c]")) then ob = nil end
 		if ob then
@@ -677,14 +784,38 @@ local function extract_clash(body)
 		end
 		fields = {}
 	end
+
+	-- Store a parsed "key: value" pair. An empty value (e.g. "alpn:" with
+	-- the list on following lines) opens a pending block-style list instead
+	-- of setting the field directly.
+	local function set_field(k, v)
+		if v == "" then
+			close_list()
+			list_key, list_items = k, nil
+		elseif not fields[k] then
+			close_list()
+			fields[k] = unquote_scalar(v)
+		end
+	end
+
 	for line in (body .. "\n"):gmatch("([^\n]*)\n") do
 		if line:match("^proxies%s*:") then
 			in_proxies = true
+			entry_indent = nil
 		elseif in_proxies then
-			if line:match("^%S") then
-				flush(); in_proxies = false
-			elseif line:match("^%s+%-") then
+			local indent  = #line:match("^(%s*)")
+			local is_dash = line:match("^%s*%-")
+
+			if is_dash and entry_indent and indent > entry_indent then
+				-- Nested block-style list item under the pending list_key.
+				local v = line:match("^%s*%-%s*(.-)%s*$")
+				if list_key and v and v ~= "" then
+					list_items = list_items or {}
+					list_items[#list_items + 1] = v
+				end
+			elseif is_dash then
 				flush()
+				entry_indent = entry_indent or indent
 				-- Inline flow form: "  - { name: 'X', type: T, ... }"
 				local inline = line:match("^%s*%-%s*{(.+)}%s*$")
 				if inline then
@@ -693,19 +824,14 @@ local function extract_clash(body)
 					end
 				else
 					-- Block-style dash with first key on the same line.
-					local k, v = line:match("^%s*%-%s*([%a][%w%-_]*)%s*:%s*(.+)$")
-					if k then
-						fields[k] = (v:match('^%s*"(.*)"%s*$')
-						           or v:match("^%s*'(.*)'%s*$")
-						           or v):match("^%s*(.-)%s*$")
-					end
+					local k, v = line:match("^%s*%-%s*([%a][%w%-_]*)%s*:%s*(.-)%s*$")
+					if k then set_field(k, v) end
 				end
+			elseif line:match("^%S") then
+				flush(); in_proxies = false
 			else
-				local k, v = line:match("^%s+([%a][%w%-_]*)%s*:%s*(.+)$")
-				if k and not fields[k] then
-					fields[k] = (v:match('^"(.*)"$') or v:match("^'(.*)'$") or v)
-					            :match("^%s*(.-)%s*$")
-				end
+				local k, v = line:match("^%s+([%a][%w%-_]*)%s*:%s*(.-)%s*$")
+				if k then set_field(k, v) end
 			end
 		end
 	end
