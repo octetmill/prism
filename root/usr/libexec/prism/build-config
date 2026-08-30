@@ -387,6 +387,30 @@ end
 
 -- ─── outbounds (UCI manual nodes + /etc/prism/nodes/*.json subs) ─────────
 
+-- Protocols sing-box carries over QUIC. Their TLS handshake is driven by
+-- sing-quic, which needs a real *crypto/tls.Config and gets it by calling
+-- Config.STDConfig(). The uTLS client config refuses that call outright —
+-- `func (c *UTLSClientConfig) STDConfig() { return nil, E.New("unsupported
+-- usage for uTLS") }` in sing-box common/tls/utls_client.go — so a QUIC
+-- outbound carrying a `tls.utls` block fails *every* dial with
+-- "unsupported usage for uTLS" and is dead weight in a urltest group.
+-- Verified on 25.12 / sing-box 1.13.18: the same hysteria2 node that errors
+-- with the block dials in under a second without it.
+--
+-- Only uTLS is filtered here. REALITY refuses STDConfig() the same way, but
+-- a QUIC+REALITY node cannot be made to work by dropping the block either
+-- (the server expects the REALITY handshake), so its distinct
+-- "unsupported usage for reality" error is left intact as a diagnostic.
+-- ECH is unaffected: ECHClientConfig embeds the underlying config, so
+-- STDConfig() is promoted and still returns a usable std config.
+--
+-- Add any future QUIC-transported protocol here as well as to
+-- prismlib's ALLOWED_PROTOCOLS.
+local QUIC_PROTOCOLS = {
+	hysteria2 = true,
+	tuic      = true,
+}
+
 -- Build the sing-box tls block from individual UCI tls_* fields.
 -- always_on=true for protocols that are unconditionally TLS (trojan, hysteria2, tuic, anytls).
 local function build_tls_from_uci(s, always_on)
@@ -395,7 +419,11 @@ local function build_tls_from_uci(s, always_on)
 	local tls = { enabled = true }
 	if s.tls_sni and s.tls_sni ~= "" then tls.server_name = s.tls_sni end
 	if s.tls_insecure == "1" then tls.insecure = true end
-	if s.tls_fingerprint and s.tls_fingerprint ~= "" then
+	-- nodes.js hides the fingerprint picker for QUIC protocols; the guard
+	-- here also covers a value left behind by an earlier type change or set
+	-- over SSH.
+	if s.tls_fingerprint and s.tls_fingerprint ~= ""
+	   and not QUIC_PROTOCOLS[s.type or ""] then
 		tls.utls = { enabled = true, fingerprint = s.tls_fingerprint }
 	end
 	return tls
@@ -715,6 +743,12 @@ local function sanitize_subscription_node(p)
 	-- the SUB_TLS_KEYS note above.
 	if type(p.tls) == "table" then
 		out.tls = copy_subset(p.tls, SUB_TLS_KEYS)
+		-- Providers do ship `utls` on hysteria2 / tuic nodes (seen in the
+		-- wild on Clash and sing-box subscriptions alike). Over QUIC that
+		-- block turns the node into an outbound that errors on every dial
+		-- — see QUIC_PROTOCOLS. Drop it so the node actually works instead
+		-- of silently poisoning whatever urltest group matches its tag.
+		if QUIC_PROTOCOLS[t] then out.tls.utls = nil end
 	end
 	if type(p.transport) == "table" then
 		out.transport = copy_subset(p.transport, SUB_TRANSPORT_KEYS)

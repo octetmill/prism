@@ -559,8 +559,17 @@ return baseclass.extend({
 
 		// TLS detail fields: always shown for forced-TLS protocols, opt-in
 		// (tls_enabled) for vless / vmess.
+		//
+		// uTLS is the exception: hysteria2 and tuic run over QUIC, whose
+		// handshake path in sing-box rejects a uTLS config outright
+		// ("unsupported usage for uTLS" on every dial), so the fingerprint
+		// picker is not offered for them — build-config drops the block for
+		// those types regardless.
 		[oSni, oInsec, oFp].forEach(function(opt) {
-			depAny(opt, 'type', ['trojan','hysteria2','tuic','anytls']);
+			var forcedTls = (opt === oFp)
+				? ['trojan','anytls']
+				: ['trojan','hysteria2','tuic','anytls'];
+			depAny(opt, 'type', forcedTls);
 			opt.depends({ type: 'vless', tls_enabled: '1' });
 			opt.depends({ type: 'vmess', tls_enabled: '1' });
 		});
