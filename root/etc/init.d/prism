@@ -144,8 +144,12 @@ prism_declare_instance() {
 	procd_set_param respawn
 	procd_set_param stdout 1
 	procd_set_param stderr 1
-	# Watch the generated file so an out-of-band edit makes procd restart it.
-	procd_set_param file "$1"
+	# Watch the generated config plus the sing-box binary. procd restarts the
+	# instance on an out-of-band config edit and, after a package upgrade
+	# swaps /usr/bin/sing-box, the next start_service run (any UCI commit,
+	# WAN-up, manual restart) re-execs the new binary instead of leaving the
+	# pre-upgrade process running. Same `file`-hash trick as active-watch above.
+	procd_set_param file "$1" "$SINGBOX"
 	procd_close_instance
 }
 
@@ -199,6 +203,12 @@ start_service() {
 		mkdir -p "$d"
 		chmod 0700 "$d"
 	done
+
+	# luci.prism caches `sing-box version` in tmpfs to keep the 5s Overview
+	# poll from forking sing-box. Drop it on every (re)start so a package
+	# upgrade's new version is re-detected on the next read — otherwise the
+	# footer shows the pre-upgrade version until a reboot clears tmpfs.
+	rm -f /var/etc/prism/.singbox-version
 
 	# Fix up any subscription whose node_count/status (plain UCI fields in
 	# the /etc/config/prism conffile) survived a reinstall while its
