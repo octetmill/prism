@@ -59,8 +59,15 @@ local PROBE_LOG     = "/var/etc/prism/sing-box-probe.log"
 local PROBE_START_TIMEOUT_S = 15   -- readiness wait for the probe instance
 
 local CONCURRENCY      = 16            -- parallel uclient-fetch processes
-local PROBE_TIMEOUT_MS = 3000          -- per-probe (clash query param)
-local REQ_TIMEOUT_S    = 5             -- uclient-fetch wall clock per probe
+-- Per-probe budget (clash query param) and the uclient-fetch wall clock
+-- around it. The two move together: the fetch must outlive the probe, or
+-- it gives up first and a perfectly good node is recorded as a timeout
+-- with no status to explain it. 3000/5 was too tight — nodes measuring
+-- ~1.7 s idle (distant anytls hops) cleared it alone but not against the
+-- CONCURRENCY-way TLS handshake contention of a real batch, so they
+-- flapped between a latency and "timeout" run to run.
+local PROBE_TIMEOUT_MS = 5000          -- per-probe (clash query param)
+local REQ_TIMEOUT_S    = 8             -- uclient-fetch wall clock per probe
 local TEST_URL         = "http://www.gstatic.com/generate_204"
 
 local function shell_quote(s)
@@ -290,15 +297,37 @@ if raw_cache and raw_cache ~= "" then
 	end
 end
 
+-- ─── classify a probe that produced no body ─────────────────────────────
+-- uclient-fetch drops the response body on any non-2xx status, so the
+-- clash API's own JSON message never reaches us — the status line it
+-- prints on stderr (captured per probe, together with its exit code, by
+-- the batch script below) is the only evidence of what went wrong.
+-- Reporting all of it as "timeout" hid two very different failures: a
+-- node that is merely slow, and a tag the probe instance has never heard
+-- of.
+--   rc 8 → HTTP error status. 404 means the tag is absent from the probe
+--          config — a node removed or renamed after the UI rendered.
+--          504 is the clash API's own probe timeout, the honest one.
+--   rc 4 → no answer at all: either REQ_TIMEOUT_S elapsed before
+--          sing-box replied (still a timeout, just ours) or the loopback
+--          clash API was unreachable.
+local function fetch_error(idx)
+	local err = read_file(TMPDIR .. "/e_" .. tostring(idx)) or ""
+	local rc     = tonumber(err:match("rc=(%d+)"))
+	local status = tonumber(err:match("HTTP error (%d+)"))
+	if status == 404 then return "unknown node" end
+	if status == 504 then return "timeout" end
+	if status       then return "HTTP " .. status end
+	if rc == 4 and err:find("timed out") then return "timeout" end
+	return "probe failed"
+end
+
 -- ─── parse one probe response, return a cache entry ─────────────────────
 local function parse_result(idx)
 	local entry = { tested_at = os.time() }
 	local content = read_file(TMPDIR .. "/r_" .. tostring(idx))
 	if not content or content == "" then
-		-- uclient-fetch suppresses the body on 4xx/5xx, so empty means
-		-- either the tag isn't in the probe config (404 — a node that was
-		-- removed or renamed after the UI rendered) or the probe failed.
-		entry.error = "timeout"
+		entry.error = fetch_error(idx)
 		return entry, "error"
 	end
 	local pok, p = pcall(jsonc.parse, content)
@@ -341,7 +370,11 @@ REQ_TIMEOUT=%d
 sed -n '%d,%dp' "$TMPDIR/urls.txt" > "$TMPDIR/batch.txt"
 PIDS=""
 while IFS=$(printf '\t') read -r idx url; do
-	uclient-fetch --timeout=$REQ_TIMEOUT -qO "$TMPDIR/r_$idx" "$url" 2>/dev/null &
+	# stderr and exit code land in one per-probe file: the status line
+	# ("HTTP error 404") plus rc= are all fetch_error has to work with,
+	# since the body is gone on any non-2xx.
+	( uclient-fetch --timeout=$REQ_TIMEOUT -O "$TMPDIR/r_$idx" "$url" 2>"$TMPDIR/e_$idx"
+	  echo "rc=$?" >> "$TMPDIR/e_$idx" ) &
 	PIDS="$PIDS $!"
 done < "$TMPDIR/batch.txt"
 [ -n "$PIDS" ] && wait $PIDS
