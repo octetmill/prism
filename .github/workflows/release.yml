@@ -97,7 +97,19 @@ jobs:
             echo "Release $TAG does not exist — creating it"
             NOTES_FILE=$(mktemp)
             DL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
-            echo "Release $TAG" | .github/workflows/release-notes.sh \
+            # Lead with GitHub's own "What's Changed" list — the same one the
+            # UI writes into a release created there — so a tag-pushed release
+            # reads like the hand-made ones, then the install instructions.
+            # The endpoint needs only the tag, which is already pushed, and
+            # picks the previous release to diff against. If it fails (a first
+            # release with nothing to compare against, a transient API error)
+            # fall back to the bare header rather than lose the install
+            # commands with it.
+            CHANGELOG=$(gh api -X POST \
+              "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+              -f tag_name="$TAG" --jq .body 2>/dev/null) || CHANGELOG=""
+            [ -n "$CHANGELOG" ] || CHANGELOG="Release $TAG"
+            printf '%s\n' "$CHANGELOG" | .github/workflows/release-notes.sh \
               "${DL}/luci-app-prism-${VERSION}-r${RELEASE}-openwrt-25.12.apk" \
               "${DL}/luci-app-prism_${VERSION}-${RELEASE}_all-openwrt-24.10.ipk" \
               > "$NOTES_FILE"

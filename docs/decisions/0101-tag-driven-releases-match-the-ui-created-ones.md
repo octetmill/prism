@@ -1,4 +1,4 @@
-# Tag-driven releases title the GitHub release with the bare tag, matching the UI-created ones
+# Tag-driven releases match the UI-created ones: bare-tag title, changelog above the install instructions
 
 `release.yml` has two publish paths, and until v0.8.2 only one of them had
 ever run. When the release already exists — created from the GitHub UI,
@@ -17,3 +17,15 @@ indistinguishable from the earlier hand-made ones, and v0.8.2 was renamed
 in place to match. The bare tag wins over the prefixed form because the
 repository already has a decade of releases named that way and the
 repository name is redundant on its own releases page.
+
+The notes had drifted the same way. The UI path left GitHub's generated
+"What's Changed" list in place; the create path passed a bare
+`Release $TAG` header into `release-notes.sh`, so a tag-pushed release
+carried install commands and no changelog at all. It now calls
+`POST /repos/{repo}/releases/generate-notes` for the pushed tag — the
+same endpoint the UI uses, diffing against the previous release — and
+feeds that in as the header, so the changelog leads and the install
+instructions follow. A failure there (a first release with no previous
+tag, a transient API error) falls back to the old bare header rather
+than losing the install commands with it. v0.8.2's published notes were
+rewritten in place to match.
