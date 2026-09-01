@@ -5,7 +5,7 @@
 // not?" without leaving the page.
 //
 // Two distinct concepts, two distinct controls — see the
-// "Enable toggle + transient Stop split" entry in docs/decisions.md:
+// "Enable toggle + transient Stop split" entry in docs/decisions/:
 //
 //   * Enable toggle (persistent, UCI global.enabled) — installs-but-dormant
 //     vs. installed-and-running. Off hides the runtime row entirely; the

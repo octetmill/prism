@@ -198,7 +198,7 @@ conffile, so the package only writes it back when it is absent).
 
 Build instructions, CI layout, and developer conventions live in
 [`CONTRIBUTING.md`](CONTRIBUTING.md). Design rationale for non-obvious
-decisions is in [`docs/decisions.md`](docs/decisions.md).
+decisions is in [`docs/decisions/`](docs/decisions/).
 
 ## License
 
