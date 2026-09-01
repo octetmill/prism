@@ -781,7 +781,7 @@ end
 local function load_subscription_nodes(c, all_ordered, all_map, seen)
 	-- Files are keyed by each subscription's uid, which IS its UCI
 	-- section name (a 16-hex id assigned at create time and persisted by
-	-- libuci on every commit). See docs/decisions.md "Section identity
+	-- libuci on every commit). See docs/decisions/ "Section identity
 	-- is the section name".
 	local valid_subs = {}
 	c:foreach("prism", "subscription", function(s)

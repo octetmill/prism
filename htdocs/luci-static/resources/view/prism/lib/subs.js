@@ -3,7 +3,7 @@
 
 // Subscription display helpers shared by the Nodes / Routing / Status
 // panels. Subscriptions are keyed by their UCI section name — which IS the
-// subscription's uid (see docs/decisions.md "Section identity is the
+// subscription's uid (see docs/decisions/ "Section identity is the
 // section name") and matches what list_outbounds emits in `subscription`.
 // Two subscriptions can carry nodes with identical tags; the label shown
 // in dropdowns must make clear which subscription a tag comes from, and

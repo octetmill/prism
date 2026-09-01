@@ -763,7 +763,7 @@ Declared in `LUCI_DEPENDS` in the Makefile. All packages below must be listed th
 | `lua` | `/usr/bin/lua` 5.1 interpreter — every rpcd handler and helper script (`build-config`, `fetch-catalog`, `luci.prism`) has a `#!/usr/bin/env lua` shebang. Not transitively pulled in by `luci-base` or `luci-lib-jsonc` on apk (those only link `liblua5.1.5`), so it must be declared explicitly. |
 | `libuci-lua` | Lua `uci` binding — `build-config` and `active-watch` do `require "uci"` to read prism's UCI config. Also not transitive through `luci-base` on apk. |
 | `nftables-json` | Provides `/usr/sbin/nft`, used by `firewall.sh` to load the `inet prism` table. The bare name `nftables` is not a real package on 24.10/25.12 — it was split into `nftables-json` (what fw4 uses) and `nftables-nojson`. We pick `-json` because it matches the default install and won't conflict with fw4. |
-| `kmod-nft-tproxy` | Kernel module providing the `tproxy` nftables expression that `firewall.sh` emits for `tproxy`/`tproxy_mixed` inbound mode. `nftables-json` only supplies the userspace `nft` binary — the base OpenWrt install does not pull this kmod in on its own, so `nft -f` fails to load the whole `inet prism` table without it (see `docs/decisions.md`). |
+| `kmod-nft-tproxy` | Kernel module providing the `tproxy` nftables expression that `firewall.sh` emits for `tproxy`/`tproxy_mixed` inbound mode. `nftables-json` only supplies the userspace `nft` binary — the base OpenWrt install does not pull this kmod in on its own, so `nft -f` fails to load the whole `inet prism` table without it (see `docs/decisions/`). |
 
 ### Assumed present (do not redeclare)
 
@@ -940,11 +940,19 @@ and `https://octetmill.github.io/prism/opkg`.
 ## Decisions & Context
 
 The running log of design decisions and solved problems lives in
-[`docs/decisions.md`](docs/decisions.md), to keep this file focused on
-actionable rules.
+[`docs/decisions/`](docs/decisions/), one file per entry, to keep this
+file focused on actionable rules.
 
-**Read `docs/decisions.md` before** reversing a design choice, revisiting
+**Search `docs/decisions/` before** reversing a design choice, revisiting
 a settled question, or making a non-obvious architectural decision —
 many issues have already been worked through and the rationale is
-recorded there. Append a new entry whenever a non-obvious choice is made
-or a tricky problem is resolved.
+recorded there. `grep -rl '<keyword>' docs/decisions/` finds the relevant
+entries; each is small enough to read whole.
+
+Whenever a non-obvious choice is made or a tricky problem is resolved,
+add a **new file** — `docs/decisions/NNNN-slug.md`, next free number, a
+`# <what was done>` heading followed by the why. Never append to an
+existing entry file, and never add an index: a shared file is exactly
+what this layout removes, because two branches appending to one both
+touch the same anchor and conflict every time
+(see [`docs/decisions/README.md`](docs/decisions/README.md)).

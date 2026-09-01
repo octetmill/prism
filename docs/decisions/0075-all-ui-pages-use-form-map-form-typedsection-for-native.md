@@ -1,0 +1,3 @@
+# All UI pages use `form.Map` / `form.TypedSection` for native UCI management
+
+Every page that reads or writes user configuration now uses LuCI's form framework. `form.Map` / `form.TypedSection` auto-generate Save / Save & Apply / Reset buttons and write directly to UCI — no custom CRUD RPCs needed. `handleSaveApply` is overridden on each page to call the `reload` RPC after UCI is committed. This removed ~12 obsolete RPC methods from `luci.prism` (save_outbound, delete_outbound, save_rule, delete_rule, reorder_rules, get_routing, save_routing_settings, add/edit/delete/set_enabled_subscription, list_subscriptions, reorder_subscriptions).

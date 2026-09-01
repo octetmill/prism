@@ -1,0 +1,3 @@
+# The GridSection panels' Reset button does a global revert
+
+`formpanel.resetGrid` did `uci.unload('prism')` + remount, which only discards *un-saved, in-memory* edits. But a GridSection edit is flushed to the backend change-staging the moment its modal is saved — the modal's Save calls `m.save()` → `uci.save()` — so by the time the panel-level Reset runs there is nothing un-saved to drop and it silently did nothing (only LuCI's global Changes-window Revert cleared staged changes). `resetGrid` now delegates to `ui.changes.revert()`, the same operation as that window. Prism only ever edits the `prism` config, so a global revert and a per-panel reset clear the same set; `formpanel.js` no longer needs the `uci` import.

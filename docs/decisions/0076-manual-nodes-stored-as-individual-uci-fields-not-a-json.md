@@ -1,0 +1,3 @@
+# Manual nodes stored as individual UCI fields, not a JSON payload blob
+
+UCI `node` sections store each protocol field separately (uuid, password, transport_type, tls_sni, etc.) rather than a `payload` JSON blob. `build-config` reconstructs the sing-box outbound JSON from these fields via `build_node_from_uci()`. This keeps all user data editable as plain UCI, makes `uci show prism` readable, and removes the need for JSON round-trips in the rpcd handler. Subscription nodes (from remote URLs, potentially hundreds) still use a `payload` blob in their JSON files since they are fetched externally and not hand-edited.

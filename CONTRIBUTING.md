@@ -3,8 +3,8 @@
 Thanks for poking at the code. This file covers building and the
 repository layout. For the project's conventions and design rationale,
 read [`CLAUDE.md`](CLAUDE.md) (style, package structure, LuCI/rpcd
-patterns) and [`docs/decisions.md`](docs/decisions.md) (the running log
-of non-obvious choices — check it before reversing one).
+patterns) and [`docs/decisions/`](docs/decisions/) (the running log of
+non-obvious choices, one file per entry — check it before reversing one).
 
 ## Building from source
 

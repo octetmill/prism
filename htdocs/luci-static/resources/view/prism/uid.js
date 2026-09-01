@@ -5,7 +5,7 @@
 // NAME for every anonymous UCI section type in /etc/config/prism. The
 // section name itself is the stable id — there is no parallel `uid` UCI
 // option to keep in sync, and libuci's volatile cfgXXXX is never minted
-// for prism sections. See docs/decisions.md ("Section identity is the
+// for prism sections. See docs/decisions/ ("Section identity is the
 // section name") for the rationale.
 
 'use strict';
