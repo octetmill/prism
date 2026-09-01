@@ -104,7 +104,7 @@ jobs:
             gh release create "$TAG" \
               dist/*-openwrt-25.12.apk dist/*-openwrt-25.12.apk.sha256 \
               dist/*-openwrt-24.10.ipk dist/*-openwrt-24.10.ipk.sha256 \
-              --title "luci-app-prism $TAG" \
+              --title "$TAG" \
               --notes-file "$NOTES_FILE" \
               --latest
           fi
