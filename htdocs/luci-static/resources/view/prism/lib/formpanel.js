@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Copyright (C) 2026 OctetMill
+// Copyright (C) 2026 RouteWeave
 
 // Shared Save / Save & Apply / Reset logic for the form.Map-backed panels.
 // LuCI's require() hands back a singleton instance, not an extendable class,

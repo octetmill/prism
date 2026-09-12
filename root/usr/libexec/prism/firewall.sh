@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-3.0-only
-# Copyright (C) 2026 OctetMill
+# Copyright (C) 2026 RouteWeave
 #
 # Prism firewall integration for TPROXY inbound.
 #

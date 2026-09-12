@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-3.0-only
-# Copyright (C) 2026 OctetMill
+# Copyright (C) 2026 RouteWeave
 #
 # Hourly maintenance tick. Drives subscription auto-update and the periodic
 # latency test; each task decides for itself whether its interval has

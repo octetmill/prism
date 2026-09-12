@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-only
-# Copyright (C) 2026 OctetMill
+# Copyright (C) 2026 RouteWeave
 #
 # Shared shell helpers for Prism's scripts (/etc/init.d/prism and
 # firewall.sh). POSIX sh — sourced, not executed.

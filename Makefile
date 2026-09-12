@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-only
-# Copyright (C) 2026 OctetMill
+# Copyright (C) 2026 RouteWeave
 
 include $(TOPDIR)/rules.mk
 
@@ -10,10 +10,10 @@ LUCI_PKGARCH:=all
 PKG_NAME:=luci-app-prism
 PKG_VERSION:=0.9.0
 PKG_RELEASE:=1
-PKG_MAINTAINER:=OctetMill
+PKG_MAINTAINER:=RouteWeave
 PKG_LICENSE:=GPL-3.0-only
 PKG_LICENSE_FILES:=LICENSE
-PKG_URL:=https://github.com/octetmill/prism
+PKG_URL:=https://github.com/routeweave/prism
 
 include $(TOPDIR)/feeds/luci/luci.mk
 

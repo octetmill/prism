@@ -1,6 +1,6 @@
 #!/usr/bin/env lua
 -- SPDX-License-Identifier: GPL-3.0-only
--- Copyright (C) 2026 OctetMill
+-- Copyright (C) 2026 RouteWeave
 
 -- build-config: assembles the sing-box JSON config from Prism's UCI state
 -- and per-subscription node files in /etc/prism/nodes/, then writes it to

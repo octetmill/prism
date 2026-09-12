@@ -1,6 +1,6 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-3.0-only
-# Copyright (C) 2026 OctetMill
+# Copyright (C) 2026 RouteWeave
 #
 # One-time helper: mint the two signing keypairs the Prism package feed
 # needs, write the PUBLIC keys into the repo (feed/keys/), and print the
@@ -41,7 +41,7 @@ chmod 700 "$SEC_DIR"
 usign -G \
 	-s "$SEC_DIR/prism-feed.sec" \
 	-p "$PUB_DIR/prism-feed.pub" \
-	-c "Prism package feed (octetmill/prism)"
+	-c "Prism package feed (routeweave/prism)"
 
 # --- EC prime256v1 (apk v3) -------------------------------------------------
 # apk mkndx --sign-key takes the private key; the public half goes in

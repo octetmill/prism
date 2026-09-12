@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Copyright (C) 2026 OctetMill
+// Copyright (C) 2026 RouteWeave
 
 // Status tab: the dashboard. Answers "is it working?" at a glance and "why
 // not?" without leaving the page.

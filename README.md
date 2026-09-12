@@ -44,17 +44,17 @@ you import its public key the first time.
 **OpenWrt 25.12+** (apk):
 
 ```sh
-wget -O /etc/apk/keys/prism-feed.pem https://octetmill.github.io/prism/keys/prism-feed.pem
-echo "https://octetmill.github.io/prism/apk/Packages.adb" >> /etc/apk/repositories.d/customfeeds.list
+wget -O /etc/apk/keys/prism-feed.pem https://routeweave.github.io/prism/keys/prism-feed.pem
+echo "https://routeweave.github.io/prism/apk/Packages.adb" >> /etc/apk/repositories.d/customfeeds.list
 apk update && apk add luci-app-prism && service rpcd reload
 ```
 
 **OpenWrt 24.10** (opkg):
 
 ```sh
-wget -O /tmp/prism-feed.pub https://octetmill.github.io/prism/keys/prism-feed.pub
+wget -O /tmp/prism-feed.pub https://routeweave.github.io/prism/keys/prism-feed.pub
 opkg-key add /tmp/prism-feed.pub
-echo "src/gz prism https://octetmill.github.io/prism/opkg" >> /etc/opkg/customfeeds.conf
+echo "src/gz prism https://routeweave.github.io/prism/opkg" >> /etc/opkg/customfeeds.conf
 opkg update && opkg install luci-app-prism && service rpcd reload
 ```
 
@@ -66,7 +66,7 @@ opkg update && opkg upgrade luci-app-prism   # 24.10
 ```
 
 The feed indexes every tagged release; see
-<https://octetmill.github.io/prism/> for the live instructions.
+<https://routeweave.github.io/prism/> for the live instructions.
 
 ### Tagged release
 
@@ -103,13 +103,13 @@ The snapshot URL is stable — the same one-liner installs and upgrades.
 **OpenWrt 25.12+** (APK):
 
 ```sh
-wget -O /tmp/prism.apk https://github.com/octetmill/prism/releases/download/snapshot/luci-app-prism-snapshot.apk && apk add --allow-untrusted /tmp/prism.apk && service rpcd reload
+wget -O /tmp/prism.apk https://github.com/routeweave/prism/releases/download/snapshot/luci-app-prism-snapshot.apk && apk add --allow-untrusted /tmp/prism.apk && service rpcd reload
 ```
 
 **OpenWrt 24.10** (opkg):
 
 ```sh
-wget -O /tmp/prism.ipk https://github.com/octetmill/prism/releases/download/snapshot/luci-app-prism-snapshot.ipk && opkg install /tmp/prism.ipk && service rpcd reload
+wget -O /tmp/prism.ipk https://github.com/routeweave/prism/releases/download/snapshot/luci-app-prism-snapshot.ipk && opkg install /tmp/prism.ipk && service rpcd reload
 ```
 
 ### On iStoreOS and other OpenWrt forks

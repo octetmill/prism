@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Copyright (C) 2026 OctetMill
+// Copyright (C) 2026 RouteWeave
 
 // Generate a 16-hex-char (64-bit) random identifier used as the section
 // NAME for every anonymous UCI section type in /etc/config/prism. The

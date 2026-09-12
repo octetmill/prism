@@ -1,6 +1,6 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-3.0-only
-# Copyright (C) 2026 OctetMill
+# Copyright (C) 2026 RouteWeave
 #
 # Builds APK and IPK packages for luci-app-prism.
 # Runs on Linux with GNU coreutils — not on the router. (Router scripts

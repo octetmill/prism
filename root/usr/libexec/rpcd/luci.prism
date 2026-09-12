@@ -1,6 +1,6 @@
 #!/usr/bin/env lua
 -- SPDX-License-Identifier: GPL-3.0-only
--- Copyright (C) 2026 OctetMill
+-- Copyright (C) 2026 RouteWeave
 
 -- luci.jsonc (from luci-lib-jsonc) is required for argument parsing.
 -- Load it lazily so that a missing module doesn't crash the list command:

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Copyright (C) 2026 OctetMill
+// Copyright (C) 2026 RouteWeave
 
 // Single-page host view. Prism is one menu entry; every former page is a
 // panel mounted lazily into one cbi-map. This keeps the "Prism" title above

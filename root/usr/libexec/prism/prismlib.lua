@@ -1,5 +1,5 @@
 -- SPDX-License-Identifier: GPL-3.0-only
--- Copyright (C) 2026 OctetMill
+-- Copyright (C) 2026 RouteWeave
 --
 -- Shared helpers and constants for Prism's Lua scripts (build-config, the
 -- rpcd handler luci.prism, test-all-runner and active-watch). Loaded via

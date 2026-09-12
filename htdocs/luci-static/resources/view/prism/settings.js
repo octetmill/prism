@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Copyright (C) 2026 OctetMill
+// Copyright (C) 2026 RouteWeave
 
 // Settings tab: every UCI-backed configuration option lives here, on one
 // scroll page. The form is divided into Basic (always visible) and Advanced

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Copyright (C) 2026 OctetMill
+// Copyright (C) 2026 RouteWeave
 
 // Per-row subscription Sync button handler shared by the Nodes and Basic
 // panels — both render the same Sync column over the same UCI sections,

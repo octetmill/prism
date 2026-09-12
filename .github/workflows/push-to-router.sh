@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-3.0-only
-# Copyright (C) 2026 OctetMill
+# Copyright (C) 2026 RouteWeave
 #
 # Download the latest snapshot APK from GitHub Actions and push it to a router.
 #
@@ -41,7 +41,7 @@ gh auth status >/dev/null 2>&1 || die "not logged in — run: gh auth login"
 
 printf '==> Fetching latest snapshot from GitHub Actions...\n'
 RUN_ID=$(gh run list \
-    --repo octetmill/prism \
+    --repo routeweave/prism \
     --workflow snapshot.yml \
     --status success \
     --limit 1 \
@@ -54,7 +54,7 @@ DL_DIR="$REPO_DIR/.build/download"
 rm -rf "$DL_DIR"
 mkdir -p "$DL_DIR"
 
-gh run download "$RUN_ID" --repo octetmill/prism --dir "$DL_DIR"
+gh run download "$RUN_ID" --repo routeweave/prism --dir "$DL_DIR"
 
 # gh run download places files under <dir>/<artifact-name>/
 APK=$(find "$DL_DIR" -name 'luci-app-prism-*.apk' | LC_ALL=C sort | tail -1)

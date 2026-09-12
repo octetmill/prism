@@ -1,6 +1,6 @@
 #!/usr/bin/env lua
 -- SPDX-License-Identifier: GPL-3.0-only
--- Copyright (C) 2026 OctetMill
+-- Copyright (C) 2026 RouteWeave
 --
 -- Active-node watcher — long-running daemon that polls sing-box's clash API
 -- at /proxies every POLL_S seconds and logs to syslog whenever the currently

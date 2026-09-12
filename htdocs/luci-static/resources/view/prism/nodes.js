@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Copyright (C) 2026 OctetMill
+// Copyright (C) 2026 RouteWeave
 
 // Nodes tab: subscriptions on top, manually-configured nodes below.
 // "Node" is the user-facing noun for what sing-box calls an outbound — it

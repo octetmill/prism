@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Copyright (C) 2026 OctetMill
+// Copyright (C) 2026 RouteWeave
 
 // Subscription display helpers shared by the Nodes / Routing / Status
 // panels. Subscriptions are keyed by their UCI section name — which IS the

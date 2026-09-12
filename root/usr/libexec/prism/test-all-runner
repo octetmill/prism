@@ -1,6 +1,6 @@
 #!/usr/bin/env lua
 -- SPDX-License-Identifier: GPL-3.0-only
--- Copyright (C) 2026 OctetMill
+-- Copyright (C) 2026 RouteWeave
 --
 -- Background runner for the Nodes panel's latency tests (per-row Test,
 -- "Test all", and the per-subscription batch).

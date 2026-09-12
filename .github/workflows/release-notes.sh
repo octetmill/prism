@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-3.0-only
-# Copyright (C) 2026 OctetMill
+# Copyright (C) 2026 RouteWeave
 #
 # Emit the release-notes body shared by snapshot.yml and release.yml:
 # header lines from stdin first, then the APK / IPK install instructions

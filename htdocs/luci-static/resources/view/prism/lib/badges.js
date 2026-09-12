@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Copyright (C) 2026 OctetMill
+// Copyright (C) 2026 RouteWeave
 
 // Latency badge rendering shared by the Nodes panel (Latency column, the
 // subscription-nodes modal) and the Status panel (Groups column), so the

@@ -3,7 +3,7 @@ name: Snapshot
 # Every push to a non-main branch builds a snapshot and replaces the asset
 # on the rolling "snapshot" GitHub pre-release. Stable install URL:
 #
-#   https://github.com/octetmill/prism/releases/download/snapshot/luci-app-prism-snapshot.apk
+#   https://github.com/routeweave/prism/releases/download/snapshot/luci-app-prism-snapshot.apk
 #
 # The APK/IPK version inside the package is <last-v*-tag>_git<N>-r<R>
 # (N = commits since the tag), so each commit produces a unique,

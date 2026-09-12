@@ -1,6 +1,6 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-3.0-only
-# Copyright (C) 2026 OctetMill
+# Copyright (C) 2026 RouteWeave
 #
 # Assembles the Prism package feed — an OpenWrt-style repository a router
 # can add and then `update` / `install` / `upgrade` from. Output tree:
@@ -24,7 +24,7 @@
 #   FEED_SRC_DIR      pre-populated dir of *.apk/*.ipk; skips the gh
 #                     download (for local testing)              (optional)
 #   PAGES_URL         absolute feed URL baked into index.html
-#                     (default https://octetmill.github.io/prism)
+#                     (default https://routeweave.github.io/prism)
 #
 # Requirements: apk (apk-tools 3.x, for mkndx), usign, gzip, tar, ar,
 # sha256sum, awk, find; gh (only when FEED_SRC_DIR is unset).
@@ -37,7 +37,7 @@ for cmd in apk usign gzip tar ar sha256sum awk find; do require_cmd "$cmd"; done
 
 REPO_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 FEED_OUT="${FEED_OUT:-$REPO_DIR/public}"
-PAGES_URL="${PAGES_URL:-https://octetmill.github.io/prism}"
+PAGES_URL="${PAGES_URL:-https://routeweave.github.io/prism}"
 KEYS_SRC="$REPO_DIR/feed/keys"
 
 [ -n "${APK_SIGN_KEY_FILE:-}" ] && [ -f "$APK_SIGN_KEY_FILE" ] || die "APK_SIGN_KEY_FILE not set or missing"
@@ -194,7 +194,7 @@ cat > "$FEED_OUT/index.html" <<HTML
 <body>
 <h1>Prism package feed</h1>
 <p>An OpenWrt-style repository for
-<a href="https://github.com/octetmill/prism">luci-app-prism</a>.
+<a href="https://github.com/routeweave/prism">luci-app-prism</a>.
 Add it once, then install and upgrade Prism with your package manager.</p>
 
 <h2>OpenWrt 25.12+ (apk)</h2>
