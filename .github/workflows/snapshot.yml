@@ -1,0 +1,98 @@
+name: Snapshot
+
+# Every push to a non-main branch builds a snapshot and replaces the asset
+# on the rolling "snapshot" GitHub pre-release. Stable install URL:
+#
+#   https://github.com/octetmill/prism/releases/download/snapshot/luci-app-prism-snapshot.apk
+#
+# The APK/IPK version inside the package is <last-v*-tag>_git<N>-r<R>
+# (N = commits since the tag), so each commit produces a unique,
+# monotonically-increasing version that `apk upgrade` correctly recognises
+# as newer — and stays bounded between the previous and next release.
+
+on:
+  push:
+    branches-ignore:
+      - main
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - '.github/workflows/release.yml'
+  workflow_dispatch:
+
+# Serialise snapshot builds: a newer push supersedes an in-flight one, so the
+# rolling snapshot release and the moving `snapshot` tag never race.
+concurrency:
+  group: snapshot
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # update the rolling snapshot release
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # needed for git rev-list / describe
+
+      - name: Install apk-tools
+        uses: ./.github/actions/install-apk-tools
+
+      - name: Build packages
+        run: .github/workflows/package.sh
+
+      - name: Stage snapshot assets with stable filenames
+        id: stage
+        run: |
+          mkdir -p snapshot
+          APK_SRC=$(ls dist/*.apk | head -n1)
+          IPK_SRC=$(ls dist/*.ipk | head -n1)
+          BUILT_VER=$(basename "$APK_SRC" .apk | sed 's/^luci-app-prism-//')
+          echo "built_version=${BUILT_VER}" >> "$GITHUB_OUTPUT"
+          cp "$APK_SRC"           snapshot/luci-app-prism-snapshot.apk
+          cp "${APK_SRC}.sha256"  snapshot/luci-app-prism-snapshot.apk.sha256
+          cp "$IPK_SRC"           snapshot/luci-app-prism-snapshot.ipk
+          cp "${IPK_SRC}.sha256"  snapshot/luci-app-prism-snapshot.ipk.sha256
+
+      - name: Publish to rolling snapshot pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUILT_VERSION: ${{ steps.stage.outputs.built_version }}
+        run: |
+          TAG="snapshot"
+          NOTES_FILE=$(mktemp)
+          DL="https://github.com/${GITHUB_REPOSITORY}/releases/download/snapshot"
+          .github/workflows/release-notes.sh \
+            "${DL}/luci-app-prism-snapshot.apk" \
+            "${DL}/luci-app-prism-snapshot.ipk" \
+            > "$NOTES_FILE" <<EOF
+          Rolling snapshot — replaced on every commit to a non-main branch.
+
+          **Built version:** \`${BUILT_VERSION}\`
+          **Commit:** \`${GITHUB_SHA}\`
+          **Branch:** \`${GITHUB_REF_NAME}\`
+          EOF
+
+          # The "snapshot" tag is non-semantic and moves to the current commit
+          # on every build. Force-update is intentional here.
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -f "$TAG"
+          git push origin "$TAG" --force
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" \
+              --title "Snapshot — ${BUILT_VERSION}" \
+              --notes-file "$NOTES_FILE" \
+              --prerelease \
+              --target "${GITHUB_SHA}"
+            gh release upload "$TAG" snapshot/* --clobber
+          else
+            gh release create "$TAG" snapshot/* \
+              --title "Snapshot — ${BUILT_VERSION}" \
+              --notes-file "$NOTES_FILE" \
+              --prerelease \
+              --target "${GITHUB_SHA}"
+          fi

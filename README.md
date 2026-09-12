@@ -1,0 +1,212 @@
+# Prism
+
+A LuCI web UI for [sing-box](https://sing-box.sagernet.org/) on OpenWrt.
+Manage subscriptions, routing, rule-sets, and DNS from the router admin
+page — no JSON to hand-edit.
+
+<!--
+  TODO: drop a screenshot at docs/screenshot.png and uncomment:
+  ![Prism dashboard](docs/screenshot.png)
+-->
+
+## Features
+
+- **One LuCI page** at *Services → Prism*. A Basic/Advanced toggle in
+  the tab bar swaps between a tight surface (Status + Basic) and the
+  full one (Status, Nodes, Routing, Settings). Switching is
+  non-destructive — your Advanced config stays on disk.
+- **Subscriptions and manual nodes.** Fetch and refresh remote node
+  lists; hand-add nodes for VLESS, VMess, Trojan, Shadowsocks,
+  Hysteria2, TUIC, AnyTLS, WireGuard, and SOCKS.
+- **Selectors and urltest groups.** Pick servers manually or let Prism
+  pick the fastest; per-node latency testing is built in.
+- **Routing rules with AND/OR conditions** — domain match, IP/CIDR,
+  rule-set, protocol, port. Each rule has its own outbound.
+- **Rule-set management.** Local sources, scheduled refresh, generated
+  config plumbing.
+- **DNS** with multiple upstreams, fake-IP, and per-rule resolution.
+- **Transparent capture** in TProxy or TUN mode, on the router itself.
+- **Safe applies.** `sing-box check` runs before every restart; a
+  broken save keeps the running config alive.
+- **UCI-backed.** All settings live in `/etc/config/prism`; the
+  sing-box JSON is generated on save.
+
+## Install
+
+SSH into the router, then paste one of the commands below.
+
+### From the Prism feed (recommended)
+
+Add the Prism package feed once and your package manager handles
+install *and* upgrades — no chasing release URLs. The feed is signed;
+you import its public key the first time.
+
+**OpenWrt 25.12+** (apk):
+
+```sh
+wget -O /etc/apk/keys/prism-feed.pem https://octetmill.github.io/prism/keys/prism-feed.pem
+echo "https://octetmill.github.io/prism/apk/Packages.adb" >> /etc/apk/repositories.d/customfeeds.list
+apk update && apk add luci-app-prism && service rpcd reload
+```
+
+**OpenWrt 24.10** (opkg):
+
+```sh
+wget -O /tmp/prism-feed.pub https://octetmill.github.io/prism/keys/prism-feed.pub
+opkg-key add /tmp/prism-feed.pub
+echo "src/gz prism https://octetmill.github.io/prism/opkg" >> /etc/opkg/customfeeds.conf
+opkg update && opkg install luci-app-prism && service rpcd reload
+```
+
+Later, upgrade in place:
+
+```sh
+apk update && apk add -u luci-app-prism      # 25.12+
+opkg update && opkg upgrade luci-app-prism   # 24.10
+```
+
+The feed indexes every tagged release; see
+<https://octetmill.github.io/prism/> for the live instructions.
+
+### Tagged release
+
+The [latest release](../../releases/latest) page has a copy-paste
+one-liner with the version baked in — open it, copy the install
+command from the notes, paste it on the router. The shape is:
+
+**OpenWrt 25.12+** (APK):
+
+```sh
+wget -O /tmp/prism.apk <release-asset-url> && apk add --allow-untrusted /tmp/prism.apk && service rpcd reload
+```
+
+**OpenWrt 24.10** (opkg):
+
+```sh
+wget -O /tmp/prism.ipk <release-asset-url> && opkg install /tmp/prism.ipk && service rpcd reload
+```
+
+Then open `http://<router>/cgi-bin/luci/admin/services/prism` and add
+your first subscription from the **Basic** tab (or **Nodes** in
+Advanced mode).
+
+### Snapshot (bleeding edge)
+
+> **Warning.** Snapshots are rebuilt on every commit to `main`. They
+> are not stability-tested, may include half-finished features, and
+> can change UCI shape or behaviour without notice. Use them to track
+> upcoming changes or to verify a fix; prefer a tagged release for
+> anything you depend on.
+
+The snapshot URL is stable — the same one-liner installs and upgrades.
+
+**OpenWrt 25.12+** (APK):
+
+```sh
+wget -O /tmp/prism.apk https://github.com/octetmill/prism/releases/download/snapshot/luci-app-prism-snapshot.apk && apk add --allow-untrusted /tmp/prism.apk && service rpcd reload
+```
+
+**OpenWrt 24.10** (opkg):
+
+```sh
+wget -O /tmp/prism.ipk https://github.com/octetmill/prism/releases/download/snapshot/luci-app-prism-snapshot.ipk && opkg install /tmp/prism.ipk && service rpcd reload
+```
+
+### On iStoreOS and other OpenWrt forks
+
+iStoreOS is a downstream OpenWrt distribution; its active branch,
+`istoreos-24.10`, is OpenWrt **24.10** with **opkg / IPK**. Use the
+**OpenWrt 24.10 (opkg)** instructions above unchanged — no
+iStoreOS-specific build exists or is needed. Run `opkg update` first: the
+24.10 feed it inherits ships sing-box 1.12.x (well past Prism's `≥1.12`
+floor), and fw4/nftables is present by default. The same reasoning
+applies to other 24.10-based forks; a 25.12-based fork would use the apk
+instructions.
+
+One caveat unique to these forks: they make one-click proxy tools
+(OpenClash, PassWall, ShellCrash, …) easy to install, and each manages
+its own nftables redirect/TPROXY rules. Running one of those *and* Prism's
+transparent capture at the same time will conflict at runtime. Enable only
+one. Prism's rules live in their own table, so you can see what is loaded
+with `nft list table inet prism`.
+
+## Requirements
+
+- OpenWrt **24.10** or **25.12+** (including forks such as iStoreOS —
+  see above).
+- **sing-box ≥ 1.12** (pulled in as a dependency).
+- **nftables.** Prism installs its own `inet prism` table via `nft`;
+  iptables / fw3 are not supported. Both 24.10 and 25.12 ship
+  fw4/nftables by default, so a stock install already qualifies.
+
+Everything else (`luci-base`, `luci-lib-jsonc`, `rpcd`,
+`uclient-fetch`, `ca-bundle`, `lua`, `libuci-lua`, `nftables-json`) is
+pulled in automatically.
+
+## Upgrade and uninstall
+
+Re-running the install one-liner replaces the package in place.
+`/etc/config/prism` is marked as a conffile, so your settings survive
+upgrades.
+
+To remove:
+
+```sh
+apk del luci-app-prism            # OpenWrt 25.12+
+opkg remove luci-app-prism        # OpenWrt 24.10
+```
+
+The service stops and the package is removed; `/etc/config/prism` is
+preserved unless you also `rm` it.
+
+## Troubleshooting
+
+**Logs.** Status tab → *View full log*, or from a shell:
+
+```sh
+logread -e prism
+logread -e sing-box
+```
+
+**Generated sing-box config.** Status tab → *View generated config*,
+or:
+
+```sh
+cat /var/etc/prism/sing-box.json
+```
+
+**Service won't start.** Prism runs `sing-box check` before every
+restart and refuses to swap in a broken config — the previous one keeps
+running. The rejection reason shows up in the Prism log.
+
+**Stop without uninstalling.** Status tab → *Stop*, and toggle
+*Autostart* off to keep it from coming back on reboot.
+
+**Reset to defaults.**
+
+```sh
+rm /etc/config/prism
+apk add --force-overwrite --allow-untrusted /tmp/prism.apk
+# 24.10:
+# opkg install --force-reinstall /tmp/prism.ipk
+```
+
+Reinstalling restores the shipped default `/etc/config/prism` (it is a
+conffile, so the package only writes it back when it is absent).
+
+## Contributing
+
+Build instructions, CI layout, and developer conventions live in
+[`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+## License
+
+GPL-3.0-only — see [`LICENSE`](LICENSE) for the full text.
+
+The packaged `.apk` / `.ipk` runs a comment-stripping pass over the
+source on its way into the install tree, so the on-router copy is
+about half the size of the repo source. The `SPDX-License-Identifier`
+and `Copyright` headers are preserved on every installed file, and the
+package's `license:` metadata field records `GPL-3.0-only`. The repo
+source is the canonical, fully-commented form — clone the repo to read
+the code with its design notes intact.
