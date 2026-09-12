@@ -704,6 +704,11 @@ local SUB_TRANSPORT_KEYS = {
 	"type", "path", "host", "headers", "method", "service_name",
 	"idle_timeout", "ping_timeout", "max_early_data", "early_data_header_name",
 	"permit_without_stream",
+	-- Marker set by prismlib's map_xhttp_transport on a node that was an
+	-- XHTTP/stream-one node upstream. It must survive this copy so the
+	-- padding header can be regenerated below; apply_xhttp_padding clears
+	-- it, so it never reaches the emitted config.
+	"_xhttp",
 }
 local SUB_OBFS_KEYS  = { "type", "password" }
 local SUB_PEER_KEYS  = { "address", "port", "public_key", "pre_shared_key", "allowed_ips", "reserved" }
@@ -764,6 +769,10 @@ local function sanitize_subscription_node(p)
 			return nil
 		end
 		out.transport = copy_subset(p.transport, SUB_TRANSPORT_KEYS)
+		-- Mapped XHTTP nodes get a freshly-rolled x_padding on every build
+		-- rather than one frozen into the node file at sync time. Clears
+		-- the marker, and is a no-op for every other transport.
+		lib.apply_xhttp_padding(out.transport)
 	end
 	if type(p.obfs) == "table" then
 		out.obfs = copy_subset(p.obfs, SUB_OBFS_KEYS)

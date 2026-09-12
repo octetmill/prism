@@ -205,6 +205,11 @@ end
 local function build_transport_from_query(q)
 	local t = (q.type or "tcp"):lower()
 	if t == "" or t == "tcp" or t == "raw" then return nil end
+	-- XHTTP is not a sing-box transport, but its stream-one mode is the
+	-- same wire shape as sing-box's `http`; map it instead of rejecting.
+	if t == "xhttp" then
+		return lib.map_xhttp_transport(q.path, q.host, q.mode)
+	end
 	if not lib.SUPPORTED_TRANSPORTS[t] and t ~= "h2" then
 		return nil, "transport '" .. t .. "' is not supported by sing-box"
 	end
@@ -280,7 +285,11 @@ local function parse_proxy_uri(line)
 			security    = (type(o.scy) == "string" and o.scy ~= "" and o.scy) or "auto"
 		}
 		local net = (type(o.net) == "string" and o.net or "tcp"):lower()
-		if net ~= "" and net ~= "tcp" and net ~= "raw"
+		if net == "xhttp" then
+			local tr, reason = lib.map_xhttp_transport(o.path, o.host, o.mode)
+			if not tr then return nil, tag .. ": " .. reason end
+			ob.transport = tr
+		elseif net ~= "" and net ~= "tcp" and net ~= "raw"
 		   and not lib.SUPPORTED_TRANSPORTS[net] and net ~= "h2" then
 			return nil, tag .. ": transport '" .. net .. "' is not supported by sing-box"
 		end
@@ -632,6 +641,12 @@ end
 local function build_clash_transport(fields)
 	local net = (fields["network"] or ""):lower()
 	if net == "" or net == "tcp" or net == "raw" then return nil, nil end
+	-- mihomo ships XHTTP as `network: xhttp` plus an `xhttp-opts` mapping.
+	-- stream-one maps onto sing-box's `http` transport; other modes do not.
+	if net == "xhttp" then
+		return lib.map_xhttp_transport(fields["xhttp-opts.path"],
+			fields["xhttp-opts.host"], fields["xhttp-opts.mode"])
+	end
 	if not lib.SUPPORTED_TRANSPORTS[net] and net ~= "h2" then
 		return nil, "transport '" .. net .. "' is not supported by sing-box"
 	end
@@ -831,7 +846,19 @@ local function extract_singbox(body)
 			-- sing-box has no dialer for just as a Clash one can; reject
 			-- the node rather than import an outbound that cannot connect.
 			local ttype = type(ob.transport) == "table" and ob.transport.type or nil
-			if ttype and ttype ~= "" and not lib.SUPPORTED_TRANSPORTS[ttype] then
+			-- An xhttp block here maps onto `http` exactly as it does in the
+			-- other two formats; rewrite it in place before the payload is
+			-- stringified so the stored node is already dialable.
+			local xreason
+			if ttype == "xhttp" then
+				local tr
+				tr, xreason = lib.map_xhttp_transport(ob.transport.path,
+					ob.transport.host, ob.transport.mode)
+				if tr then ob.transport, ttype = tr, "http" end
+			end
+			if xreason then
+				skipped[#skipped + 1] = ob.tag .. ": " .. xreason
+			elseif ttype and ttype ~= "" and not lib.SUPPORTED_TRANSPORTS[ttype] then
 				skipped[#skipped + 1] = ob.tag .. ": transport '" .. tostring(ttype)
 					.. "' is not supported by sing-box"
 			else

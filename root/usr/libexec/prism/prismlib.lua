@@ -59,6 +59,108 @@ M.SUPPORTED_TRANSPORTS = {
 	httpupgrade = true,
 }
 
+-- Xray's XHTTP is still not a sing-box transport — but one of its modes
+-- does not need to be. `stream-one` is a single bidirectional HTTP/2
+-- request (POST, request body = uplink, response body = downlink, no
+-- session id), which is exactly the shape sing-box's own `http` transport
+-- dials. So an xhttp/stream-one node is mapped onto `http` at parse time
+-- and needs no XHTTP support in sing-box at all.
+--
+-- `packet-up` and `stream-up` are NOT mappable: they correlate several
+-- requests through a session id sing-box has no way to emit, so nodes in
+-- those modes keep the old rejection. An absent or `auto` mode resolves
+-- client-side to stream-one whenever REALITY is configured, which is how
+-- every xhttp node observed in the wild ships.
+M.XHTTP_MAPPABLE_MODES = {
+	[""]            = true,
+	["auto"]        = true,
+	["stream-one"]  = true,
+}
+
+-- Xray's XHTTP server validates an `x_padding` value on every request and
+-- answers a bare `400 Bad Request` when it is absent or outside
+-- `xPaddingBytes` — which defaults to this window. An empty value is
+-- always invalid, so a client that sends none can never get past the
+-- handshake no matter how correct its framing is. This is what made the
+-- earlier investigation conclude XHTTP was undialable (see
+-- docs/decisions/): the transport was never the obstacle, the missing
+-- padding was.
+M.XHTTP_PADDING_MIN = 100
+M.XHTTP_PADDING_MAX = 1000
+
+-- Map an XHTTP node's options onto a sing-box `http` transport block.
+-- Returns the block, or nil plus a reason when the mode cannot be mapped.
+--
+-- The padding header is deliberately NOT added here: it is regenerated at
+-- config-build time by apply_xhttp_padding so the value is not frozen into
+-- the on-disk node file for the life of the subscription.
+function M.map_xhttp_transport(path, host, mode)
+	mode = type(mode) == "string" and mode:lower() or ""
+	if not M.XHTTP_MAPPABLE_MODES[mode] then
+		return nil, "xhttp mode '" .. mode .. "' correlates requests through a "
+			.. "session id sing-box cannot emit"
+	end
+	-- `method` is POST because that is what Xray's own client sends. The
+	-- server accepts any non-GET as an uplink request (verified against a
+	-- live provider), so this is about matching the real client's traffic
+	-- shape rather than about being accepted.
+	local tr = { type = "http", method = "POST", _xhttp = true }
+	if type(path) == "string" and path ~= "" then tr.path = path end
+	-- `host` arrives as a bare string from the Clash and URI parsers, but
+	-- as sing-box's Listable array from a sing-box-format subscription.
+	if type(host) == "table" then host = host[1] end
+	if type(host) == "string" and host ~= "" then tr.host = { host } end
+	return tr
+end
+
+-- A random integer in [lo, hi], from /dev/urandom where available.
+local function random_range(lo, hi)
+	local span = hi - lo + 1
+	local f = io.open("/dev/urandom", "rb")
+	if f then
+		local b = f:read(2)
+		f:close()
+		if b and #b == 2 then
+			local n = string.byte(b, 1) * 256 + string.byte(b, 2)
+			return lo + (n % span)
+		end
+	end
+	math.randomseed(os.time())
+	return lo + math.random(0, span - 1)
+end
+
+-- Attach a fresh x_padding to a transport block produced by
+-- map_xhttp_transport, and clear the marker. Called once per node at
+-- config-build time.
+--
+-- The padding rides in a `Referer` header rather than the request query
+-- because sing-box's `path` option cannot carry one: it routes through
+-- net/url's setPath, and `?` is the single character Go escapes in
+-- encodePath, so `/p?x_padding=…` would go out as `%3F`. Xray reads
+-- `Referer` first and takes `x_padding` from its query, so the header
+-- reaches the same check.
+--
+-- Only the LENGTH is randomised, with the value left as a run of 'x':
+-- that matches Xray's own repeat-x padding method, and a random-looking
+-- string would change the Huffman-encoded length the server measures
+-- under its tokenish method. Xray re-rolls this per request; Prism can
+-- only re-roll per config build, so within one build every request from
+-- a given node carries the same padding. That is a weaker traffic
+-- signature than Xray's, and the cost of having no XHTTP dialer to hook.
+function M.apply_xhttp_padding(tr)
+	if type(tr) ~= "table" or not tr._xhttp then return tr end
+	tr._xhttp = nil
+	local host = type(tr.host) == "table" and tr.host[1] or nil
+	-- No host means no Referer URL to hang the padding on; the node would
+	-- 400 on every dial, so leave it unpadded and let it fail loudly
+	-- rather than emit a half-built outbound.
+	if type(host) ~= "string" or host == "" then return tr end
+	local pad = string.rep("x", random_range(M.XHTTP_PADDING_MIN, M.XHTTP_PADDING_MAX))
+	tr.headers = tr.headers or {}
+	tr.headers.Referer = { "https://" .. host .. "/?x_padding=" .. pad }
+	return tr
+end
+
 -- Per-subscription node files: /etc/prism/nodes/<uid>.json, where uid IS
 -- the subscription's UCI section name.
 M.NODES_DIR = "/etc/prism/nodes"
