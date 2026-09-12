@@ -140,7 +140,21 @@ if [ -n "${PRISM_VERSION:-}" ]; then
 	PKG_VERSION="$PRISM_VERSION"
 	PKG_RELEASE="${PRISM_RELEASE:-$PKG_RELEASE}"
 elif command -v git >/dev/null 2>&1 && git -C "$REPO_DIR" rev-parse --git-dir >/dev/null 2>&1; then
-	LAST_TAG=$(git -C "$REPO_DIR" describe --tags --match 'v[0-9]*' --abbrev=0 2>/dev/null || true)
+	# Highest-versioned v* tag reachable from HEAD. Not `describe
+	# --abbrev=0`: that orders candidates by distance along the commit
+	# graph and has no tie-break when several tags share one commit. A
+	# repository whose history has been squashed has every release tag
+	# pointing at the same root commit, and describe then returns an
+	# arbitrary one — picking v0.2.0 where v0.8.3 exists, which makes the
+	# snapshot version go BACKWARDS and has apk read the next snapshot as
+	# a downgrade.
+	#
+	# `--sort=-v:refname` orders by version rather than graph distance (so
+	# v0.10.0 > v0.9.0, which a lexical sort gets wrong), and `--merged
+	# HEAD` keeps describe's guarantee that the base tag is an ancestor —
+	# without it a tag on an unrelated branch could win and the commit
+	# count below would be counted against a tag HEAD never descended from.
+	LAST_TAG=$(git -C "$REPO_DIR" tag --list 'v[0-9]*' --merged HEAD --sort=-v:refname 2>/dev/null | head -1 || true)
 	if [ -n "$LAST_TAG" ]; then
 		POST_N=$(git -C "$REPO_DIR" rev-list --count "${LAST_TAG}..HEAD")
 		[ -n "$POST_N" ] || die "could not compute snapshot commit count (shallow clone?)"
