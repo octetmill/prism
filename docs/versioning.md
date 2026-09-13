@@ -237,7 +237,16 @@ With an `apk` on `PATH` it also runs locally:
 sh .github/workflows/version-check.sh
 ```
 
-It covers apk only. The opkg side was verified by porting `verrevcmp()` from
-`libopkg/pkg.c` and running it over the shipping pairs; asserting it in CI
-would mean shipping a reimplementation whose own correctness is the thing
-under test.
+The apk checks call apk's own parser. The ipk ordering is checked through
+**`dpkg`**, which stands in for opkg: opkg's comparison *is* dpkg's —
+`order()` and `verrevcmp()` in `libopkg/pkg.c` match dpkg's — and dpkg is
+already present on CI runners, so the check runs against a real implementation
+of the algorithm rather than a hand-written model of it. Porting `verrevcmp()`
+into shell was rejected for exactly that reason: the test would then be able to
+be wrong in the same way as the thing it guards.
+
+Two limits worth knowing. dpkg is a different codebase, so this would not catch
+opkg diverging from dpkg in future. And Debian's `upstream_version` grammar
+excludes `_`, which the snapshot suffix uses — the script probes for that and
+skips the ipk block loudly if this dpkg refuses such versions, rather than
+reporting a pass it did not earn.

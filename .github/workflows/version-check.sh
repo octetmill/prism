@@ -18,7 +18,10 @@
 #   version-check.sh <version>…   — also require each given version to be
 #                                   valid (CI passes the version it just built)
 #
-# Requires apk-tools 3.x. `apk version -c` prints each invalid argument and
+# Requires apk-tools 3.x. dpkg is optional — when present it stands in for
+# opkg on the ipk ordering checks (see the block near the bottom).
+#
+# `apk version -c` prints each invalid argument and
 # exits with the count of them; `apk version -t A B` prints <, = or >.
 set -euo pipefail
 
@@ -103,6 +106,66 @@ for pair in $ORDER; do
 		fail=1
 	fi
 done
+
+# --- the same orderings under opkg, checked through dpkg ----------------------
+#
+# The apk checks above ask the real parser. The ipk side deserves the same, and
+# hand-porting opkg's verrevcmp() into shell would not be it — the test would
+# then be a reimplementation that can be wrong in exactly the way it is meant
+# to catch.
+#
+# dpkg is the stand-in. opkg's comparison IS dpkg's: `order()` and
+# `verrevcmp()` in libopkg/pkg.c match dpkg's, and dpkg ships on every CI
+# runner, so this is a real implementation of the same algorithm rather than a
+# model of it. It is a different codebase, so it would not catch opkg diverging
+# from dpkg in future — that is the limit of what this buys.
+#
+# Debian's upstream_version grammar excludes "_", which the snapshot suffix
+# uses, so dpkg may refuse these versions outright. Probe first and skip
+# loudly if so: a silently-skipped check is worse than an absent one.
+
+OPKG_ORDER="
+0.8.3-1|0.8.3-r1
+0.9.0-r1|0.9.0-r2
+0.9.0-r1|0.9.0_git20260913085134-r1
+0.9.0_git20260913085134-r1|0.9.0_git20260913090201-r1
+0.9.0_git20260913085134-r1|0.10.0-r1
+0.9.0_git6-r4|0.9.0_git20260913085134-r1
+"
+
+# A KNOWN divergence from apk, asserted so it stays known: opkg has no suffix
+# table, so `_pre` sorts ABOVE the bare version where apk sorts it below. If
+# this ever starts failing, opkg gained suffix handling and docs/versioning.md
+# § "Where opkg differs" needs revisiting.
+OPKG_DIVERGE_LO="0.9.0-r1"
+OPKG_DIVERGE_HI="0.9.0_pre20260913085134-r1"
+
+printf '\nOrdering under opkg (via dpkg)\n'
+if ! command -v dpkg >/dev/null 2>&1; then
+	note "dpkg not on PATH" "SKIPPED — ipk ordering unchecked"
+elif ! dpkg --compare-versions '1.0_git1' eq '1.0_git1' >/dev/null 2>&1; then
+	# Identical strings must compare equal; a failure here means dpkg
+	# rejected the version rather than that the relation was false.
+	note "dpkg rejects '_' in a version" "SKIPPED — ipk ordering unchecked"
+else
+	for pair in $OPKG_ORDER; do
+		[ -n "$pair" ] || continue
+		a="${pair%%|*}"
+		b="${pair##*|}"
+		if dpkg --compare-versions "$a" lt "$b" >/dev/null 2>&1; then
+			note "$a < $b" "ok"
+		else
+			note "$a ? $b" "dpkg does not put it below — expected '<'"
+			fail=1
+		fi
+	done
+	if dpkg --compare-versions "$OPKG_DIVERGE_LO" lt "$OPKG_DIVERGE_HI" >/dev/null 2>&1; then
+		note "$OPKG_DIVERGE_LO < $OPKG_DIVERGE_HI" "ok (known apk divergence)"
+	else
+		note "$OPKG_DIVERGE_LO ? $OPKG_DIVERGE_HI" "expected '<' — opkg's _pre handling changed"
+		fail=1
+	fi
+fi
 
 printf '\n'
 if [ "$fail" -ne 0 ]; then
