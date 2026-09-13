@@ -42,16 +42,9 @@ ssh root@192.168.1.1 'apk add --allow-untrusted /tmp/luci-app-prism_*.apk && ser
 
 ## Versioning
 
-`PKG_VERSION` / `PKG_RELEASE` in the `Makefile` are authoritative, and
-they **trail** the timeline: they name the version most recently
-released, never a guess at the next one. The `v*` tag is the release
-decision; `release.yml` checks the tag against the Makefile and refuses
-to publish if they disagree, so every build path — standalone builder,
-tagged release, OpenWrt SDK — labels the same tree the same way.
-
-Snapshots derive from the most recent `v*` tag plus the HEAD commit's own
-UTC timestamp, so a snapshot version is always honest about which release
-it follows and about which commit it is.
+Full rules, including the apk and opkg format constraints, live in
+[`docs/versioning.md`](docs/versioning.md). Read that before changing
+anything in the packaging pipeline. The shapes:
 
 | Situation                                       | Example version              |
 |---|---|
@@ -60,30 +53,20 @@ it follows and about which commit it is.
 | Snapshot past `v0.1.0`                          | `0.1.0_git20260913085134-r1` |
 | Snapshot, no `v*` tag yet (bootstrap)           | `0.1.0_pre20260913085134-r1` |
 
-Both formats use OpenWrt's `<version>-r<release>` spelling — the one
-`include/package-defaults.mk` derives for apk and ipk alike, **not**
-Debian's `<version>-<release>`.
+Three rules carry most of it:
 
-APK suffix order puts `<tag>` < `<tag>_git<TS>` < `<next-tag>`, so
-`apk upgrade` picks newer snapshots and never downgrades past the tag.
-`_git` is Alpine's conventional suffix for VCS snapshots taken after a
-release, and Alpine spells the number as a date too.
+- `PKG_VERSION` / `PKG_RELEASE` in the `Makefile` are authoritative and
+  **trail** the timeline — they name the version most recently released.
+  The `v*` tag is the release decision, and `release.yml` fails the
+  release if the two disagree rather than overriding the Makefile.
+- The snapshot suffix is HEAD's **commit timestamp**, never a commit
+  count. A count collides across branches and moves backwards when a
+  branch is rebased.
+- `-r<N>` is the **packaging revision** and nothing else, for both
+  package formats. It is never a build counter.
 
-**The suffix is a timestamp, not a commit count.** A count encodes
-distance rather than identity: two branches the same number of commits
-past the tag produce the same version, and — worse — rebasing or
-squashing a branch turns `_git5` into `_git1`, so the later build reads
-as a *downgrade*. A commit timestamp is distinct per commit and only
-advances.
-
-**`-r<N>` is the packaging revision and nothing else** — the Makefile's
-`PKG_RELEASE`, meaning "same source, packaging fixed". It is deliberately
-not a build counter: routing one through it would assert something false
-and would make a real `PKG_RELEASE` bump invisible in snapshots. Snapshot
-ordering lives in the version body, which is what the timestamp is for.
-
-`version-check.sh` asserts all of the above against apk's own parser and
-runs in both workflows. With an `apk` on PATH it also runs locally:
+`version-check.sh` asserts these against apk's own parser and runs in
+both workflows. With an `apk` on PATH it also runs locally:
 
 ```sh
 sh .github/workflows/version-check.sh

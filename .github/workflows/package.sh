@@ -111,56 +111,21 @@ done
 # ---------------------------------------------------------------------------
 # Version detection
 #
-# The Makefile's PKG_VERSION is the released version and is authoritative on
-# every build path. It TRAILS the release timeline — it names the version most
-# recently released, never a forward-looking guess at the next one. release.yml
-# verifies that the pushed v* tag agrees with it and refuses to publish on a
-# mismatch, so the SDK build path (which reads PKG_VERSION verbatim) and the
-# tagged release can never disagree about what version this tree is.
-#
-# Snapshots are derived from the most recent v* tag plus the HEAD commit's
-# own UTC timestamp, so the snapshot version is always honest about which
-# release it follows. APK suffix ordering puts <tag> < <tag>_git<TS> <
-# <next-tag>, so apk-upgrade picks newer snapshots and never downgrades past
-# the tag. (_git is Alpine's conventional suffix for VCS snapshots taken
-# after a release; _p reads as "upstream patch level" and would be
-# misleading here.)
-#
-# THE SUFFIX IS A TIMESTAMP, NOT A COMMIT COUNT. A count encodes distance
-# rather than identity and moves BACKWARDS whenever history is rewritten:
-# rebasing or squashing a topic branch turns _git5 into _git1, and since
-# every branch publishes to one shared rolling asset, the later build then
-# sorts below the installed one. That is refused by `opkg install <file>`,
-# which version-gates even a local file; `apk add <file>` pins to the
-# package's content hash and would not care — but 24.10 is supported.
-# A commit timestamp only ever moves forward (a rebase resets the committer
-# date to now) and is distinct per commit, so ordering needs no external
-# tie-breaker. It is also the convention everywhere else:
-# Alpine spells it _git<date>, openwrt/packages uses PKG_SOURCE_DATE, and
-# luci.mk's findrev uses this very field (`git log -1 --format=%ct`).
-#
-# The committer date, not the build time: rebuilding a commit must yield the
-# identical version, and the version should be a function of the source.
-# Formatted by git itself rather than date(1) — `date --utc --date=@…` is
-# GNU-only and the BSD spelling differs.
+# THE RULES LIVE IN docs/versioning.md. Read it before changing anything
+# here; the comments below cover only what is specific to these lines.
+# .github/workflows/version-check.sh asserts the result against apk's parser
+# and runs in both workflows — add a case there for any change.
 #
 # Priority:
-#   1. PRISM_VERSION env var — CI sets this when building from a v* tag.
-#      Value is the bare version (e.g. "0.1.0"), already checked against
-#      PKG_VERSION by release.yml.
-#   2. Otherwise, with at least one v* tag — <last-tag>_git<TS>. HEAD sitting
-#      exactly on the tag drops the suffix, so a local build at the tag
-#      matches the tagged release exactly.
-#   3. Otherwise (no v* tag yet) — <PKG_VERSION>_pre<TS>, bootstrap before the
-#      first release; _pre sorts before any 0.x.y tag under apk.
+#   1. PRISM_VERSION — set by release.yml from a v* tag, already verified
+#      against the Makefile.
+#   2. A v* tag reachable from HEAD — <last-tag>_git<TS>, the commit's own
+#      UTC timestamp. HEAD on the tag drops the suffix.
+#   3. No v* tag — <PKG_VERSION>_pre<TS>, the bootstrap before a first release.
 #
-# PRISM_RELEASE overrides PKG_RELEASE on all three paths. It exists for
-# release.yml's v<X.Y.Z>-r<N> packaging-revision tags ONLY. Do not route a
-# build counter through it: -r<N> is the packaging revision — "the source is
-# unchanged, the packaging was fixed" — and stuffing a CI run number there
-# both asserts something false and makes the Makefile's own PKG_RELEASE
-# unrepresentable in a snapshot. Snapshot ordering belongs in the version
-# body, which is what the timestamp above is for.
+# PRISM_RELEASE overrides PKG_RELEASE on all three paths and exists for
+# release.yml's v<X.Y.Z>-r<N> tags ONLY. -r<N> is the packaging revision;
+# never route a build counter through it.
 
 PKG_RELEASE="${PRISM_RELEASE:-$PKG_RELEASE}"
 
@@ -172,15 +137,15 @@ elif command -v git >/dev/null 2>&1 && git -C "$REPO_DIR" rev-parse --git-dir >/
 	# graph and has no tie-break when several tags share one commit. A
 	# repository whose history has been squashed has every release tag
 	# pointing at the same root commit, and describe then returns an
-	# arbitrary one — picking v0.2.0 where v0.8.3 exists, which makes the
-	# snapshot version go BACKWARDS and has apk read the next snapshot as
-	# a downgrade.
+	# arbitrary one — picking v0.2.0 where v0.8.3 exists, which builds a
+	# snapshot that sorts BELOW the release it actually follows, so the
+	# feed pulls the user back to an older release on the next upgrade.
 	#
 	# `--sort=-v:refname` orders by version rather than graph distance (so
 	# v0.10.0 > v0.9.0, which a lexical sort gets wrong), and `--merged
 	# HEAD` keeps describe's guarantee that the base tag is an ancestor —
-	# without it a tag on an unrelated branch could win and the commit
-	# count below would be counted against a tag HEAD never descended from.
+	# without it a tag on an unrelated branch could win and the on-the-tag
+	# check below would be measured against a tag HEAD never descended from.
 	LAST_TAG=$(git -C "$REPO_DIR" tag --list 'v[0-9]*' --merged HEAD --sort=-v:refname 2>/dev/null | head -1 || true)
 
 	# HEAD's committer date as UTC YYYYMMDDHHMMSS. `format-local` honours TZ,

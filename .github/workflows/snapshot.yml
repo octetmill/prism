@@ -7,25 +7,12 @@ name: Snapshot
 #
 # The APK/IPK version inside the package is
 # <last-v*-tag>_git<YYYYMMDDHHMMSS>-r<PKG_RELEASE>, where the timestamp is
-# HEAD's own committer date in UTC.
+# HEAD's own committer date in UTC. Every branch publishes to the ONE rolling
+# asset below, so the version must be distinct per commit and must only ever
+# advance — which is why the suffix is a timestamp and not a commit count,
+# and why nothing here sets PRISM_RELEASE.
 #
-# A commit COUNT was tried here first and is wrong twice over. It encodes
-# distance rather than identity, so two branches the same number of commits
-# past the tag produce an identical body — and since every branch publishes
-# to the ONE rolling asset below, a tester moving between them can end up
-# installing nothing. Worse, a count moves backwards: rebasing or squashing a
-# branch turns _git5 into _git1, so the later build sorts below the installed
-# one.
-#
-# Both faults land on opkg, not apk: `opkg install <file>` compares versions
-# even for a local file and refuses ("Not downgrading package …" / "… already
-# install on …"), while `apk add <file>` pins to the package's content hash
-# and ignores the version entirely. 24.10 is supported, so this matters.
-#
-# A commit timestamp is distinct per commit and only ever advances, so the
-# version body orders snapshots on its own, with no tie-breaker smuggled into
-# the packaging-revision field. The body still dominates the comparison, so a
-# snapshot stays bounded between the release it follows and the next one.
+# See docs/versioning.md for the rules and the reasoning.
 
 on:
   push:
