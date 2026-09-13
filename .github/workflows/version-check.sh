@@ -49,9 +49,18 @@ VALID="
 # The first is the regression described above. The second is the Debian
 # release separator, which OpenWrt does not use and apk does not accept
 # (see openwrt/openwrt#15656, "1.2-1" rejected).
+#
+# The third is why a release candidate is not simply a matter of picking
+# Debian's spelling: "~rc1" reads to opkg as a pre-release sorting below
+# 0.9.0, which is exactly what an RC needs — but apk spans HEX DIGITS after
+# "~" and requires at least one, and "r" is not hex, so the version does not
+# parse at all. Pinned here so the next person to want an RC learns it from a
+# failing assertion rather than from a rejected package. See
+# docs/versioning.md § "Release candidates are unsolved, not forbidden".
 INVALID="
 0.8.3-r2_git2-r1
 0.9.0-1
+0.9.0~rc1
 "
 
 # --- orderings the documented guarantee depends on ----------------------------

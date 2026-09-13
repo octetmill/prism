@@ -175,12 +175,36 @@ so `_` scores 351 against end-of-string's 0 and **every** `_suffix` sorts
 | `0.9.0_pre<TS>` vs `0.9.0` | `<` | **`>`** — disagree |
 | `0.9.0_alpha1` / `_beta` / `_rc` vs `0.9.0` | `<` | **`>`** — disagree |
 
-Only `_git<TS>` and `-r<N>` ship, and both agree, so this is latent. It bites
-the first time a pre-release is cut for real: an `0.9.0_rc1` ipk would outrank
-the `0.9.0` it precedes and opkg would refuse the upgrade. **Never use
-`_pre` / `_alpha` / `_beta` / `_rc` in a version that is also built as an
-ipk.** The `_pre<TS>` bootstrap path is unreachable here — it needs zero `v*`
-tags — but is wrong for opkg if a fork starts fresh.
+Only `_git<TS>` and `-r<N>` ship, and both agree, so this is latent. The
+`_pre<TS>` bootstrap path is unreachable here — it needs zero `v*` tags — but
+is wrong for opkg if a fork starts fresh.
+
+### Release candidates are unsolved, not forbidden
+
+Prism publishes none today, and **one version string cannot mean
+"pre-release" in both managers**:
+
+- `0.9.0_rc1` — apk sorts it below `0.9.0` (correct); opkg sorts it *above*
+  (wrong), so a 24.10 user on the RC would never be offered the release.
+- `0.9.0~rc1` — Debian's spelling, correct for opkg, but **apk rejects it**.
+  After `~` apk spans hex digits only and requires at least one
+  (`apk_blob_spn(*b, APK_CTYPE_HEXDIGIT, …)`; `r` is not hex), so the version
+  does not parse at all.
+
+So publishing an RC means choosing one of:
+
+1. **Ship RCs as snapshots.** Costs nothing — the mechanism exists, snapshots
+   are hand-installed and excluded from the feed, so no ordering question
+   arises. You give up having the RC installable *from the feed*.
+2. **Version the two formats differently** — `0.9.0_rc1` for the apk,
+   `0.9.0~rc1` for the ipk. Both then sort correctly in their own manager.
+   This gives up the single-`VERSION`-for-both-formats property that the rest
+   of this document rests on, and `package.sh` would derive two version
+   strings rather than one.
+
+Until one is chosen, **do not put `_pre` / `_alpha` / `_beta` / `_rc` in a
+version that is also built as an ipk** — not as a permanent rule, but because
+nothing downstream is prepared for it yet.
 
 **A local-file install is version-gated on opkg but not on apk.** Snapshots
 are hand-installed and excluded from the feed, so this decides what any
