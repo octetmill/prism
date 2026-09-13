@@ -14,7 +14,7 @@ PKG_NAME:=luci-app-prism
 # agrees with them and refuses to publish on a mismatch, so the OpenWrt SDK
 # build path (which reads these verbatim) and the published package can
 # never disagree about what version this tree is.
-PKG_VERSION:=0.8.3
+PKG_VERSION:=0.9.0
 PKG_RELEASE:=1
 PKG_MAINTAINER:=RouteWeave
 PKG_LICENSE:=GPL-3.0-only
