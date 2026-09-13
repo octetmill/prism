@@ -130,9 +130,12 @@ done
 # rather than identity and moves BACKWARDS whenever history is rewritten:
 # rebasing or squashing a topic branch turns _git5 into _git1, and since
 # every branch publishes to one shared rolling asset, the later build then
-# reads as a downgrade. A commit timestamp only ever moves forward (a rebase
-# resets the committer date to now) and is distinct per commit, so ordering
-# needs no external tie-breaker. It is also the convention everywhere else:
+# sorts below the installed one. That is refused by `opkg install <file>`,
+# which version-gates even a local file; `apk add <file>` pins to the
+# package's content hash and would not care — but 24.10 is supported.
+# A commit timestamp only ever moves forward (a rebase resets the committer
+# date to now) and is distinct per commit, so ordering needs no external
+# tie-breaker. It is also the convention everywhere else:
 # Alpine spells it _git<date>, openwrt/packages uses PKG_SOURCE_DATE, and
 # luci.mk's findrev uses this very field (`git log -1 --format=%ct`).
 #

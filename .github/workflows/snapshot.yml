@@ -12,9 +12,16 @@ name: Snapshot
 # A commit COUNT was tried here first and is wrong twice over. It encodes
 # distance rather than identity, so two branches the same number of commits
 # past the tag produce an identical body — and since every branch publishes
-# to the ONE rolling asset below, a tester moving between them sees `apk add`
-# report nothing to do. Worse, a count moves backwards: rebasing or squashing
-# a branch turns _git5 into _git1 and the later build reads as a downgrade.
+# to the ONE rolling asset below, a tester moving between them can end up
+# installing nothing. Worse, a count moves backwards: rebasing or squashing a
+# branch turns _git5 into _git1, so the later build sorts below the installed
+# one.
+#
+# Both faults land on opkg, not apk: `opkg install <file>` compares versions
+# even for a local file and refuses ("Not downgrading package …" / "… already
+# install on …"), while `apk add <file>` pins to the package's content hash
+# and ignores the version entirely. 24.10 is supported, so this matters.
+#
 # A commit timestamp is distinct per commit and only ever advances, so the
 # version body orders snapshots on its own, with no tie-breaker smuggled into
 # the packaging-revision field. The body still dominates the comparison, so a
