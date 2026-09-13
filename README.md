@@ -92,11 +92,12 @@ Advanced mode).
 
 ### Snapshot (bleeding edge)
 
-> **Warning.** Snapshots are rebuilt on every commit to `main`. They
-> are not stability-tested, may include half-finished features, and
-> can change UCI shape or behaviour without notice. Use them to track
-> upcoming changes or to verify a fix; prefer a tagged release for
-> anything you depend on.
+> **Warning.** A snapshot is whatever was last pushed to a development
+> branch — not a build of `main`, and not necessarily ahead of the
+> newest release. Snapshots are not stability-tested, may include
+> half-finished features, and can change UCI shape or behaviour without
+> notice. Use them to track upcoming changes or to verify a fix; prefer
+> a tagged release for anything you depend on.
 
 The snapshot URL is stable — the same one-liner installs and upgrades.
 

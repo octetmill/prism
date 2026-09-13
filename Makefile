@@ -8,7 +8,13 @@ LUCI_DEPENDS:=+luci-base +luci-lib-jsonc +sing-box (>=1.12) +rpcd +uclient-fetch
 LUCI_PKGARCH:=all
 
 PKG_NAME:=luci-app-prism
-PKG_VERSION:=0.9.0
+# PKG_VERSION/PKG_RELEASE name the version most recently RELEASED — they
+# trail the timeline rather than predicting the next release. Bump them in
+# the release commit itself; release.yml then verifies the pushed v* tag
+# agrees with them and refuses to publish on a mismatch, so the OpenWrt SDK
+# build path (which reads these verbatim) and the published package can
+# never disagree about what version this tree is.
+PKG_VERSION:=0.8.3
 PKG_RELEASE:=1
 PKG_MAINTAINER:=RouteWeave
 PKG_LICENSE:=GPL-3.0-only

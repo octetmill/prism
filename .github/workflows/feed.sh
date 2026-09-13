@@ -51,10 +51,16 @@ rm -rf "$FEED_OUT"
 mkdir -p "$APK_DIR" "$OPKG_DIR" "$FEED_OUT/keys"
 
 # ---------------------------------------------------------------------------
-# Gather every v* release's packages. release.yml uploads platform-tagged
-# copies (…-openwrt-25.12.apk / …-openwrt-24.10.ipk); strip that suffix to
-# recover the canonical package.sh filename, which is what apk mkndx's
-# default name spec and opkg's Filename: field expect.
+# Gather every v* release's packages.
+#
+# release.yml now uploads package.sh's canonical filenames directly, but the
+# feed is rebuilt from EVERY v* release and the earlier ones carry a
+# platform-tagged copy (…-openwrt-25.12.apk / …-openwrt-24.10.ipk). Strip
+# that suffix wherever it appears to recover the canonical name, which is
+# what apk mkndx's default name spec and opkg's Filename: field expect. The
+# rule is a no-op on anything released since, and is matched by pattern
+# rather than by the two literal strings so a differently-numbered historical
+# asset canonicalises too.
 
 DL_DIR="$(mktemp -d)"
 trap 'rm -rf "$DL_DIR"' EXIT
@@ -79,16 +85,17 @@ else
 fi
 
 # Canonicalise filenames into the feed dirs.
+# canonical_name FILENAME — drop a legacy -openwrt-<major>.<minor> tag.
+canonical_name() {
+	printf '%s' "$1" | sed -E 's/-openwrt-[0-9]+\.[0-9]+//'
+}
+
 shopt -s nullglob
 for f in "$DL_DIR"/*.apk; do
-	base="$(basename "$f")"
-	base="${base/-openwrt-25.12/}"
-	cp "$f" "$APK_DIR/$base"
+	cp "$f" "$APK_DIR/$(canonical_name "$(basename "$f")")"
 done
 for f in "$DL_DIR"/*.ipk; do
-	base="$(basename "$f")"
-	base="${base/-openwrt-24.10/}"
-	cp "$f" "$OPKG_DIR/$base"
+	cp "$f" "$OPKG_DIR/$(canonical_name "$(basename "$f")")"
 done
 shopt -u nullglob
 
