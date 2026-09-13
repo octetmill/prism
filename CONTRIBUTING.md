@@ -108,6 +108,34 @@ automatically.
 All three workflows live in `.github/workflows/` alongside the scripts
 they call.
 
+### What a snapshot is
+
+A build of a **development branch**, for testing a change before it
+merges. It is not a build of `main`, so the rolling asset can be behind
+`main` — merge a few PRs without pushing a branch and the stable URL
+still serves whatever branch pushed last.
+
+Each run produces two things:
+
+| | Lifetime | For |
+|---|---|---|
+| Rolling `snapshot` pre-release | until the next branch push replaces it | a stable install URL anyone can wget |
+| Per-commit workflow artifact | 30 days | testing one specific build; what `push-to-router.sh` installs |
+
+**`main` is excluded on purpose.** Building it would not make the
+rolling URL mean "latest code", because there is only one asset slot and
+`main` would compete with the branch someone is mid-test on — every merge
+clobbering their snapshot. Making it work properly means three coupled
+changes, not one: publish only from `main`, give the concurrency group a
+per-ref key (it is currently a single `snapshot` group with
+`cancel-in-progress`, so cross-ref builds would cancel each other), and
+teach `push-to-router.sh` to select a run by branch instead of taking the
+newest. Worth doing if you want an installable URL that tracks `main`;
+not worth it to fix a wording problem.
+
+Branch testing does not need the rolling asset — that is what the
+per-commit artifact is for.
+
 ## Repository layout
 
 ```

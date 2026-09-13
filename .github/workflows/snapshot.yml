@@ -16,6 +16,14 @@ name: Snapshot
 
 on:
   push:
+    # `main` is excluded ON PURPOSE, not by oversight. A snapshot is a build
+    # of a development branch, for testing a change before it merges; the
+    # rolling asset below is a single slot, so building main would have every
+    # merge clobber the snapshot someone is mid-test on rather than make the
+    # URL mean "latest code". Doing it properly needs three coupled changes —
+    # publish only from main, give the concurrency group below a per-ref key,
+    # and teach push-to-router.sh to pick a run by branch. See CONTRIBUTING.md
+    # § "What a snapshot is" before changing this line.
     branches-ignore:
       - main
     paths-ignore:

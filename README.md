@@ -92,12 +92,16 @@ Advanced mode).
 
 ### Snapshot (bleeding edge)
 
-> **Warning.** A snapshot is whatever was last pushed to a development
-> branch — not a build of `main`, and not necessarily ahead of the
-> newest release. Snapshots are not stability-tested, may include
+> **Warning.** A snapshot is a build of whichever development branch was
+> pushed most recently — it is not "the latest code". It is not a build
+> of `main`, may be behind the newest release, and may contain work that
+> is never merged. Snapshots are not stability-tested, may include
 > half-finished features, and can change UCI shape or behaviour without
-> notice. Use them to track upcoming changes or to verify a fix; prefer
-> a tagged release for anything you depend on.
+> notice.
+>
+> They exist so a specific change can be tried before it merges — most
+> usefully when someone asks you to verify a fix. For anything you
+> depend on, use a tagged release.
 
 The snapshot URL is stable — the same one-liner installs and upgrades.
 
