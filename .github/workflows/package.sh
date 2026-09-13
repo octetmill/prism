@@ -111,76 +111,108 @@ done
 # ---------------------------------------------------------------------------
 # Version detection
 #
-# Releases are driven by the git tag: release.yml parses the v<X.Y.Z> tag and
-# sets PRISM_VERSION, which fully overrides whatever is in the Makefile.
-#
-# Snapshots are derived from the most recent v* tag plus a post-release
-# counter, so the snapshot version is always honest about which release it
-# follows. APK suffix ordering puts <tag> < <tag>_git<N> < <next-tag>, so
-# apk-upgrade picks newer snapshots and never downgrades past the tag.
-# (_git is Alpine's conventional suffix for VCS snapshots taken after a
-# release; _p reads as "upstream patch level" and would be misleading here.)
-#
-# PKG_VERSION from the Makefile is consulted only for the bootstrap path
-# below — no v* tag in the repository yet. Once the first tag is pushed,
-# the standalone builder ignores PKG_VERSION; only the OpenWrt SDK build
-# path still uses it as the package version verbatim.
+# THE RULES LIVE IN docs/versioning.md. Read it before changing anything
+# here; the comments below cover only what is specific to these lines.
+# .github/workflows/version-check.sh asserts the result against apk's parser
+# and runs in both workflows — add a case there for any change.
 #
 # Priority:
-#   1. PRISM_VERSION env var — CI sets this when building from a v* tag.
-#      Value is the bare version (e.g. "0.1.0"); PRISM_RELEASE may also be
-#      provided to override PKG_RELEASE for -r<N> packaging revisions.
-#   2. Otherwise, with at least one v* tag — <last-tag>_git<N>-r<PKG_RELEASE>
-#      where N = commits since that tag. N=0 (HEAD is on the tag) drops the
-#      suffix so a local build at the tag matches the tagged release exactly.
-#   3. Otherwise (no v* tag yet) — <PKG_VERSION>_pre<N>-r<PKG_RELEASE>
-#      bootstrap before the first release; sorts before any 0.x.y tag.
+#   1. PRISM_VERSION — set by release.yml from a v* tag, already verified
+#      against the Makefile.
+#   2. A v* tag reachable from HEAD — <last-tag>_git<TS>, the commit's own
+#      UTC timestamp. HEAD on the tag drops the suffix.
+#   3. No v* tag — <PKG_VERSION>_pre<TS>, the bootstrap before a first release.
+#
+# PRISM_RELEASE overrides PKG_RELEASE on all three paths and exists for
+# release.yml's v<X.Y.Z>-r<N> tags ONLY. -r<N> is the packaging revision;
+# never route a build counter through it.
+
+PKG_RELEASE="${PRISM_RELEASE:-$PKG_RELEASE}"
 
 if [ -n "${PRISM_VERSION:-}" ]; then
 	PKG_VERSION="$PRISM_VERSION"
-	PKG_RELEASE="${PRISM_RELEASE:-$PKG_RELEASE}"
 elif command -v git >/dev/null 2>&1 && git -C "$REPO_DIR" rev-parse --git-dir >/dev/null 2>&1; then
 	# Highest-versioned v* tag reachable from HEAD. Not `describe
 	# --abbrev=0`: that orders candidates by distance along the commit
 	# graph and has no tie-break when several tags share one commit. A
 	# repository whose history has been squashed has every release tag
 	# pointing at the same root commit, and describe then returns an
-	# arbitrary one — picking v0.2.0 where v0.8.3 exists, which makes the
-	# snapshot version go BACKWARDS and has apk read the next snapshot as
-	# a downgrade.
+	# arbitrary one — picking v0.2.0 where v0.8.3 exists, which builds a
+	# snapshot that sorts BELOW the release it actually follows, so the
+	# feed pulls the user back to an older release on the next upgrade.
 	#
 	# `--sort=-v:refname` orders by version rather than graph distance (so
 	# v0.10.0 > v0.9.0, which a lexical sort gets wrong), and `--merged
 	# HEAD` keeps describe's guarantee that the base tag is an ancestor —
-	# without it a tag on an unrelated branch could win and the commit
-	# count below would be counted against a tag HEAD never descended from.
+	# without it a tag on an unrelated branch could win and the on-the-tag
+	# check below would be measured against a tag HEAD never descended from.
 	LAST_TAG=$(git -C "$REPO_DIR" tag --list 'v[0-9]*' --merged HEAD --sort=-v:refname 2>/dev/null | head -1 || true)
+
+	# HEAD's committer date as UTC YYYYMMDDHHMMSS. `format-local` honours TZ,
+	# so TZ=UTC0 pins it regardless of the build host's zone — two builders
+	# in different zones must not label the same commit differently.
+	# `|| die` hangs off the substitution itself, not off a test of its
+	# result: under `set -e` a failing substitution aborts the script before
+	# any following test could run, so a `[ -n "$SNAP_TS" ]` guard would
+	# never fire and its diagnostic would never reach the log.
+	SNAP_TS=$(TZ=UTC0 git -C "$REPO_DIR" log -1 --format=%cd \
+		--date=format-local:%Y%m%d%H%M%S 2>/dev/null) \
+		|| die "could not read HEAD commit date (shallow clone? need fetch-depth: 0)"
+
 	if [ -n "$LAST_TAG" ]; then
-		POST_N=$(git -C "$REPO_DIR" rev-list --count "${LAST_TAG}..HEAD")
-		[ -n "$POST_N" ] || die "could not compute snapshot commit count (shallow clone?)"
-		BASE_VER="${LAST_TAG#v}"
+		POST_N=$(git -C "$REPO_DIR" rev-list --count "${LAST_TAG}..HEAD" 2>/dev/null) \
+			|| die "could not count commits since ${LAST_TAG} (shallow clone? need fetch-depth: 0)"
+
+		# Split the tag into version and packaging-revision parts the same
+		# way release.yml does. A packaging re-release is tagged v0.8.3-r2,
+		# and `${LAST_TAG#v}` alone would carry that "-r2" into the version
+		# BODY, yielding 0.8.3-r2_git2-r1. apk's grammar treats -r<N> as a
+		# terminal revision token, so anything after it fails to parse and
+		# `apk mkpkg` rejects the package outright — one such tag would
+		# break every snapshot build until the next plain v* tag landed.
+		STRIPPED="${LAST_TAG#v}"
+		case "$STRIPPED" in
+			*-r*)
+				BASE_VER="${STRIPPED%-r*}"
+				# The tag's own revision wins over the Makefile's: it is
+				# what that release was actually published as, and the
+				# snapshots that follow it belong to the same lineage.
+				# An explicit PRISM_RELEASE still overrides both.
+				PKG_RELEASE="${PRISM_RELEASE:-${STRIPPED##*-r}}"
+				;;
+			*)
+				BASE_VER="$STRIPPED"
+				;;
+		esac
+
+		# POST_N is consulted only as a boolean: is HEAD the tagged commit?
+		# The suffix itself carries no count.
 		if [ "$POST_N" -eq 0 ]; then
 			PKG_VERSION="$BASE_VER"
 		else
-			PKG_VERSION="${BASE_VER}_git${POST_N}"
+			PKG_VERSION="${BASE_VER}_git${SNAP_TS}"
 		fi
 	else
-		PRE_N=$(git -C "$REPO_DIR" rev-list --count HEAD)
-		[ -n "$PRE_N" ] || die "could not compute snapshot commit count (shallow clone?)"
-		PKG_VERSION="${PKG_VERSION}_pre${PRE_N}"
+		PKG_VERSION="${PKG_VERSION}_pre${SNAP_TS}"
 	fi
 fi
 
-# apk's release convention is <version>-r<release>; opkg/ipk uses
-# <version>-<release>. PKG_FULL_VER is the apk form (apk package + its
-# filename); the ipk control file builds its own from PKG_VERSION/PKG_RELEASE.
+# Both formats use OpenWrt's <version>-r<release> spelling. This is not the
+# Debian convention (<version>-<release>): OpenWrt's own build system derives
+# one VERSION for both package formats in include/package-defaults.mk —
+#   VERSION:=$(PKG_VERSION)-r$(PKG_RELEASE)
+# — and its 24.10 feed ships e.g. luci-app-adblock-fast_1.2.4-r4_all.ipk.
+# Matching it matters beyond cosmetics: opkg compares revisions Debian-style,
+# where the empty non-digit run before "1" sorts below the letter "r", so a
+# bare "0.8.3-1" would rank BELOW an SDK- or feed-built "0.8.3-r1" of the very
+# same source.
 PKG_FULL_VER="${PKG_VERSION}-r${PKG_RELEASE}"
 
 # APK: <name>-<version>-r<release>.apk  (no arch suffix)
 APK_FILE="${OUT_DIR}/${PKG_NAME}-${PKG_FULL_VER}.apk"
 
-# IPK: <name>_<version>-<release>_<arch>.ipk
-IPK_FILE="${OUT_DIR}/${PKG_NAME}_${PKG_VERSION}-${PKG_RELEASE}_${PKG_ARCH_IPK}.ipk"
+# IPK: <name>_<version>-r<release>_<arch>.ipk  (matches package-pack.mk)
+IPK_FILE="${OUT_DIR}/${PKG_NAME}_${PKG_FULL_VER}_${PKG_ARCH_IPK}.ipk"
 
 printf 'Building APK: %s\n' "$(basename "$APK_FILE")"
 printf 'Building IPK: %s\n' "$(basename "$IPK_FILE")"
@@ -360,7 +392,7 @@ IPK_DEPS="libc, ${PKG_DEPENDS_IPK}"
 
 cat > "$IPK_BUILD_DIR/control/control" <<EOF
 Package: $PKG_NAME
-Version: ${PKG_VERSION}-${PKG_RELEASE}
+Version: ${PKG_FULL_VER}
 Depends: $IPK_DEPS
 Section: luci
 Architecture: $PKG_ARCH_IPK

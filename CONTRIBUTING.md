@@ -17,7 +17,7 @@ exact invocation CI uses.
 ```sh
 sh .github/workflows/package.sh
 # → dist/luci-app-prism-<version>-r<release>.apk
-# → dist/luci-app-prism_<version>-<release>_all.ipk
+# → dist/luci-app-prism_<version>-r<release>_all.ipk
 ```
 
 The `Makefile` is the single source of truth for package metadata
@@ -37,31 +37,40 @@ Output: `bin/packages/<arch>/base/luci-app-prism_*.apk`
 
 ```sh
 scp dist/luci-app-prism_*.apk root@192.168.1.1:/tmp/
-ssh root@192.168.1.1 'apk add --allow-untrusted /tmp/luci-app-prism_*.apk && service rpcd restart'
+ssh root@192.168.1.1 'apk add --allow-untrusted /tmp/luci-app-prism_*.apk && service rpcd reload'
 ```
 
 ## Versioning
 
-The git tag is the single source of truth for releases. Snapshots are
-derived from the most recent `v*` tag plus a commit-since-tag count, so
-the snapshot version is always honest about which release it follows.
+Full rules, including the apk and opkg format constraints, live in
+[`docs/versioning.md`](docs/versioning.md). Read that before changing
+anything in the packaging pipeline. The shapes:
 
-| Situation                                       | Example version |
+| Situation                                       | Example version              |
 |---|---|
-| Snapshot, N commits past `v0.1.0`               | `0.1.0_git7-r1` |
-| Snapshot, no `v*` tag yet (bootstrap)           | `0.1.0_pre7-r1` |
-| Tag build (CI from `v0.1.0`)                    | `0.1.0-r1`      |
-| Tag build (CI from `v0.1.0-r2`)                 | `0.1.0-r2`      |
+| Release (CI from tag `v0.1.0`)                  | `0.1.0-r1`                   |
+| Packaging re-release (CI from tag `v0.1.0-r2`)  | `0.1.0-r2`                   |
+| Snapshot past `v0.1.0`                          | `0.1.0_git20260913085134-r1` |
+| Snapshot, no `v*` tag yet (bootstrap)           | `0.1.0_pre20260913085134-r1` |
 
-APK suffix order puts `<tag>` < `<tag>_git<N>` < `<next-tag>`, so
-`apk upgrade` picks newer snapshots and never downgrades past the tag.
-`_git` is Alpine's conventional suffix for VCS snapshots taken after a
-release.
+Three rules carry most of it:
 
-`PKG_VERSION` in the `Makefile` is **not** consulted by the standalone
-builder once any `v*` tag exists — it's only used by the OpenWrt SDK
-build path. Keep it set to a sensible value (typically the next planned
-release).
+- `PKG_VERSION` / `PKG_RELEASE` in the `Makefile` are authoritative and
+  **trail** the timeline — they name the version most recently released.
+  The `v*` tag is the release decision, and `release.yml` fails the
+  release if the two disagree rather than overriding the Makefile.
+- The snapshot suffix is HEAD's **commit timestamp**, never a commit
+  count. A count collides across branches and moves backwards when a
+  branch is rebased.
+- `-r<N>` is the **packaging revision** and nothing else, for both
+  package formats. It is never a build counter.
+
+`version-check.sh` asserts these against apk's own parser and runs in
+both workflows. With an `apk` on PATH it also runs locally:
+
+```sh
+sh .github/workflows/version-check.sh
+```
 
 ## Releasing
 
@@ -71,31 +80,76 @@ release decision. Merges to `main` do not trigger releases.
 ```sh
 # After merging the changes that constitute the release to main:
 git checkout main && git pull
+$EDITOR Makefile            # PKG_VERSION:=0.2.0
+git commit -am "Release 0.2.0"
+git push
+
 git tag -a v0.2.0 -m "Release 0.2.0"
 git push origin v0.2.0
 ```
 
-No Makefile edit is required. Snapshots from the next commit on will be
-`0.2.0_git<N>-r1` automatically.
+Record the version being released in the Makefile first — the tag must
+match it, or `release.yml` fails the release rather than guessing which
+of the two is right. `PKG_RELEASE` resets to `1` whenever `PKG_VERSION`
+changes; bump only `PKG_RELEASE` for a packaging-only re-release of the
+same source, and tag that `v0.2.0-r2`.
+
+Snapshots from the next commit on are `0.2.0_git<timestamp>-r1`
+automatically.
 
 ## CI
 
 | Workflow | Trigger | Output |
 |---|---|---|
-| **Snapshot** | Push to any non-`main` branch | Asset replaced on the rolling `snapshot` pre-release (stable URL); archived as a workflow artifact for 30 days. |
+| **Snapshot** | Push to any non-`main` branch | Asset replaced on the rolling `snapshot` pre-release (stable URL); the exact build also archived as a workflow artifact for 30 days, which is what `push-to-router.sh` installs from. |
 | **Release**  | Push of a `v*` tag             | New immutable GitHub release at that tag, with APK and IPK assets. |
+| **Feed**     | After a successful Release run | Rebuilds the signed GitHub Pages feed from every `v*` release. |
 
-Both workflows live in `.github/workflows/` alongside `package.sh`.
+All three workflows live in `.github/workflows/` alongside the scripts
+they call.
+
+### What a snapshot is
+
+A build of a **development branch**, for testing a change before it
+merges. It is not a build of `main`, so the rolling asset can be behind
+`main` — merge a few PRs without pushing a branch and the stable URL
+still serves whatever branch pushed last.
+
+Each run produces two things:
+
+| | Lifetime | For |
+|---|---|---|
+| Rolling `snapshot` pre-release | until the next branch push replaces it | a stable install URL anyone can wget |
+| Per-commit workflow artifact | 30 days | testing one specific build; what `push-to-router.sh` installs |
+
+**`main` is excluded on purpose.** Building it would not make the
+rolling URL mean "latest code", because there is only one asset slot and
+`main` would compete with the branch someone is mid-test on — every merge
+clobbering their snapshot. Making it work properly means three coupled
+changes, not one: publish only from `main`, give the concurrency group a
+per-ref key (it is currently a single `snapshot` group with
+`cancel-in-progress`, so cross-ref builds would cancel each other), and
+teach `push-to-router.sh` to select a run by branch instead of taking the
+newest. Worth doing if you want an installable URL that tracks `main`;
+not worth it to fix a wording problem.
+
+Branch testing does not need the rolling asset — that is what the
+per-commit artifact is for.
 
 ## Repository layout
 
 ```
 .github/
 ├── actions/install-apk-tools/   # CI: build apk-tools 3.x
+├── actions/install-usign/       # CI: build OpenWrt's usign
 └── workflows/
     ├── package.sh               # Standalone APK + IPK builder
+    ├── version-check.sh         # Version scheme asserted against apk's parser
+    ├── feed.sh                  # Signed apk + opkg feed assembly
+    ├── release-notes.sh         # Shared release/snapshot notes body
     ├── snapshot.yml             # CI: snapshot on every branch push
-    └── release.yml              # CI: release on v* tag push
+    ├── release.yml              # CI: release on v* tag push
+    └── pages.yml                # CI: publish the feed to GitHub Pages
 Makefile                         # OpenWrt SDK build descriptor (luci.mk)
 htdocs/luci-static/resources/view/prism/
 ├── main.js                      # Host view — the tab shell

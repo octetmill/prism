@@ -5,13 +5,25 @@ name: Snapshot
 #
 #   https://github.com/routeweave/prism/releases/download/snapshot/luci-app-prism-snapshot.apk
 #
-# The APK/IPK version inside the package is <last-v*-tag>_git<N>-r<R>
-# (N = commits since the tag), so each commit produces a unique,
-# monotonically-increasing version that `apk upgrade` correctly recognises
-# as newer — and stays bounded between the previous and next release.
+# The APK/IPK version inside the package is
+# <last-v*-tag>_git<YYYYMMDDHHMMSS>-r<PKG_RELEASE>, where the timestamp is
+# HEAD's own committer date in UTC. Every branch publishes to the ONE rolling
+# asset below, so the version must be distinct per commit and must only ever
+# advance — which is why the suffix is a timestamp and not a commit count,
+# and why nothing here sets PRISM_RELEASE.
+#
+# See docs/versioning.md for the rules and the reasoning.
 
 on:
   push:
+    # `main` is excluded ON PURPOSE, not by oversight. A snapshot is a build
+    # of a development branch, for testing a change before it merges; the
+    # rolling asset below is a single slot, so building main would have every
+    # merge clobber the snapshot someone is mid-test on rather than make the
+    # URL mean "latest code". Doing it properly needs three coupled changes —
+    # publish only from main, give the concurrency group below a per-ref key,
+    # and teach push-to-router.sh to pick a run by branch. See CONTRIBUTING.md
+    # § "What a snapshot is" before changing this line.
     branches-ignore:
       - main
     paths-ignore:
@@ -40,8 +52,18 @@ jobs:
       - name: Install apk-tools
         uses: ./.github/actions/install-apk-tools
 
+      # No PRISM_RELEASE here on purpose. -r<N> is the packaging revision and
+      # belongs to the Makefile; snapshot ordering is carried by the commit
+      # timestamp in the version body instead. See package.sh's
+      # version-detection block.
       - name: Build packages
         run: .github/workflows/package.sh
+
+      - name: Check version against apk's parser
+        run: |
+          BUILT=$(basename "$(ls dist/*.apk | head -n1)" .apk)
+          BUILT="${BUILT#luci-app-prism-}"
+          .github/workflows/version-check.sh "$BUILT"
 
       - name: Stage snapshot assets with stable filenames
         id: stage
@@ -55,6 +77,22 @@ jobs:
           cp "${APK_SRC}.sha256"  snapshot/luci-app-prism-snapshot.apk.sha256
           cp "$IPK_SRC"           snapshot/luci-app-prism-snapshot.ipk
           cp "${IPK_SRC}.sha256"  snapshot/luci-app-prism-snapshot.ipk.sha256
+
+      # Per-commit archive under the version-stamped filenames. The rolling
+      # release asset below is overwritten by the next branch push, so this
+      # is the only way back to the exact bytes a given commit produced —
+      # and push-to-router.sh installs from it via `gh run download`.
+      - name: Archive this build
+        uses: actions/upload-artifact@v4
+        with:
+          name: luci-app-prism-snapshot-${{ github.sha }}
+          path: |
+            dist/*.apk
+            dist/*.apk.sha256
+            dist/*.ipk
+            dist/*.ipk.sha256
+          retention-days: 30
+          if-no-files-found: error
 
       - name: Publish to rolling snapshot pre-release
         env:
