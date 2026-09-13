@@ -118,28 +118,46 @@ done
 # mismatch, so the SDK build path (which reads PKG_VERSION verbatim) and the
 # tagged release can never disagree about what version this tree is.
 #
-# Snapshots are derived from the most recent v* tag plus a post-release
-# counter, so the snapshot version is always honest about which release it
-# follows. APK suffix ordering puts <tag> < <tag>_git<N> < <next-tag>, so
-# apk-upgrade picks newer snapshots and never downgrades past the tag.
-# (_git is Alpine's conventional suffix for VCS snapshots taken after a
-# release; _p reads as "upstream patch level" and would be misleading here.)
+# Snapshots are derived from the most recent v* tag plus the HEAD commit's
+# own UTC timestamp, so the snapshot version is always honest about which
+# release it follows. APK suffix ordering puts <tag> < <tag>_git<TS> <
+# <next-tag>, so apk-upgrade picks newer snapshots and never downgrades past
+# the tag. (_git is Alpine's conventional suffix for VCS snapshots taken
+# after a release; _p reads as "upstream patch level" and would be
+# misleading here.)
+#
+# THE SUFFIX IS A TIMESTAMP, NOT A COMMIT COUNT. A count encodes distance
+# rather than identity and moves BACKWARDS whenever history is rewritten:
+# rebasing or squashing a topic branch turns _git5 into _git1, and since
+# every branch publishes to one shared rolling asset, the later build then
+# reads as a downgrade. A commit timestamp only ever moves forward (a rebase
+# resets the committer date to now) and is distinct per commit, so ordering
+# needs no external tie-breaker. It is also the convention everywhere else:
+# Alpine spells it _git<date>, openwrt/packages uses PKG_SOURCE_DATE, and
+# luci.mk's findrev uses this very field (`git log -1 --format=%ct`).
+#
+# The committer date, not the build time: rebuilding a commit must yield the
+# identical version, and the version should be a function of the source.
+# Formatted by git itself rather than date(1) — `date --utc --date=@…` is
+# GNU-only and the BSD spelling differs.
 #
 # Priority:
 #   1. PRISM_VERSION env var — CI sets this when building from a v* tag.
 #      Value is the bare version (e.g. "0.1.0"), already checked against
 #      PKG_VERSION by release.yml.
-#   2. Otherwise, with at least one v* tag — <last-tag>_git<N> where N =
-#      commits since that tag. N=0 (HEAD is on the tag) drops the suffix so
-#      a local build at the tag matches the tagged release exactly.
-#   3. Otherwise (no v* tag yet) — <PKG_VERSION>_pre<N>, bootstrap before the
-#      first release; sorts before any 0.x.y tag.
+#   2. Otherwise, with at least one v* tag — <last-tag>_git<TS>. HEAD sitting
+#      exactly on the tag drops the suffix, so a local build at the tag
+#      matches the tagged release exactly.
+#   3. Otherwise (no v* tag yet) — <PKG_VERSION>_pre<TS>, bootstrap before the
+#      first release; _pre sorts before any 0.x.y tag under apk.
 #
-# PRISM_RELEASE overrides PKG_RELEASE on ALL THREE paths, not just the first.
-# snapshot.yml sets it to the CI run number so that two branches sitting at
-# the same commit-distance past the tag — which produce an identical _git<N>
-# body — still publish distinct, increasing versions instead of colliding on
-# the shared rolling asset.
+# PRISM_RELEASE overrides PKG_RELEASE on all three paths. It exists for
+# release.yml's v<X.Y.Z>-r<N> packaging-revision tags ONLY. Do not route a
+# build counter through it: -r<N> is the packaging revision — "the source is
+# unchanged, the packaging was fixed" — and stuffing a CI run number there
+# both asserts something false and makes the Makefile's own PKG_RELEASE
+# unrepresentable in a snapshot. Snapshot ordering belongs in the version
+# body, which is what the timestamp above is for.
 
 PKG_RELEASE="${PRISM_RELEASE:-$PKG_RELEASE}"
 
@@ -161,11 +179,19 @@ elif command -v git >/dev/null 2>&1 && git -C "$REPO_DIR" rev-parse --git-dir >/
 	# without it a tag on an unrelated branch could win and the commit
 	# count below would be counted against a tag HEAD never descended from.
 	LAST_TAG=$(git -C "$REPO_DIR" tag --list 'v[0-9]*' --merged HEAD --sort=-v:refname 2>/dev/null | head -1 || true)
+
+	# HEAD's committer date as UTC YYYYMMDDHHMMSS. `format-local` honours TZ,
+	# so TZ=UTC0 pins it regardless of the build host's zone — two builders
+	# in different zones must not label the same commit differently.
+	# `|| die` hangs off the substitution itself, not off a test of its
+	# result: under `set -e` a failing substitution aborts the script before
+	# any following test could run, so a `[ -n "$SNAP_TS" ]` guard would
+	# never fire and its diagnostic would never reach the log.
+	SNAP_TS=$(TZ=UTC0 git -C "$REPO_DIR" log -1 --format=%cd \
+		--date=format-local:%Y%m%d%H%M%S 2>/dev/null) \
+		|| die "could not read HEAD commit date (shallow clone? need fetch-depth: 0)"
+
 	if [ -n "$LAST_TAG" ]; then
-		# `|| die` on the substitution itself, not on a test of its result:
-		# under `set -e` a failing command substitution aborts the script
-		# before any following test can run, so a bare `[ -n "$POST_N" ]`
-		# guard can never fire and the diagnostic never reaches the log.
 		POST_N=$(git -C "$REPO_DIR" rev-list --count "${LAST_TAG}..HEAD" 2>/dev/null) \
 			|| die "could not count commits since ${LAST_TAG} (shallow clone? need fetch-depth: 0)"
 
@@ -191,15 +217,15 @@ elif command -v git >/dev/null 2>&1 && git -C "$REPO_DIR" rev-parse --git-dir >/
 				;;
 		esac
 
+		# POST_N is consulted only as a boolean: is HEAD the tagged commit?
+		# The suffix itself carries no count.
 		if [ "$POST_N" -eq 0 ]; then
 			PKG_VERSION="$BASE_VER"
 		else
-			PKG_VERSION="${BASE_VER}_git${POST_N}"
+			PKG_VERSION="${BASE_VER}_git${SNAP_TS}"
 		fi
 	else
-		PRE_N=$(git -C "$REPO_DIR" rev-list --count HEAD 2>/dev/null) \
-			|| die "could not count commits (shallow clone? need fetch-depth: 0)"
-		PKG_VERSION="${PKG_VERSION}_pre${PRE_N}"
+		PKG_VERSION="${PKG_VERSION}_pre${SNAP_TS}"
 	fi
 fi
 

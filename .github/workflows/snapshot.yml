@@ -5,17 +5,20 @@ name: Snapshot
 #
 #   https://github.com/routeweave/prism/releases/download/snapshot/luci-app-prism-snapshot.apk
 #
-# The APK/IPK version inside the package is <last-v*-tag>_git<N>-r<run>,
-# where N = commits since the tag and <run> is this workflow's run number.
+# The APK/IPK version inside the package is
+# <last-v*-tag>_git<YYYYMMDDHHMMSS>-r<PKG_RELEASE>, where the timestamp is
+# HEAD's own committer date in UTC.
 #
-# N alone encodes distance, not identity: two branches sitting the same
-# number of commits past the tag produce an identical _git<N> body, and
-# since every branch publishes to the ONE rolling asset below, a tester who
-# moved between them would see `apk add` report nothing to do. Carrying the
-# CI run number as the release component makes every snapshot build distinct
-# and strictly increasing, whichever branch it came from. The version body
-# still dominates the comparison, so a snapshot stays bounded between the
-# release it follows and the next one.
+# A commit COUNT was tried here first and is wrong twice over. It encodes
+# distance rather than identity, so two branches the same number of commits
+# past the tag produce an identical body — and since every branch publishes
+# to the ONE rolling asset below, a tester moving between them sees `apk add`
+# report nothing to do. Worse, a count moves backwards: rebasing or squashing
+# a branch turns _git5 into _git1 and the later build reads as a downgrade.
+# A commit timestamp is distinct per commit and only ever advances, so the
+# version body orders snapshots on its own, with no tie-breaker smuggled into
+# the packaging-revision field. The body still dominates the comparison, so a
+# snapshot stays bounded between the release it follows and the next one.
 
 on:
   push:
@@ -47,12 +50,11 @@ jobs:
       - name: Install apk-tools
         uses: ./.github/actions/install-apk-tools
 
+      # No PRISM_RELEASE here on purpose. -r<N> is the packaging revision and
+      # belongs to the Makefile; snapshot ordering is carried by the commit
+      # timestamp in the version body instead. See package.sh's
+      # version-detection block.
       - name: Build packages
-        env:
-          # Release component = CI run number, so snapshots from different
-          # branches at the same commit-distance never collide. See the
-          # header comment and package.sh's version-detection block.
-          PRISM_RELEASE: ${{ github.run_number }}
         run: .github/workflows/package.sh
 
       - name: Check version against apk's parser

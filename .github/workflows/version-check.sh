@@ -31,14 +31,14 @@ fail=0
 note() { printf '  %-34s %s\n' "$1" "$2"; }
 
 # --- versions the scheme is allowed to produce --------------------------------
-# Release, packaging re-release, snapshot, snapshot carrying a CI run number
-# as its release component, and the pre-first-release bootstrap shape.
+# Release, packaging re-release, snapshot (commit timestamp in the body), and
+# the pre-first-release bootstrap shape.
 VALID="
 0.9.0-r1
 0.9.0-r2
-0.9.0_git4-r1
-0.9.0_git4-r521
-0.9.0_pre7-r1
+0.9.0_git20260913085134-r1
+0.9.0_git20260913085134-r2
+0.9.0_pre20260913085134-r1
 0.10.0-r1
 "
 
@@ -52,18 +52,20 @@ INVALID="
 "
 
 # --- orderings the documented guarantee depends on ----------------------------
-# Each line is "A B" and must compare strictly A < B. Together these assert:
+# Each line is "A|B" and must compare strictly A < B. Together these assert:
 # a bootstrap build sorts below its release; a snapshot sorts above the
-# release it follows; snapshots advance with the commit count and with the
-# release component; and the next release outranks every snapshot of the
-# previous one.
+# release it follows; snapshots advance with the commit timestamp alone, with
+# no help from the release component; the next release outranks every
+# snapshot of the previous one; and the changeover from the old commit-count
+# suffix moves forward rather than backwards.
 ORDER="
-0.9.0_pre7-r1|0.9.0-r1
+0.9.0_pre20260913085134-r1|0.9.0-r1
 0.9.0-r1|0.9.0-r2
-0.9.0-r1|0.9.0_git1-r1
-0.9.0_git1-r1|0.9.0_git4-r1
-0.9.0_git4-r1|0.9.0_git4-r2
-0.9.0_git4-r521|0.10.0-r1
+0.9.0-r1|0.9.0_git20260913085134-r1
+0.9.0_git20260913085134-r1|0.9.0_git20260913090201-r1
+0.9.0_git20260913085134-r1|0.9.0_git20260914010000-r1
+0.9.0_git20260913085134-r1|0.10.0-r1
+0.9.0_git6-r4|0.9.0_git20260913085134-r1
 "
 
 printf 'Valid versions\n'
